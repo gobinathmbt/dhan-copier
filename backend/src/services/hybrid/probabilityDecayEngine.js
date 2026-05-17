@@ -26,9 +26,19 @@ function _safe(n, fb = 0) {
  * @param {Object} opts.currentDerivatives - derivativesEngine.analyze(...) for current ctx
  * @param {Object} opts.currentVwap      - { position, distance_pct }
  * @param {Object} [opts.currentVolumeAnalysis] - volumeAnalysisEngine.analyze(...) for current ctx
+ * @param {Object} [opts.currentOiAnalytics]    - oiAnalyticsEngine.analyze(...) for current ctx
+ * @param {Object} [opts.currentUtBot]          - utBotEngine.evaluate(...) for current ctx
  * @returns {Object} { decay (0..1), reasons, exit }
  */
-function evaluate({ trade, currentScore = null, currentDerivatives = null, currentVwap = null, currentVolumeAnalysis = null } = {}) {
+function evaluate({
+  trade,
+  currentScore = null,
+  currentDerivatives = null,
+  currentVwap = null,
+  currentVolumeAnalysis = null,
+  currentOiAnalytics = null,
+  currentUtBot = null,
+} = {}) {
   if (!trade) return { decay: 1, reasons: ['no trade'], exit: false };
 
   const reasons = [];
@@ -137,6 +147,49 @@ function evaluate({ trade, currentScore = null, currentDerivatives = null, curre
     if (snapshot.volume.zone !== opposingZone && currentVolumeAnalysis.zone.zone === opposingZone) {
       decay -= 0.18;
       reasons.push(`price entered opposing control area (${currentVolumeAnalysis.zone.zone})`);
+    }
+  }
+
+  // 9. UT Bot reversal — 5m UT Bot now opposes the trade direction
+  if (currentUtBot?.perTimeframe?.['5m']?.trend) {
+    const tf5 = currentUtBot.perTimeframe['5m'].trend;
+    const wantTrend = direction === 'bullish' ? 'bearish' : 'bullish';
+    const entry5 = snapshot?.utBot?.utBot5mTrend;
+    if (tf5 === wantTrend && entry5 !== wantTrend) {
+      decay -= 0.25;
+      reasons.push(`UT Bot 5m flipped to ${tf5}`);
+    }
+  }
+
+  // 10. OI velocity reversed against the trade
+  if (currentOiAnalytics?.diff) {
+    const ceVel = Number(currentOiAnalytics.diff.ceVelocity) || 0;
+    const peVel = Number(currentOiAnalytics.diff.peVelocity) || 0;
+    if (direction === 'bullish' && ceVel > 200 && peVel < 0) {
+      decay -= 0.2;
+      reasons.push(`CE writers piling in (vel ${ceVel.toFixed(0)}/s) while PE unwinding`);
+    }
+    if (direction === 'bearish' && peVel > 200 && ceVel < 0) {
+      decay -= 0.2;
+      reasons.push(`PE writers piling in (vel ${peVel.toFixed(0)}/s) while CE unwinding`);
+    }
+    // Aggressive against-direction OI build
+    if (currentOiAnalytics.regime === 'aggressive_short_buildup' && direction === 'bullish') {
+      decay -= 0.18; reasons.push('aggressive short buildup against long');
+    }
+    if (currentOiAnalytics.regime === 'aggressive_long_buildup' && direction === 'bearish') {
+      decay -= 0.18; reasons.push('aggressive long buildup against short');
+    }
+  }
+
+  // 11. OI absorption against direction (institutional defense forming)
+  if (currentOiAnalytics?.absorption?.detected) {
+    const side = currentOiAnalytics.absorption.side;
+    if (direction === 'bullish' && side === 'ce') {
+      decay -= 0.12; reasons.push('CE absorption forming bearish ceiling');
+    }
+    if (direction === 'bearish' && side === 'pe') {
+      decay -= 0.12; reasons.push('PE absorption forming bullish floor');
     }
   }
 

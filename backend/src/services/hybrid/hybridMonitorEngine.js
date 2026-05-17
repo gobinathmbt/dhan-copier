@@ -23,6 +23,8 @@ const probabilityScoringEngine = require('./probabilityScoringEngine');
 const derivativesEngine       = require('./derivativesEngine');
 const volumeAnalysisEngine    = require('./volumeAnalysisEngine');
 const tickDeltaClassifier     = require('./tickDeltaClassifier');
+const oiAnalyticsEngine       = require('./oiAnalyticsEngine');
+const utBotEngine             = require('./utBotEngine');
 const liquidityEngine         = require('./liquidityEngine');
 const volatilityRegimeEngine  = require('./volatilityRegimeEngine');
 const marketRegimeEngine      = require('./marketRegimeEngine');
@@ -279,6 +281,20 @@ async function decide({
   } catch (_) {}
   const volumeAnalysis = volumeAnalysisEngine.analyze({ candles5m, candles15m, spotPrice, liveTickDelta });
 
+  // OI analytics — re-uses the per-session snapshot history maintained by the
+  // entry engine. We re-analyze with direction so we get a directional score.
+  const oiAnalyticsCur = oiAnalyticsEngine.analyze({
+    primaryStrikes, atmStrike, spotPrice,
+    sessionId: trade?.sessionId,
+    direction: trade.signal === 'BUY_CE' ? 'bullish' : 'bearish',
+  });
+
+  // UT Bot read on current TF stack
+  const utBotCur = utBotEngine.evaluate(
+    algorithmOutputs?.multiTimeframe,
+    trade.signal === 'BUY_CE' ? 'bullish' : 'bearish'
+  );
+
   const direction = trade.signal === 'BUY_CE' ? 'bullish' : 'bearish';
   const ctxNow = {
     session: sessionPhase, marketRegime, volatilityRegime, liquidity,
@@ -306,6 +322,8 @@ async function decide({
     currentDerivatives: derivatives,
     currentVwap: payload?.vwap_analysis,
     currentVolumeAnalysis: volumeAnalysis,
+    currentOiAnalytics: oiAnalyticsCur,
+    currentUtBot: utBotCur,
   });
   hybridLogger.info({
     sessionId, tradeId: trade._id, event: 'monitor_decay',
@@ -320,6 +338,10 @@ async function decide({
       deltaSource: volumeAnalysis?.deltaSource,
       zone: volumeAnalysis?.zone?.zone,
       vsa: volumeAnalysis?.vsa?.pattern,
+      oiRegime: oiAnalyticsCur?.regime,
+      oiCeVel: oiAnalyticsCur?.diff?.ceVelocity,
+      oiPeVel: oiAnalyticsCur?.diff?.peVelocity,
+      utBot5m: utBotCur?.perTimeframe?.['5m']?.trend,
     },
   });
 

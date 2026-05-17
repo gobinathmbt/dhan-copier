@@ -58,28 +58,45 @@ function _moneynessFromAtm(strikeVal, atmStrike, direction) {
  * @param {string} opts.direction
  * @param {string} [opts.tradeType='SCALP']
  * @param {number} opts.atmStrike
- * @param {Array}  opts.primaryStrikes  - the focus chain
+ * @param {Array}  opts.primaryStrikes  - the focus chain (ATM ± up to 6)
+ * @param {number} [opts.openingStrike] - day's opening reference strike (PRIMARY anchor)
  * @param {number} [opts.maxPain]
  * @param {number} [opts.minPremium=20]
+ * @param {number} [opts.windowHalf=6]  - allowed distance (in strikes) from openingStrike
+ *
+ * Strategy:
+ *   - Anchor on `openingStrike` when provided. Restrict candidates to
+ *     openingStrike ± `windowHalf` × strikeStep (default 50).
+ *   - Reject strikes outside that window even if they look attractive — that
+ *     keeps execution within the day's institutional range.
+ *   - Within the window, score by delta band, distance to ATM, max-pain
+ *     proximity, premium, OI.
  */
 function select({
   direction,
   tradeType = 'SCALP',
   atmStrike,
   primaryStrikes = [],
+  openingStrike = null,
   maxPain = null,
   minPremium = 20,
+  windowHalf = 6,
 } = {}) {
   if (!primaryStrikes.length || !atmStrike) {
     return { ok: false, reason: 'no chain or atm', strike: null };
   }
 
+  const strikeStep = 50;
+  const anchor = Number.isFinite(openingStrike) ? openingStrike : atmStrike;
+  const windowLow  = anchor - windowHalf * strikeStep;
+  const windowHigh = anchor + windowHalf * strikeStep;
+
   const targetMin = tradeType === 'SWING' ? 0.55 : 0.40;
   const targetMax = tradeType === 'SWING' ? 0.75 : 0.60;
 
-  // Score every candidate
+  // Score every candidate within the day's institutional window.
   const candidates = primaryStrikes
-    .filter(s => s && Number.isFinite(s.strike))
+    .filter(s => s && Number.isFinite(s.strike) && s.strike >= windowLow && s.strike <= windowHigh)
     .map(s => {
       const ltp = _ltp(s, direction);
       const oi  = _oi(s, direction);
@@ -107,10 +124,15 @@ function select({
         else if (distFromAtm <= 100) score += 5;
         else score -= 5;
       } else {
-        // SWING — modestly ITM preferred
         if (moneyness === 'ITM' && distFromAtm <= 100) score += 15;
         else if (moneyness === 'ATM') score += 5;
       }
+
+      // Distance from opening strike (anchor)
+      const distFromAnchor = Math.abs(s.strike - anchor);
+      if (distFromAnchor <= strikeStep) score += 8;
+      else if (distFromAnchor <= 2 * strikeStep) score += 3;
+      else if (distFromAnchor >= 5 * strikeStep) score -= 8;
 
       // Max-pain avoidance
       if (Number.isFinite(maxPain) && Math.abs(s.strike - maxPain) < 25) {
@@ -118,13 +140,17 @@ function select({
         reasons.push(`within 25 of max-pain ${maxPain}`);
       }
 
-      return { strike: s.strike, ltp, oi, delta: dlt, moneyness, score, reasons };
+      return {
+        strike: s.strike, ltp, oi, delta: dlt, moneyness, score,
+        distFromAtm, distFromAnchor, reasons,
+      };
     })
     .sort((a, b) => b.score - a.score);
 
   const best = candidates[0];
   if (!best || best.score <= 0) {
-    return { ok: false, reason: 'no viable strike', strike: null, candidates };
+    return { ok: false, reason: 'no viable strike in window', strike: null, candidates,
+             window: { low: windowLow, high: windowHigh, anchor } };
   }
 
   return {
@@ -136,6 +162,9 @@ function select({
     ltp: best.ltp,
     oi: best.oi,
     score: best.score,
+    distFromAnchor: best.distFromAnchor,
+    distFromAtm: best.distFromAtm,
+    window: { low: windowLow, high: windowHigh, anchor },
     reasoning: best.reasons.join(' | '),
     candidates: candidates.slice(0, 5),
   };

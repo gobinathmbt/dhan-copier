@@ -33,6 +33,10 @@ const liquidityEngine          = require('./liquidityEngine');
 const derivativesEngine        = require('./derivativesEngine');
 const volumeAnalysisEngine     = require('./volumeAnalysisEngine');
 const tickDeltaClassifier      = require('./tickDeltaClassifier');
+const oiAnalyticsEngine        = require('./oiAnalyticsEngine');
+const utBotEngine              = require('./utBotEngine');
+const strategySelector         = require('./strategySelector');
+const confidenceScoringEngine  = require('./confidenceScoringEngine');
 const probabilityScoringEngine = require('./probabilityScoringEngine');
 const riskEngine               = require('./riskEngine');
 const executionQualityEngine   = require('./executionQualityEngine');
@@ -49,7 +53,7 @@ const ScalpingTrade            = require('../../models/ScalpingTrade');
 // Helpers
 // ────────────────────────────────────────────────────────────────────────────
 
-function _focusStrikes(atmStrike, step = 50, halfWidth = 4) {
+function _focusStrikes(atmStrike, step = 50, halfWidth = 6) {
   if (!Number.isFinite(atmStrike)) return [];
   const out = [];
   for (let i = -halfWidth; i <= halfWidth; i++) out.push(atmStrike + i * step);
@@ -347,6 +351,39 @@ async function decide({
     });
   }
 
+  // ── Pipeline step 7c: OI analytics (velocity, accel, migration, absorption) ──
+  // Stateful — keeps the previous N snapshots per session so the next call
+  // computes Δ velocity & acceleration. Direction is decided below; we run
+  // analyze() once without direction here so the snapshot history is recorded
+  // even when we later abort the cycle. We re-run with direction inside the
+  // confidence scorer block.
+  const oiAnalytics0 = oiAnalyticsEngine.analyze({
+    primaryStrikes, atmStrike, spotPrice, sessionId,
+  });
+  if (oiAnalytics0) {
+    hybridLogger.info({
+      sessionId, event: 'oi_analytics',
+      message: `regime=${oiAnalytics0.regime} ` +
+               `peVel=${oiAnalytics0.diff?.peVelocity?.toFixed(0) ?? '-'} ` +
+               `ceVel=${oiAnalytics0.diff?.ceVelocity?.toFixed(0) ?? '-'} ` +
+               `migrPe=${oiAnalytics0.migration?.pe} migrCe=${oiAnalytics0.migration?.ce} ` +
+               `absorption=${oiAnalytics0.absorption?.detected ? oiAnalytics0.absorption.side : 'no'}`,
+      data: {
+        snapshotsHeld: oiAnalytics0.snapshotsHeld,
+        regime: oiAnalytics0.regime,
+        diff: oiAnalytics0.diff && {
+          ceAdd: oiAnalytics0.diff.ceAdd, ceCut: oiAnalytics0.diff.ceCut,
+          peAdd: oiAnalytics0.diff.peAdd, peCut: oiAnalytics0.diff.peCut,
+          ceVelocity: oiAnalytics0.diff.ceVelocity, peVelocity: oiAnalytics0.diff.peVelocity,
+        },
+        accel: oiAnalytics0.accel,
+        migration: oiAnalytics0.migration,
+        concentration: oiAnalytics0.concentration,
+        absorption: oiAnalytics0.absorption,
+      },
+    });
+  }
+
   // ── Pipeline step 8: Decide direction ────────────────────────────────
   // Prefer derivatives bias if strong; fall back to market regime bias.
   let direction = derivatives.overallBias;
@@ -406,6 +443,82 @@ async function decide({
     });
   }
 
+  // ── Pipeline step 9b: UT Bot evaluation (per-TF) ─────────────────────
+  // Treated as execution-timing confirmation only — never the primary signal.
+  const utBot = utBotEngine.evaluate(algorithmOutputs?.multiTimeframe, direction);
+  hybridLogger.info({
+    sessionId, event: 'ut_bot',
+    message: `score=${utBot.score} aligned=${utBot.aligned} ${utBot.reasoning}`,
+    data: utBot,
+  });
+
+  // ── Pipeline step 9c: OI analytics with direction (qualityScore) ─────
+  // Re-analyze with direction so we get the directional qualityScore for
+  // the confidence engine. The internal snapshot history is already in place.
+  const oiAnalytics = oiAnalyticsEngine.analyze({
+    primaryStrikes, atmStrike, spotPrice, sessionId, direction,
+  }) || oiAnalytics0;
+
+  // ── Pipeline step 9d: Strategy selection ─────────────────────────────
+  // Picks SCALPING / INTRADAY_MOMENTUM / MEAN_REVERSION based on regime,
+  // volatility and session phase. Returns target / SL / max-hold / minScore.
+  const strategy = strategySelector.select({
+    marketRegime, volatilityRegime, session: sessionPhase, settings, derivatives,
+  });
+  hybridLogger.info({
+    sessionId, event: 'strategy',
+    message: `${strategy.strategy} → tgt=${strategy.targetPoints}pts sl=${strategy.slPoints}pts hold=${strategy.maxHoldSec}s minScore=${strategy.minScore}`,
+    data: strategy,
+  });
+
+  // Strategy may force-block if regime isn't compatible. But we already let
+  // marketRegime gate earlier; this is the secondary check.
+  if (Array.isArray(strategy.allowedRegimes) && marketRegime?.regime
+      && !strategy.allowedRegimes.includes(marketRegime.regime)) {
+    return _noTrade(`Strategy ${strategy.strategy} disallows regime ${marketRegime.regime}`);
+  }
+
+  // UT Bot requirement — strategies can demand it.
+  if (strategy.utBotRequired && !utBot.aligned) {
+    return _noTrade(`Strategy ${strategy.strategy} needs UT Bot alignment but 5m/15m disagree (utScore ${utBot.score})`);
+  }
+
+  // ── Pipeline step 9e: Confidence scoring (institutional weights) ─────
+  // Uses the spec weights: OI 25 / Orderflow 20 / VWAP 15 / Structure 10
+  // / Volume 10 / Liquidity 5 / Breadth 5 / Futures 5 / UT Bot 5.
+  const confidence = confidenceScoringEngine.score({
+    direction,
+    oiAnalytics,
+    volumeAnalysis,
+    vwap: payload?.vwap_analysis,
+    smc: algorithmOutputs?.smartMoneyConcepts,
+    liquidity,
+    marketInternals: algorithmOutputs?.marketInternals,
+    derivatives,
+    utBot,
+    minScore: strategy.minScore,
+  });
+  hybridLogger.info({
+    sessionId, event: 'confidence',
+    message: confidence.reasoning,
+    data: {
+      direction, total: confidence.score, tier: confidence.tier, allowed: confidence.allowed,
+      perPillar: Object.fromEntries(Object.entries(confidence.parts || {}).map(([k, v]) => [k, v.score])),
+    },
+  });
+
+  if (!confidence.allowed) {
+    return _noTrade(`Confidence ${confidence.score} below ${strategy.strategy} threshold ${strategy.minScore}`, {
+      hybridScore: scoreResult, confidence, strategy,
+    });
+  }
+
+  // Tier guard: SCALPING is only allowed in 'scalp_only' tier or above. Higher-
+  // RR strategies need 'standard' (75+) or 'aggressive' (85+).
+  if (strategy.strategy === 'INTRADAY_MOMENTUM' && confidence.tier === 'scalp_only') {
+    return _noTrade(`INTRADAY_MOMENTUM requires standard tier (≥75); got ${confidence.score} (${confidence.tier})`);
+  }
+
   // ── Pipeline step 10: Hard requirement — risk engine OK ──────────────
   if (!risk.allowEntries) {
     return _noTrade(`Risk engine blocks: ${risk.reasoning}`);
@@ -415,31 +528,44 @@ async function decide({
   }
 
   // ── Pipeline step 11: Strike selection ───────────────────────────────
-  const tradeType = _decideTradeType({ marketRegime, volatilityRegime, settings, sessionPhase });
+  // Trade type comes from the strategy; opening strike (if known) anchors the
+  // selection within ±6 strikes of the day's institutional reference.
+  const tradeType = strategy.tradeType;
+  let openingStrike = null;
+  try {
+    const profSession = require('../professionalTrader.service').getMarketSession();
+    openingStrike = Number(profSession?.openingStrike) || null;
+  } catch (_) {}
   const strikeRes = strikeSelector.select({
     direction,
     tradeType,
     atmStrike,
     primaryStrikes,
+    openingStrike,
     maxPain: payload?.options_chain?.max_pain ?? payload?.options_chain?.max_pain_strike,
     minPremium: Number(settings?.minEntryPremium) || 30,
+    windowHalf: 6,
   });
   if (!strikeRes.ok) {
     return _noTrade(`Strike selection failed: ${strikeRes.reason}`);
   }
   hybridLogger.info({
     sessionId, event: 'strike',
-    message: `strike=${strikeRes.strike} ${strikeRes.optionType} (${strikeRes.moneyness}) delta=${strikeRes.delta?.toFixed(2)} ltp=${strikeRes.ltp}`,
+    message: `strike=${strikeRes.strike} ${strikeRes.optionType} (${strikeRes.moneyness}) ` +
+             `delta=${strikeRes.delta?.toFixed(2)} ltp=${strikeRes.ltp} ` +
+             `anchor=${strikeRes.window?.anchor} dist=${strikeRes.distFromAnchor}pts`,
     data: strikeRes,
   });
 
   // ── Pipeline step 12: ATR target sanity ──────────────────────────────
-  const targetPoints = Number(settings?.targetPoints) || 10;
+  // Use the STRATEGY's target — not the global setting — so a momentum trade
+  // doesn't get rejected for a tight scalp ATR window.
+  const targetPoints = strategy.targetPoints;
   const atrAnalysis = atrService.getATRAnalysis(candles1m, candles5m, targetPoints, strikeRes.ltp);
   const atrConfirms = atrService.atrConfirmsEntry(atrAnalysis);
   hybridLogger.info({
     sessionId, event: 'atr',
-    message: `atr=${atrAnalysis.primary_atr} confirms=${atrConfirms}`,
+    message: `atr=${atrAnalysis.primary_atr} confirms=${atrConfirms} target=${targetPoints}pts`,
     data: atrAnalysis,
   });
   if (!atrConfirms && settings?.enableATRConfirmation !== false) {
@@ -517,7 +643,7 @@ async function decide({
     enabled: settings?.enableHybridAIAdvisory === true,
   });
 
-  let confidence = _scoreToConfidence(scoreResult.score);
+  let confidenceNum = _scoreToConfidence(confidence.score);
   let lots = sizing.lots;
   if (advisory) {
     if (advisory.advise === 'BLOCK') {
@@ -526,7 +652,7 @@ async function decide({
     if (advisory.advise === 'REDUCE_SIZE') {
       lots = Math.max(1, Math.floor(lots * (advisory.size_factor || 0.75)));
     }
-    confidence = Math.max(1, Math.min(10, confidence + (advisory.confidence_adjustment || 0)));
+    confidenceNum = Math.max(1, Math.min(10, confidenceNum + (advisory.confidence_adjustment || 0)));
     hybridLogger.info({
       sessionId, event: 'ai_advisory',
       message: `${advisory.advise} (${advisory.trigger}) — conf±${advisory.confidence_adjustment} sizeF=${advisory.size_factor}`,
@@ -539,20 +665,23 @@ async function decide({
   lots = Math.max(1, Math.min(maxLots, lots));
 
   // ── Build the decision ───────────────────────────────────────────────
-  const slPoints = Number(settings?.slPoints) || 10;
-  const targetOut = Number(settings?.targetPoints) || 10;
-  const expectedPoints = tradeType === 'SWING'
-    ? Math.max(targetOut * 3, 30)
+  // Use the STRATEGY's target / SL / max-hold rather than raw settings —
+  // those apply to scalp-only setups.
+  const slPoints = strategy.slPoints;
+  const targetOut = strategy.targetPoints;
+  const expectedPoints = strategy.tradeType === 'SWING'
+    ? Math.max(targetOut, 30)
     : targetOut;
-  const maxHoldSeconds = tradeType === 'SWING'
-    ? (Number(settings?.swingMaxHoldMinutes) || 15) * 60
-    : (Number(settings?.maxHoldTimeSeconds) || 180);
+  const maxHoldSeconds = strategy.maxHoldSec;
 
   // Snapshot — saved on the trade for monitor's decay engine
   const hybridSnapshot = {
     score: scoreResult.score,
+    confidenceScore: confidence.score,
+    confidenceTier: confidence.tier,
     grade: grade.grade,
     tradeType,
+    strategy: strategy.strategy,
     derivativesScore: derivatives.directionScore,
     marketRegime: marketRegime.regime,
     volatilityState: volatilityRegime.state,
@@ -576,10 +705,31 @@ async function decide({
       deltaSource:  volumeAnalysis.deltaSource,
       zone:         volumeAnalysis.zone?.zone,
     } : null,
+    // OI context — velocities, regime, migration at entry time
+    oi: oiAnalytics ? {
+      regime:       oiAnalytics.regime,
+      qualityScore: oiAnalytics.qualityScore,
+      ceVelocity:   oiAnalytics.diff?.ceVelocity,
+      peVelocity:   oiAnalytics.diff?.peVelocity,
+      migrationCe:  oiAnalytics.migration?.ce,
+      migrationPe:  oiAnalytics.migration?.pe,
+      cePeakStrike: oiAnalytics.migration?.cePeakStrikeNow,
+      pePeakStrike: oiAnalytics.migration?.pePeakStrikeNow,
+      absorption:   oiAnalytics.absorption?.detected ? oiAnalytics.absorption.side : null,
+    } : null,
+    // UT Bot snapshot — used to detect mid-trade reversal
+    utBot: utBot ? {
+      score:         utBot.score,
+      aligned:       utBot.aligned,
+      utBot1mTrend:  utBot.perTimeframe?.['1m']?.trend,
+      utBot5mTrend:  utBot.perTimeframe?.['5m']?.trend,
+      utBot15mTrend: utBot.perTimeframe?.['15m']?.trend,
+      utBot30mTrend: utBot.perTimeframe?.['30m']?.trend,
+    } : null,
   };
 
   const reasoning = [
-    `[hybrid:${grade.grade}/${tradeType}]`,
+    `[hybrid:${grade.grade}/${strategy.strategy}/${tradeType}]`,
     `regime=${marketRegime.regime}`,
     `vol=${volatilityRegime.state}`,
     `liq=${liquidity.health}`,
@@ -587,20 +737,25 @@ async function decide({
     volumeAnalysis ? `vp=${volumeAnalysis.acceptance}/${volumeAnalysis.vsa?.pattern || 'na'}` : null,
     volumeAnalysis?.delta ? `delta=${volumeAnalysis.delta.bias}(${volumeAnalysis.delta.cvdPctLong}%)` : null,
     volumeAnalysis?.zone?.zone && volumeAnalysis.zone.zone !== 'neutral' ? `zone=${volumeAnalysis.zone.zone}` : null,
-    `score=${scoreResult.score}`,
+    oiAnalytics ? `oi=${oiAnalytics.regime}/q${oiAnalytics.qualityScore ?? '-'}` : null,
+    utBot ? `ut=${utBot.score}` : null,
+    `confidence=${confidence.score}(${confidence.tier})`,
     advisory ? `advisory=${advisory.advise}` : null,
   ].filter(Boolean).join(' | ');
 
   const out = {
     signal: direction === 'bullish' ? 'BUY_CE' : 'BUY_PE',
     trade_type: tradeType,
+    strategy: strategy.strategy,
     strike: strikeRes.strike,
     option_type: strikeRes.optionType,                  // 'CE' or 'PE' (not ATM/ITM/OTM — caller maps)
     moneyness: strikeRes.moneyness,                     // 'ATM' / 'ITM' / 'OTM'
     entry_premium_estimate: Number(strikeRes.ltp.toFixed(2)),
     expected_points: expectedPoints,
     min_target_achievable: !!atrConfirms,
-    confidence,
+    confidence: confidenceNum,
+    confidenceScore: confidence.score,
+    confidenceTier: confidence.tier,
     risks: advisory?.warnings || [],
     reasoning,
     lots_suggested: lots,
@@ -614,15 +769,22 @@ async function decide({
     hybridSnapshot,
     hybridDetails: {
       sessionPhase, volatilityRegime, marketRegime, marketStructure,
-      liquidity, derivatives, volumeAnalysis, scoreResult, risk, sizing, grade, exec, atrAnalysis,
+      liquidity, derivatives, volumeAnalysis, oiAnalytics, utBot, strategy,
+      scoreResult, confidence, risk, sizing, grade, exec, atrAnalysis,
       strike: strikeRes, advisory,
     },
   };
 
   hybridLogger.info({
     sessionId, event: 'decision',
-    message: `${out.signal} ${out.strike}${out.option_type} lots=${out.lots_suggested} grade=${grade.grade} score=${scoreResult.score}`,
-    data: { signal: out.signal, strike: out.strike, type: out.option_type, lots: out.lots_suggested, score: scoreResult.score, grade: grade.grade, reasoning },
+    message: `${out.signal} ${out.strike}${out.option_type} lots=${out.lots_suggested} ` +
+             `${strategy.strategy} grade=${grade.grade} confidence=${confidence.score}(${confidence.tier})`,
+    data: {
+      signal: out.signal, strike: out.strike, type: out.option_type, lots: out.lots_suggested,
+      strategy: strategy.strategy, grade: grade.grade,
+      confidenceScore: confidence.score, tier: confidence.tier,
+      tradeType, reasoning,
+    },
   });
 
   return out;
