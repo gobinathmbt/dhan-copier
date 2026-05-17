@@ -31,6 +31,7 @@ const marketRegimeEngine       = require('./marketRegimeEngine');
 const marketStructureEngine    = require('./marketStructureEngine');
 const liquidityEngine          = require('./liquidityEngine');
 const derivativesEngine        = require('./derivativesEngine');
+const volumeAnalysisEngine     = require('./volumeAnalysisEngine');
 const probabilityScoringEngine = require('./probabilityScoringEngine');
 const riskEngine               = require('./riskEngine');
 const executionQualityEngine   = require('./executionQualityEngine');
@@ -296,6 +297,40 @@ async function decide({
     data: derivatives,
   });
 
+  // ── Pipeline step 7b: Volume analysis (FRVP + VSA + time-volume) ─────
+  // Volume tells the truth behind the candle. FRVP reveals the price levels
+  // institutions defend; VSA shows whether the latest candle has effort
+  // matching its result; time-volume confirms recency of activity.
+  const volumeAnalysis = volumeAnalysisEngine.analyze({
+    candles5m, candles15m, spotPrice,
+  });
+  if (volumeAnalysis) {
+    hybridLogger.info({
+      sessionId, event: 'volume_analysis',
+      message:
+        `acceptance=${volumeAnalysis.acceptance} ` +
+        `poc=${volumeAnalysis.frvp?.pocPrice} ` +
+        `vsa=${volumeAnalysis.vsa?.pattern || 'n/a'} ` +
+        `vol=${volumeAnalysis.timeVolume?.state || 'n/a'} (${volumeAnalysis.timeVolume?.ratio || '-'}x)`,
+      data: {
+        acceptance: volumeAnalysis.acceptance,
+        poc: volumeAnalysis.frvp?.pocPrice,
+        vaHigh: volumeAnalysis.frvp?.vaHigh,
+        vaLow: volumeAnalysis.frvp?.vaLow,
+        nearestSupport: volumeAnalysis.nearestSupport?.price,
+        nearestResistance: volumeAnalysis.nearestResistance?.price,
+        timeVolume: volumeAnalysis.timeVolume,
+        vsa: volumeAnalysis.vsa,
+      },
+    });
+  } else {
+    hybridLogger.info({
+      sessionId, event: 'volume_analysis',
+      message: 'no_volume_profile (insufficient candles)',
+      data: {},
+    });
+  }
+
   // ── Pipeline step 8: Decide direction ────────────────────────────────
   // Prefer derivatives bias if strong; fall back to market regime bias.
   let direction = derivatives.overallBias;
@@ -330,6 +365,7 @@ async function decide({
     derivatives,
     vwap: payload?.vwap_analysis,
     volumeOI: payload?.volume_orderflow,
+    volumeAnalysis,                                     // FRVP + VSA + time-volume
     orderFlow: algorithmOutputs?.orderFlow,
     ivPercentile: payload?.options_chain?.iv_percentile,
     vix,
@@ -509,6 +545,16 @@ async function decide({
     capitalMode: risk.capitalMode,
     sizingFactors: sizing.factors,
     capturedAt: new Date().toISOString(),
+    // Volume context — used by decay analysis to detect FRVP flips
+    volume: volumeAnalysis ? {
+      acceptance: volumeAnalysis.acceptance,
+      poc:    volumeAnalysis.frvp?.pocPrice,
+      vaHigh: volumeAnalysis.frvp?.vaHigh,
+      vaLow:  volumeAnalysis.frvp?.vaLow,
+      vsaPattern: volumeAnalysis.vsa?.pattern,
+      vsaBias:    volumeAnalysis.vsa?.bias,
+      volState:   volumeAnalysis.timeVolume?.state,
+    } : null,
   };
 
   const reasoning = [
@@ -517,6 +563,7 @@ async function decide({
     `vol=${volatilityRegime.state}`,
     `liq=${liquidity.health}`,
     `der=${derivatives.overallBias}(${derivatives.directionScore})`,
+    volumeAnalysis ? `vp=${volumeAnalysis.acceptance}/${volumeAnalysis.vsa?.pattern || 'na'}` : null,
     `score=${scoreResult.score}`,
     advisory ? `advisory=${advisory.advise}` : null,
   ].filter(Boolean).join(' | ');
@@ -544,7 +591,7 @@ async function decide({
     hybridSnapshot,
     hybridDetails: {
       sessionPhase, volatilityRegime, marketRegime, marketStructure,
-      liquidity, derivatives, scoreResult, risk, sizing, grade, exec, atrAnalysis,
+      liquidity, derivatives, volumeAnalysis, scoreResult, risk, sizing, grade, exec, atrAnalysis,
       strike: strikeRes, advisory,
     },
   };

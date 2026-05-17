@@ -21,6 +21,7 @@ const positionStateMachine    = require('./positionStateMachine');
 const probabilityDecayEngine  = require('./probabilityDecayEngine');
 const probabilityScoringEngine = require('./probabilityScoringEngine');
 const derivativesEngine       = require('./derivativesEngine');
+const volumeAnalysisEngine    = require('./volumeAnalysisEngine');
 const liquidityEngine         = require('./liquidityEngine');
 const volatilityRegimeEngine  = require('./volatilityRegimeEngine');
 const marketRegimeEngine      = require('./marketRegimeEngine');
@@ -263,6 +264,7 @@ async function decide({
     spotPrice,
     atmStrike,
   });
+  const volumeAnalysis = volumeAnalysisEngine.analyze({ candles5m, candles15m, spotPrice });
 
   const direction = trade.signal === 'BUY_CE' ? 'bullish' : 'bearish';
   const ctxNow = {
@@ -273,6 +275,7 @@ async function decide({
     derivatives,
     vwap: payload?.vwap_analysis,
     volumeOI: payload?.volume_orderflow,
+    volumeAnalysis,
     orderFlow: algorithmOutputs?.orderFlow,
     ivPercentile: payload?.options_chain?.iv_percentile,
     vix,
@@ -289,11 +292,18 @@ async function decide({
     currentScore,
     currentDerivatives: derivatives,
     currentVwap: payload?.vwap_analysis,
+    currentVolumeAnalysis: volumeAnalysis,
   });
   hybridLogger.info({
     sessionId, tradeId: trade._id, event: 'monitor_decay',
     message: `decay=${decay.decay} ${decay.reasoning}`,
-    data: { decay: decay.decay, reasons: decay.reasons, scoreNow: currentScore.score },
+    data: {
+      decay: decay.decay,
+      reasons: decay.reasons,
+      scoreNow: currentScore.score,
+      acceptance: volumeAnalysis?.acceptance,
+      vsa: volumeAnalysis?.vsa?.pattern,
+    },
   });
 
   if (decay.exit) {

@@ -25,9 +25,10 @@ function _safe(n, fb = 0) {
  * @param {Object} opts.currentScore     - probabilityScoringEngine.score(...) result for current ctx
  * @param {Object} opts.currentDerivatives - derivativesEngine.analyze(...) for current ctx
  * @param {Object} opts.currentVwap      - { position, distance_pct }
+ * @param {Object} [opts.currentVolumeAnalysis] - volumeAnalysisEngine.analyze(...) for current ctx
  * @returns {Object} { decay (0..1), reasons, exit }
  */
-function evaluate({ trade, currentScore = null, currentDerivatives = null, currentVwap = null } = {}) {
+function evaluate({ trade, currentScore = null, currentDerivatives = null, currentVwap = null, currentVolumeAnalysis = null } = {}) {
   if (!trade) return { decay: 1, reasons: ['no trade'], exit: false };
 
   const reasons = [];
@@ -74,6 +75,35 @@ function evaluate({ trade, currentScore = null, currentDerivatives = null, curre
   if (currentScore && _safe(currentScore.weightedScore, 50) < 45) {
     decay -= 0.2;
     reasons.push(`tier2 weighted ${currentScore.weightedScore}`);
+  }
+
+  // 5. FRVP acceptance flipped against us
+  //    - long with entry above_va that is now below_va → buyers lost the area
+  //    - short with entry below_va that is now above_va → sellers lost the area
+  if (currentVolumeAnalysis && snapshot?.volume?.acceptance) {
+    const before = snapshot.volume.acceptance;
+    const after  = currentVolumeAnalysis.acceptance;
+    if (direction === 'bullish' && before !== 'below_va' && after === 'below_va') {
+      decay -= 0.25;
+      reasons.push(`FRVP acceptance flipped to below_va (was ${before})`);
+    }
+    if (direction === 'bearish' && before !== 'above_va' && after === 'above_va') {
+      decay -= 0.25;
+      reasons.push(`FRVP acceptance flipped to above_va (was ${before})`);
+    }
+  }
+
+  // 6. VSA pattern actively against us on the latest candle
+  if (currentVolumeAnalysis?.vsa?.bias && currentVolumeAnalysis.vsa.bias !== 'neutral'
+      && currentVolumeAnalysis.vsa.bias !== direction) {
+    const strength = Number(currentVolumeAnalysis.vsa.strength) || 0;
+    if (strength >= 70) {
+      decay -= 0.2;
+      reasons.push(`VSA ${currentVolumeAnalysis.vsa.pattern} against ${direction}`);
+    } else if (strength >= 50) {
+      decay -= 0.1;
+      reasons.push(`VSA weak ${currentVolumeAnalysis.vsa.pattern} against ${direction}`);
+    }
   }
 
   decay = Number(Math.max(0, Math.min(1, decay)).toFixed(2));

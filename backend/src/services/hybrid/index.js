@@ -26,6 +26,7 @@ module.exports = {
   marketStructureEngine:    require('./marketStructureEngine'),
   liquidityEngine:          require('./liquidityEngine'),
   derivativesEngine:        require('./derivativesEngine'),
+  volumeAnalysisEngine:     require('./volumeAnalysisEngine'),
   probabilityScoringEngine: require('./probabilityScoringEngine'),
   probabilityDecayEngine:   require('./probabilityDecayEngine'),
   riskEngine:               require('./riskEngine'),

@@ -104,7 +104,40 @@ function _scoreVwap(vwap, direction) {
   return { score: s, reasons };
 }
 
-function _scoreVolume(volumeOI, direction) {
+// Volume analyzer (FRVP + VSA + time-volume). Lazily required to avoid
+// circular import risks during initial module load.
+let _volumeAnalysisEngine = null;
+function _volumeEngine() {
+  if (_volumeAnalysisEngine) return _volumeAnalysisEngine;
+  try { _volumeAnalysisEngine = require('./volumeAnalysisEngine'); }
+  catch (_) { _volumeAnalysisEngine = null; }
+  return _volumeAnalysisEngine;
+}
+
+/**
+ * Volume pillar — fuses three views:
+ *   - FRVP (where volume sat) via volumeAnalysis
+ *   - VSA  (effort vs result on the latest candle)
+ *   - Time-volume / OI direction (legacy `volumeOI` payload)
+ *
+ * If volumeAnalysis is supplied (institutional), we trust its directional
+ * score and only overlay a small OI-confirmation boost. If only the legacy
+ * volumeOI block is available, we fall back to that simpler score.
+ */
+function _scoreVolume(volumeOI, direction, volumeAnalysis) {
+  const engine = _volumeEngine();
+  if (volumeAnalysis && engine) {
+    const r = engine.score(volumeAnalysis, direction);
+    let s = r.score;
+    const reasons = [...r.reasons];
+    // Small OI overlay if we also have OI direction
+    const oiDir = volumeOI?.oi_direction || 'neutral';
+    if (oiDir === direction)         { s = Math.min(100, s + 5); reasons.push(`oi ${oiDir}`); }
+    else if (oiDir !== 'neutral')    { s = Math.max(0,   s - 5); reasons.push(`oi against ${direction}`); }
+    return { score: s, reasons };
+  }
+
+  // Legacy fallback (no FRVP/VSA available)
   if (!volumeOI) return { score: 50, reasons: ['no volume'] };
   const oiDir = volumeOI.oi_direction || 'neutral';
   let s = 50;
@@ -235,7 +268,7 @@ function score(ctx, direction, thresholds = {}) {
   const tier2Parts = {
     derivatives: _scoreDerivatives(ctx.derivatives, direction),
     vwap:        _scoreVwap(ctx.vwap, direction),
-    volume:      _scoreVolume(ctx.volumeOI, direction),
+    volume:      _scoreVolume(ctx.volumeOI, direction, ctx.volumeAnalysis),
     delta:       _scoreDelta(ctx.orderFlow, direction),
     liquidity:   _scoreLiquidity(ctx.liquidity),
     ivVix:       _scoreIvVix({ ivPercentile: ctx.ivPercentile, vix: ctx.vix }),
