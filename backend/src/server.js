@@ -333,8 +333,13 @@ async function start() {
   try {
     const { instance: liveFeedProd } = require('./services/dhanLiveFeedProd.service');
     const { instance: feedRecorder } = require('./services/feedRecorder.service');
+    const { instance: tickDelta } = require('./services/hybrid/tickDeltaClassifier');
     const niftyFuturesProd = require('./services/niftyFuturesProd.service');
     feedRecorder.init(); // start day-rollover + prune old folders
+    // Start the tick-level UP/DOWN classifier BEFORE we connect, so it sees
+    // every tick from the very first packet. Listening is event-driven and
+    // adds zero latency to the feed parser.
+    tickDelta.start(liveFeedProd);
     await liveFeedProd.connect();
     // Default subscriptions — NIFTY 50 (13) in FULL mode so we get OI+depth too
     liveFeedProd.subscribe(
@@ -346,7 +351,7 @@ async function start() {
     );
     // Subscribe NIFTY futures (near-month contract)
     await niftyFuturesProd.subscribeLiveFeed('FULL');
-    logger.info('[server] Dhan production live feed + feed recorder + futures started');
+    logger.info('[server] Dhan production live feed + feed recorder + futures + tick-delta classifier started');
   } catch (e) {
     logger.warn({ err: e.message }, '[server] Dhan production live feed failed to start (will retry on demand)');
   }
@@ -368,6 +373,7 @@ process.on('uncaughtException', (err) => {
 process.on('SIGTERM', () => {
   logger.info('SIGTERM received, closing server gracefully');
   hybridLiveFeedService.disconnect();
+  try { require('./services/hybrid/tickDeltaClassifier').instance.stop(); } catch (_) {}
   try { require('./services/dhanLiveFeedProd.service').instance.disconnect(); } catch (_) {}
   try { require('./services/feedRecorder.service').instance.shutdown(); } catch (_) {}
   server.close(() => {
@@ -379,6 +385,7 @@ process.on('SIGTERM', () => {
 process.on('SIGINT', () => {
   logger.info('SIGINT received, closing server gracefully');
   hybridLiveFeedService.disconnect();
+  try { require('./services/hybrid/tickDeltaClassifier').instance.stop(); } catch (_) {}
   try { require('./services/dhanLiveFeedProd.service').instance.disconnect(); } catch (_) {}
   try { require('./services/feedRecorder.service').instance.shutdown(); } catch (_) {}
   server.close(() => {

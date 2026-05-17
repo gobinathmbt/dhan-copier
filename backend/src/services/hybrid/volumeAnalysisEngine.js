@@ -462,8 +462,65 @@ function _deltaAnalysis(candles, lookbackShort = 5, lookbackLong = 20) {
     divergence,                // none | hidden_buying | hidden_selling
     divergenceBias,            // neutral | bullish | bearish
     divergenceReason,
+    source: 'proxy_wick',
     lookbackShort,
     lookbackLong,
+  };
+}
+
+// Convert a live tickDeltaClassifier reading to the same shape `_deltaAnalysis`
+// returns. We use the most-recent window for short and the full session (or a
+// configurable longer window) for long.
+//
+// Input shape (from tickDeltaClassifier.getDelta):
+//   { up, down, total, delta, deltaPct, sampleSize, lastTickAt, ... }
+//
+// Optional `live.short` / `live.long` are passed by callers that have both
+// windowed reads available — otherwise we treat the single reading as long.
+function _liveTickDeltaToBias(live) {
+  if (!live) return null;
+  const longRead  = live.long  || live;
+  const shortRead = live.short || live;
+
+  const cvdPctLong = Number(longRead.deltaPct) || 0;
+  const cvdLong    = Number(longRead.delta) || 0;
+  const cvdShort   = Number(shortRead.delta) || 0;
+  const upLong     = Number(longRead.up) || 0;
+  const downLong   = Number(longRead.down) || 0;
+
+  // Bias by absolute delta percentage (same thresholds as proxy)
+  let bias = 'neutral';
+  let strength = 0;
+  if (cvdPctLong >= 15)       { bias = 'bullish';      strength = Math.min(100, Math.round(cvdPctLong * 2)); }
+  else if (cvdPctLong <= -15) { bias = 'bearish';      strength = Math.min(100, Math.round(Math.abs(cvdPctLong) * 2)); }
+  else if (cvdPctLong >= 5)   { bias = 'mild_bullish'; strength = 40; }
+  else if (cvdPctLong <= -5)  { bias = 'mild_bearish'; strength = 40; }
+
+  // Trend: short window vs long
+  let trend = 'flat';
+  const shortPct = (Number(shortRead.total) > 0) ? (cvdShort / shortRead.total) * 100 : 0;
+  if (shortPct > cvdPctLong + 5) trend = 'rising';
+  else if (shortPct < cvdPctLong - 5) trend = 'falling';
+
+  // Divergence vs price needs price context — caller can fill if it has it.
+  // For now we leave divergence='none' and let the downstream proxy run alongside
+  // when callers want full divergence detection.
+
+  return {
+    source: 'live_tick',
+    cvdLong:  Math.round(cvdLong),
+    cvdShort: Math.round(cvdShort),
+    cvdPctLong: Number(cvdPctLong.toFixed(2)),
+    upLong:   Math.round(upLong),
+    downLong: Math.round(downLong),
+    trend,
+    bias,
+    strength,
+    divergence: 'none',
+    divergenceBias: 'neutral',
+    divergenceReason: '',
+    sampleSize: Number(longRead.sampleSize) || 0,
+    windowMs: longRead.windowMs || null,
   };
 }
 
@@ -609,7 +666,7 @@ function _scoreForDirection({ frvp, acceptance, nearest, timeVolume, vsa, delta,
  * @param {string} [args.direction] - if provided, also returns directional score
  * @returns {Object|null}
  */
-function analyze({ candles5m = [], candles15m = [], spotPrice = null, direction = null } = {}) {
+function analyze({ candles5m = [], candles15m = [], spotPrice = null, direction = null, liveTickDelta = null } = {}) {
   // Use 15m as primary FRVP basis when available — it's more stable.
   // Fall back to 5m for intraday-only sessions.
   const frvp5  = _computeFrvp(candles5m,  50);
@@ -621,8 +678,27 @@ function analyze({ candles5m = [], candles15m = [], spotPrice = null, direction 
   const nearest    = _nearestNodes(frvp, spotPrice);
   const timeVolume = _timeVolume(candles5m, 20);
   const vsa        = _vsa(candles5m);
-  // Delta analysis runs on the same candle stream; use 5m for responsiveness.
-  const delta      = _deltaAnalysis(candles5m, 5, 20);
+
+  // Delta source preference:
+  //   1) liveTickDelta (true bid/ask classification from the live feed) — when
+  //      a meaningful sample is available
+  //   2) wick-weighted candle proxy from 5m bars
+  //
+  // We mark the source so downstream consumers and logs can tell which read
+  // they're looking at.
+  // liveTickDelta can arrive in two shapes:
+  //   { long, short }  — preferred (gives trend detection)
+  //   { up, down, deltaPct, sampleSize, ... } — flat single-window read
+  let delta;
+  const liveLong = liveTickDelta?.long || liveTickDelta;
+  const liveSampleSize = Number(liveLong?.sampleSize) || 0;
+  const liveDeltaPctOk = liveLong && Number.isFinite(liveLong.deltaPct);
+  if (liveDeltaPctOk && liveSampleSize >= 30) {
+    delta = _liveTickDeltaToBias(liveTickDelta);
+  } else {
+    delta = _deltaAnalysis(candles5m, 5, 20);
+    if (delta) delta.source = 'proxy_wick';
+  }
   // Which control zone (UP / DOWN / neutral) currently holds the price?
   const zone       = _zoneForPrice(frvp, spotPrice);
 
@@ -638,12 +714,13 @@ function analyze({ candles5m = [], candles15m = [], spotPrice = null, direction 
     distResistancePts: nearest.distResistancePts,
     timeVolume,           // { lastVolume, avgVolume, ratio, state }
     vsa,                  // { pattern, bias, strength, ... }
-    delta,                // { cvdPctLong, bias, strength, trend, divergence, ... }
-    zone,                 // { zone: 'up_area'|'down_area'|'neutral'|'unknown', area: { low, high, netDelta } | null }
-    upAreas:   frvp.upAreas,    // exposed for downstream consumers
+    delta,                // { cvdPctLong, bias, strength, trend, divergence, source, ... }
+    zone,                 // { zone, area }
+    upAreas:   frvp.upAreas,
     downAreas: frvp.downAreas,
     totalDelta: frvp.totalDelta,
     deltaPct:   frvp.deltaPct,
+    deltaSource: delta?.source || 'unknown',
   };
 
   if (direction === 'bullish' || direction === 'bearish') {

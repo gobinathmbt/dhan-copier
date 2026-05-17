@@ -32,6 +32,7 @@ const marketStructureEngine    = require('./marketStructureEngine');
 const liquidityEngine          = require('./liquidityEngine');
 const derivativesEngine        = require('./derivativesEngine');
 const volumeAnalysisEngine     = require('./volumeAnalysisEngine');
+const tickDeltaClassifier      = require('./tickDeltaClassifier');
 const probabilityScoringEngine = require('./probabilityScoringEngine');
 const riskEngine               = require('./riskEngine');
 const executionQualityEngine   = require('./executionQualityEngine');
@@ -301,8 +302,14 @@ async function decide({
   // Volume tells the truth behind the candle. FRVP reveals the price levels
   // institutions defend; VSA shows whether the latest candle has effort
   // matching its result; time-volume confirms recency of activity.
+  //
+  // For the delta read we prefer TRUE bid/ask classification from the live
+  // tick stream when a meaningful sample exists; otherwise we fall back to
+  // the wick-weighted candle proxy.
+  const liveTickDelta = _readLiveTickDelta(13); // NIFTY 50 spot
   const volumeAnalysis = volumeAnalysisEngine.analyze({
     candles5m, candles15m, spotPrice,
+    liveTickDelta,
   });
   if (volumeAnalysis) {
     hybridLogger.info({
@@ -311,6 +318,7 @@ async function decide({
         `acceptance=${volumeAnalysis.acceptance} ` +
         `zone=${volumeAnalysis.zone?.zone} ` +
         `delta=${volumeAnalysis.delta?.bias || 'n/a'} ${volumeAnalysis.delta?.cvdPctLong ?? '-'}% ` +
+        `[${volumeAnalysis.deltaSource}] ` +
         `poc=${volumeAnalysis.frvp?.pocPrice} ` +
         `vsa=${volumeAnalysis.vsa?.pattern || 'n/a'} ` +
         `vol=${volumeAnalysis.timeVolume?.state || 'n/a'} (${volumeAnalysis.timeVolume?.ratio || '-'}x)`,
@@ -318,6 +326,7 @@ async function decide({
         acceptance: volumeAnalysis.acceptance,
         zone: volumeAnalysis.zone,
         delta: volumeAnalysis.delta,
+        deltaSource: volumeAnalysis.deltaSource,
         poc: volumeAnalysis.frvp?.pocPrice,
         pocDelta: volumeAnalysis.frvp?.pocDelta,
         vaHigh: volumeAnalysis.frvp?.vaHigh,
@@ -564,6 +573,7 @@ async function decide({
       deltaBias:    volumeAnalysis.delta?.bias,
       deltaPctLong: volumeAnalysis.delta?.cvdPctLong,
       deltaTrend:   volumeAnalysis.delta?.trend,
+      deltaSource:  volumeAnalysis.deltaSource,
       zone:         volumeAnalysis.zone?.zone,
     } : null,
   };
@@ -641,6 +651,28 @@ function _scoreToConfidence(score) {
   // Map 50..100 to 5..10 linearly, clamp.
   const x = Math.max(50, Math.min(100, Number(score) || 50));
   return Math.round(((x - 50) / 50) * 5 + 5);
+}
+
+/**
+ * Pull the current bid/ask-classified delta for a given security from the
+ * tick classifier. Returns both a long (3-min) and short (60-sec) read so the
+ * volume engine can derive trend.
+ *
+ *   - segment defaults to IDX_I (NIFTY spot). Pass 'NSE_FNO' + futures id for
+ *     futures delta, or option securityId for option-level delta.
+ *   - Returns null when classifier hasn't started or sample is too small.
+ */
+function _readLiveTickDelta(securityId, segment = 'IDX_I') {
+  try {
+    const cls = tickDeltaClassifier.instance;
+    if (!cls || !cls.started) return null;
+    const long  = cls.getDelta(segment, securityId, { windowMs: 180_000 }); // 3 min
+    const short = cls.getDelta(segment, securityId, { windowMs: 60_000 });  // 1 min
+    if (!long || (long.sampleSize || 0) < 30) return null;
+    return { long, short, segment, securityId };
+  } catch (_) {
+    return null;
+  }
 }
 
 module.exports = { decide };

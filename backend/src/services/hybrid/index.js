@@ -27,6 +27,7 @@ module.exports = {
   liquidityEngine:          require('./liquidityEngine'),
   derivativesEngine:        require('./derivativesEngine'),
   volumeAnalysisEngine:     require('./volumeAnalysisEngine'),
+  tickDeltaClassifier:      require('./tickDeltaClassifier'),
   probabilityScoringEngine: require('./probabilityScoringEngine'),
   probabilityDecayEngine:   require('./probabilityDecayEngine'),
   riskEngine:               require('./riskEngine'),

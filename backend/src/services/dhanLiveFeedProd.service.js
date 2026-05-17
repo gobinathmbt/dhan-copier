@@ -28,6 +28,7 @@
 const WebSocket = require('ws');
 const fs = require('fs');
 const path = require('path');
+const EventEmitter = require('events');
 const logger = require('../utils/logger');
 const env = require('../config/env');
 const { instance: feedRecorder } = require('./feedRecorder.service');
@@ -53,8 +54,10 @@ const SEGMENT_NAME_TO_CODE = Object.fromEntries(
   Object.entries(SEGMENT_CODE_TO_NAME).map(([k, v]) => [v, Number(k)])
 );
 
-class DhanLiveFeedProd {
+class DhanLiveFeedProd extends EventEmitter {
   constructor() {
+    super();
+    this.setMaxListeners(50); // multiple consumers (hybrid, recorder, etc.)
     this.ws = null;
     this.isConnected = false;
 
@@ -393,6 +396,24 @@ class DhanLiveFeedProd {
     const prev = this.snapshot.get(key) || { exchangeSegment: segmentName, securityId };
     const next = { ...prev, ...patch, updatedAt: Date.now() };
     this.snapshot.set(key, next);
+
+    // Emit tick event so external consumers (e.g. hybrid tick delta classifier)
+    // can react. Listeners receive both the previous snapshot and the new one
+    // so they can detect what actually changed (LTP, LTQ, depth, etc.) without
+    // needing to re-parse the binary buffer.
+    try {
+      this.emit('tick', {
+        key,
+        segment: segmentName,
+        securityId,
+        prev,
+        next,
+        patch,
+      });
+    } catch (e) {
+      // Listeners must not block the feed — swallow & log
+      logger.warn({ err: e.message }, '[liveFeedProd] tick listener threw');
+    }
 
     // Record NIFTY 50 spot ticks to disk (feed recorder handles market-hours gating)
     if (segmentName === 'IDX_I' && securityId === 13) {

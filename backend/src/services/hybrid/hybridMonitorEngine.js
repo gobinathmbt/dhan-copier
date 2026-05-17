@@ -22,6 +22,7 @@ const probabilityDecayEngine  = require('./probabilityDecayEngine');
 const probabilityScoringEngine = require('./probabilityScoringEngine');
 const derivativesEngine       = require('./derivativesEngine');
 const volumeAnalysisEngine    = require('./volumeAnalysisEngine');
+const tickDeltaClassifier     = require('./tickDeltaClassifier');
 const liquidityEngine         = require('./liquidityEngine');
 const volatilityRegimeEngine  = require('./volatilityRegimeEngine');
 const marketRegimeEngine      = require('./marketRegimeEngine');
@@ -264,7 +265,19 @@ async function decide({
     spotPrice,
     atmStrike,
   });
-  const volumeAnalysis = volumeAnalysisEngine.analyze({ candles5m, candles15m, spotPrice });
+  // Live tick delta — true bid/ask classification for the spot. Used when
+  // the sample is large enough; otherwise volumeAnalysisEngine falls back to
+  // the wick-weighted candle proxy.
+  let liveTickDelta = null;
+  try {
+    const cls = tickDeltaClassifier.instance;
+    if (cls && cls.started) {
+      const long  = cls.getDelta('IDX_I', 13, { windowMs: 180_000 });
+      const short = cls.getDelta('IDX_I', 13, { windowMs: 60_000 });
+      if (long && (long.sampleSize || 0) >= 30) liveTickDelta = { long, short };
+    }
+  } catch (_) {}
+  const volumeAnalysis = volumeAnalysisEngine.analyze({ candles5m, candles15m, spotPrice, liveTickDelta });
 
   const direction = trade.signal === 'BUY_CE' ? 'bullish' : 'bearish';
   const ctxNow = {
@@ -304,6 +317,7 @@ async function decide({
       acceptance: volumeAnalysis?.acceptance,
       delta: volumeAnalysis?.delta?.bias,
       deltaPct: volumeAnalysis?.delta?.cvdPctLong,
+      deltaSource: volumeAnalysis?.deltaSource,
       zone: volumeAnalysis?.zone?.zone,
       vsa: volumeAnalysis?.vsa?.pattern,
     },
