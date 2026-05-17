@@ -29,6 +29,10 @@ const logger = require('../utils/logger');
 const aiIOLogger = require('../utils/aiIOLogger');
 const atrService = require('./atr.service');
 
+// Hybrid engine — deterministic, institutional-style entry decision.
+// Active by default. Set settings.useHybridEngine = false to fall back to AI.
+const hybrid = require('./hybrid');
+
 const ENTRY_SYSTEM_PROMPT = `
 You are an institutional-grade NIFTY 50 options trader with decades of
 experience running a prop desk. You make ONE decision per call:
@@ -418,6 +422,35 @@ function classifyMoneyness(strike, aggregator) {
  * NO_TRADE fallback if the model hallucinates or rate-limits.
  */
 async function decide({ aggregator, algorithmOutputs, masterDecision, settings, session, openTradesCount, futuresData }) {
+  // ──────────────────────────────────────────────────────────────────────────
+  // HYBRID PATH — deterministic, institutional-style. ON BY DEFAULT.
+  // The hybrid engine performs its own concurrency / risk / score / strike
+  // checks and returns a decision in the SAME shape this function already
+  // produces. To opt out and use the legacy AI path, set
+  //   session.settings.useHybridEngine = false
+  // ──────────────────────────────────────────────────────────────────────────
+  const useHybrid = settings?.useHybridEngine !== false;
+  if (useHybrid) {
+    try {
+      const decision = await hybrid.entry.decide({
+        aggregator, algorithmOutputs, masterDecision, settings, session, openTradesCount, futuresData,
+      });
+      logger.info({
+        sessionId: String(session?._id || ''),
+        signal: decision.signal,
+        tradeType: decision.trade_type,
+        score: decision.hybridSnapshot?.score,
+        grade: decision.hybridSnapshot?.grade,
+        confidence: decision.confidence,
+      }, '[entryEngine] hybrid decision');
+      return decision;
+    } catch (e) {
+      logger.error({ err: e.message, stack: e.stack }, '[entryEngine] hybrid path failed — falling back to legacy AI path');
+      // Fall through to legacy AI path
+    }
+  }
+
+  // ─── LEGACY AI PATH ────────────────────────────────────────────────────────
   const maxConcurrent = settings?.maxConcurrentTrades || 1;
   if (openTradesCount >= maxConcurrent) {
     return { signal: 'NO_TRADE', reasoning: `At max concurrent trades (${openTradesCount}/${maxConcurrent})`, trade_type: 'NONE', confidence: 0 };

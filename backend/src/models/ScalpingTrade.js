@@ -33,6 +33,8 @@ const ScalpingTradeSchema = new mongoose.Schema(
     // Per-trade AI overrides (set at entry by entryEngine)
     maxHoldSeconds: { type: Number, default: 180 },
     aiEntryDecision: { type: mongoose.Schema.Types.Mixed },
+    // Hybrid engine snapshot — captured at entry, used by hybrid monitor for decay analysis
+    hybridEntrySnapshot: { type: mongoose.Schema.Types.Mixed },
     hasReachedTarget: { type: Boolean, default: false },
     maxPriceReached: { type: Number, default: 0 },
     // NIFTY Futures confirmation fields

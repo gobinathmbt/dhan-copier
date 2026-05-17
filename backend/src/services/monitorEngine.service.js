@@ -34,6 +34,10 @@ const logger = require('../utils/logger');
 const aiIOLogger = require('../utils/aiIOLogger');
 const atrService = require('./atr.service');
 
+// Hybrid engine — deterministic, institutional-style monitoring.
+// Active by default. Set settings.useHybridEngine = false to fall back to AI.
+const hybrid = require('./hybrid');
+
 const SCALP_SYSTEM_PROMPT = `
 You are a PROFESSIONAL OPTIONS SCALPER monitoring an ACTIVE trade. Your job is to 
 MAXIMIZE PROFIT while protecting capital.
@@ -720,6 +724,33 @@ function buildPrimaryStrikesBlock(aggregator, focusStrikes) {
 // Public API
 // ---------------------------------------------------------------------------
 async function decide({ trade, aggregator, algorithmOutputs, masterDecision, settings, allOpenTrades, futuresData }) {
+  // ──────────────────────────────────────────────────────────────────────────
+  // HYBRID PATH — deterministic, institutional-style. ON BY DEFAULT.
+  // Returns the SAME shape as the legacy AI path:
+  //   { action, new_sl, add_lots, confidence, reasoning, exit_urgency, source }
+  // To opt out per-session: settings.useHybridEngine = false
+  // ──────────────────────────────────────────────────────────────────────────
+  const useHybrid = settings?.useHybridEngine !== false;
+  if (useHybrid) {
+    try {
+      const decision = await hybrid.monitor.decide({
+        trade, aggregator, algorithmOutputs, masterDecision, settings, allOpenTrades, futuresData,
+      });
+      logger.info({
+        tradeId: String(trade?._id || ''),
+        action: decision.action,
+        source: decision.source,
+        reasoning: decision.reasoning,
+      }, '[monitorEngine] hybrid decision');
+      return decision;
+    } catch (e) {
+      logger.error({ err: e.message, stack: e.stack, tradeId: String(trade?._id || '') },
+        '[monitorEngine] hybrid path failed — falling back to legacy AI path');
+      // fall through
+    }
+  }
+
+  // ─── LEGACY AI PATH ────────────────────────────────────────────────────────
   const tradeType = trade.tradeType || 'SCALP';
 
   // Build history once — used by both pre-AI gates (swing) and AI payload

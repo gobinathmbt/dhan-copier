@@ -70,6 +70,21 @@ const ScalpingSessionSchema = new mongoose.Schema(
       enableFuturesConfirmation: { type: Boolean, default: true }, // ENABLED - futures are critical
       useMasterSignalWhenNeutral: { type: Boolean, default: false }, // DISABLED - wait for clear signals
 
+      // ── HYBRID ENGINE (institutional deterministic core) ─────────────────
+      // When true, entry/monitor decisions come from the deterministic hybrid
+      // engine (no AI in the path). Defaults ON.
+      useHybridEngine: { type: Boolean, default: true },
+      // Minimum hybrid score (0-100) required to enter
+      hybridMinScore: { type: Number, default: 65 },
+      // Minimum trade quality grade required (A+/A/B/C/D)
+      hybridMinGrade: { type: String, default: 'C' },
+      // Minimum execution-quality score before placing the order
+      executionMinScore: { type: Number, default: 50 },
+      // Optional AI advisory side-channel (off by default — purely advisory)
+      enableHybridAIAdvisory: { type: Boolean, default: false },
+      // Consecutive-loss kill switch (used by hybrid risk engine)
+      consecutiveLossStop: { type: Number, default: 3 },
+
       // ── STRATEGY ─────────────────────────────────────────────────────────
       strategyMode: { type: String, default: 'Institutional Multi-Factor' }, // UPDATED name
       executionMode: { type: String, enum: ['simulation', 'live'], default: 'simulation' },

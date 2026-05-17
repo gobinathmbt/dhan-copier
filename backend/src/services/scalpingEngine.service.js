@@ -1948,7 +1948,11 @@ async function runPredictionCycle() {
         suggested_max_hold_seconds: newDecision.max_hold_seconds,
         suggested_lots:        newDecision.lots_suggested,
         _raw:                  newDecision,
-        _source:               'entryEngine',
+        _source:               newDecision._hybrid ? 'hybridEntryEngine' : 'entryEngine',
+        // Surface hybrid metadata (snapshot used by monitor decay; details for analytics)
+        hybridSnapshot:        newDecision.hybridSnapshot || null,
+        hybridGrade:           newDecision.hybridSnapshot?.grade || null,
+        hybridScore:           newDecision.hybridSnapshot?.score || null,
       };
       logger.info({ useNewEngines, signal: newDecision.signal, tradeType: newDecision.trade_type, confidence: newDecision.confidence }, '[engine] New entry engine decided');
     }
@@ -2366,6 +2370,9 @@ async function runPredictionCycle() {
       maxHoldSeconds: Number(institutionalEntryDecision.suggested_max_hold_seconds)
         || (isSwingTrade ? (state.session.settings?.swingMaxHoldMinutes || 15) * 60 : state.session.settings?.maxHoldTimeSeconds || 180),
       aiEntryDecision: institutionalEntryDecision,
+      // Hybrid entry snapshot — used by hybrid monitor for decay analysis.
+      // Only present when entry came from the deterministic hybrid engine.
+      hybridEntrySnapshot: institutionalEntryDecision.hybridSnapshot || null,
       hasReachedTarget: false,
       maxPriceReached: premium,
       // Futures confirmation data
