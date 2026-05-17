@@ -992,6 +992,26 @@ async function decide({
       noTradeReasons.push(`momentum bearish but delta only ${deltaPct.toFixed(1)}% (>-8)`);
     }
   }
+  // (i) Mean-reversion conflict check (cycle 9 calibration):
+  //     When meta=gamma_pin but auction=momentum_continuation, the regime
+  //     disagrees with itself. Only allow mean-reversion trade if direction
+  //     is OPPOSITE to the auction trend. Same-direction = trend trade
+  //     dressed up as a fade — high failure rate.
+  //     Backtest evidence: 2026-02-17 had 3 BUY_CE entries on bullish
+  //     trend pretending to be gamma fades — all hit SL within 60-120s.
+  const meanRevertTypes = new Set([
+    'MEAN_REVERSION', 'GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION',
+    'COMPOSITE_PROFILE_EDGE_REJECTION', 'IV_CRUSH_FADE',
+  ]);
+  if (meanRevertTypes.has(entryType.bestType)
+      && metaRegime?.state === 'gamma_pin'
+      && auctionState?.tradingImplication === 'momentum_continuation') {
+    const trendDir = (auctionState.dayType === 'trend_up') ? 'bullish'
+                    : (auctionState.dayType === 'trend_down') ? 'bearish' : null;
+    if (trendDir && trendDir === direction) {
+      noTradeReasons.push(`mean-revert ${direction} same direction as auction ${trendDir} trend — failed fade risk`);
+    }
+  }
   if (noTradeReasons.length) {
     return _noTrade(`No-trade zone: ${noTradeReasons.join(' | ')}`, {
       metaRegime, entryType: entryType.bestType, gammaRegime: gammaRegime?.regime, volumeAnalysis: {
