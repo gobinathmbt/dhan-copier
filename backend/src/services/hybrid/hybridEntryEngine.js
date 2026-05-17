@@ -309,14 +309,21 @@ async function decide({
       sessionId, event: 'volume_analysis',
       message:
         `acceptance=${volumeAnalysis.acceptance} ` +
+        `zone=${volumeAnalysis.zone?.zone} ` +
+        `delta=${volumeAnalysis.delta?.bias || 'n/a'} ${volumeAnalysis.delta?.cvdPctLong ?? '-'}% ` +
         `poc=${volumeAnalysis.frvp?.pocPrice} ` +
         `vsa=${volumeAnalysis.vsa?.pattern || 'n/a'} ` +
         `vol=${volumeAnalysis.timeVolume?.state || 'n/a'} (${volumeAnalysis.timeVolume?.ratio || '-'}x)`,
       data: {
         acceptance: volumeAnalysis.acceptance,
+        zone: volumeAnalysis.zone,
+        delta: volumeAnalysis.delta,
         poc: volumeAnalysis.frvp?.pocPrice,
+        pocDelta: volumeAnalysis.frvp?.pocDelta,
         vaHigh: volumeAnalysis.frvp?.vaHigh,
         vaLow: volumeAnalysis.frvp?.vaLow,
+        upAreas: volumeAnalysis.frvp?.upAreas,
+        downAreas: volumeAnalysis.frvp?.downAreas,
         nearestSupport: volumeAnalysis.nearestSupport?.price,
         nearestResistance: volumeAnalysis.nearestResistance?.price,
         timeVolume: volumeAnalysis.timeVolume,
@@ -545,7 +552,7 @@ async function decide({
     capitalMode: risk.capitalMode,
     sizingFactors: sizing.factors,
     capturedAt: new Date().toISOString(),
-    // Volume context — used by decay analysis to detect FRVP flips
+    // Volume context — used by decay analysis to detect FRVP / delta / zone flips
     volume: volumeAnalysis ? {
       acceptance: volumeAnalysis.acceptance,
       poc:    volumeAnalysis.frvp?.pocPrice,
@@ -554,6 +561,10 @@ async function decide({
       vsaPattern: volumeAnalysis.vsa?.pattern,
       vsaBias:    volumeAnalysis.vsa?.bias,
       volState:   volumeAnalysis.timeVolume?.state,
+      deltaBias:    volumeAnalysis.delta?.bias,
+      deltaPctLong: volumeAnalysis.delta?.cvdPctLong,
+      deltaTrend:   volumeAnalysis.delta?.trend,
+      zone:         volumeAnalysis.zone?.zone,
     } : null,
   };
 
@@ -564,6 +575,8 @@ async function decide({
     `liq=${liquidity.health}`,
     `der=${derivatives.overallBias}(${derivatives.directionScore})`,
     volumeAnalysis ? `vp=${volumeAnalysis.acceptance}/${volumeAnalysis.vsa?.pattern || 'na'}` : null,
+    volumeAnalysis?.delta ? `delta=${volumeAnalysis.delta.bias}(${volumeAnalysis.delta.cvdPctLong}%)` : null,
+    volumeAnalysis?.zone?.zone && volumeAnalysis.zone.zone !== 'neutral' ? `zone=${volumeAnalysis.zone.zone}` : null,
     `score=${scoreResult.score}`,
     advisory ? `advisory=${advisory.advise}` : null,
   ].filter(Boolean).join(' | ');

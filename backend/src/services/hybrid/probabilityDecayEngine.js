@@ -106,6 +106,40 @@ function evaluate({ trade, currentScore = null, currentDerivatives = null, curre
     }
   }
 
+  // 7. Delta flipped against direction (mid-trade order-flow reversal)
+  if (currentVolumeAnalysis?.delta?.bias) {
+    const dBias = currentVolumeAnalysis.delta.bias;
+    const dStr  = Number(currentVolumeAnalysis.delta.strength) || 0;
+    const opposes = (direction === 'bullish' && (dBias === 'bearish' || dBias === 'mild_bearish'))
+                 || (direction === 'bearish' && (dBias === 'bullish' || dBias === 'mild_bullish'));
+    if (opposes) {
+      if (dStr >= 60) {
+        decay -= 0.25;
+        reasons.push(`delta flipped strong ${dBias} (${currentVolumeAnalysis.delta.cvdPctLong}%)`);
+      } else if (dStr >= 30) {
+        decay -= 0.12;
+        reasons.push(`delta flipped ${dBias} (${currentVolumeAnalysis.delta.cvdPctLong}%)`);
+      }
+    }
+    // Hidden absorption against the trade — early reversal warning
+    if (currentVolumeAnalysis.delta.divergence !== 'none'
+        && currentVolumeAnalysis.delta.divergenceBias !== 'neutral'
+        && currentVolumeAnalysis.delta.divergenceBias !== direction) {
+      decay -= 0.15;
+      reasons.push(`absorption against ${direction}: ${currentVolumeAnalysis.delta.divergenceReason}`);
+    }
+  }
+
+  // 8. Price moved into the opposing control area (UP/DOWN area flip)
+  if (currentVolumeAnalysis?.zone?.zone && snapshot?.volume?.zone) {
+    const wantedZone = direction === 'bullish' ? 'up_area' : 'down_area';
+    const opposingZone = direction === 'bullish' ? 'down_area' : 'up_area';
+    if (snapshot.volume.zone !== opposingZone && currentVolumeAnalysis.zone.zone === opposingZone) {
+      decay -= 0.18;
+      reasons.push(`price entered opposing control area (${currentVolumeAnalysis.zone.zone})`);
+    }
+  }
+
   decay = Number(Math.max(0, Math.min(1, decay)).toFixed(2));
 
   // If decay below 0.4 → recommend exit

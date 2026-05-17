@@ -302,6 +302,9 @@ async function decide({
       reasons: decay.reasons,
       scoreNow: currentScore.score,
       acceptance: volumeAnalysis?.acceptance,
+      delta: volumeAnalysis?.delta?.bias,
+      deltaPct: volumeAnalysis?.delta?.cvdPctLong,
+      zone: volumeAnalysis?.zone?.zone,
       vsa: volumeAnalysis?.vsa?.pattern,
     },
   });
