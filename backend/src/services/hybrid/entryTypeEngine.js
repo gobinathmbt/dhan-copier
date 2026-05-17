@@ -391,6 +391,7 @@ function evaluate(ctx = {}) {
 
   // Map entry type → family (mirrors metaRegimeEngine.familyOf)
   const TYPE_TO_FAMILY = {
+    // Legacy entry-type evaluator outputs
     MOMENTUM_CONTINUATION:  'momentum_continuation',
     REVERSAL:               'reversal',
     MEAN_REVERSION:         'mean_reversion',
@@ -399,6 +400,21 @@ function evaluate(ctx = {}) {
     EXHAUSTION_FADE:        'exhaustion_fade',
     VWAP_RECLAIM:           'vwap_reclaim',
     OPENING_TRAP_REVERSAL:  'reversal',
+    // Playbook outputs (for completeness if they reach this layer)
+    INITIATIVE_MOMENTUM_EXPANSION: 'momentum_continuation',
+    FAILED_AUCTION_REVERSAL:       'reversal',
+    GAMMA_PIN_MEAN_REVERSION:      'mean_reversion',
+    OPENING_DRIVE_CONTINUATION:    'momentum_continuation',
+    SHORT_COVERING_SQUEEZE:        'momentum_continuation',
+    LONG_LIQUIDATION_CASCADE:      'momentum_continuation',
+    VWAP_RECLAIM_CLEAN:            'vwap_reclaim',
+    HVN_REJECTION_ROTATION:        'mean_reversion',
+    EXHAUSTION_REVERSAL:           'exhaustion_fade',
+    PULLBACK_CONTINUATION:         'pullback',
+    WEEKLY_EXPIRY_DEALER_UNWIND:   'breakout_expansion',
+    COMPOSITE_PROFILE_EDGE_REJECTION: 'mean_reversion',
+    VOLATILITY_COMPRESSION_SQUEEZE: 'breakout_expansion',
+    IV_CRUSH_FADE:                 'mean_reversion',
   };
 
   // Pre-filter: drop any setup whose family is blocked under the current

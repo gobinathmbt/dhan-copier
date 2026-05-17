@@ -157,9 +157,14 @@ function classify({
 
 /**
  * Maps an entry-type string back to its family.
+ *
+ * Recognises both legacy `entryTypeEngine` types AND the new
+ * `strategyPlaybookEngine` playbook names so meta-regime soft/hard
+ * adjustments apply consistently throughout the pipeline.
  */
 function familyOf(entryType) {
   if (!entryType) return null;
+  // ── Legacy entry types ────────────────────────────────────────────────
   if (entryType === 'MOMENTUM_CONTINUATION') return 'momentum_continuation';
   if (entryType === 'BREAKOUT_EXPANSION')    return 'breakout_expansion';
   if (entryType === 'PULLBACK')              return 'pullback';
@@ -168,7 +173,22 @@ function familyOf(entryType) {
   if (entryType === 'EXHAUSTION_FADE')       return 'exhaustion_fade';
   if (entryType === 'VWAP_RECLAIM')          return 'vwap_reclaim';
   if (entryType === 'OPENING_TRAP_REVERSAL') return 'reversal';
-  if (entryType === 'GENERIC_SCALP')         return 'mean_reversion';   // treat as conservative
+  if (entryType === 'GENERIC_SCALP')         return 'mean_reversion';
+  // ── Playbook names ────────────────────────────────────────────────────
+  if (entryType === 'INITIATIVE_MOMENTUM_EXPANSION') return 'momentum_continuation';
+  if (entryType === 'FAILED_AUCTION_REVERSAL')       return 'reversal';
+  if (entryType === 'GAMMA_PIN_MEAN_REVERSION')      return 'mean_reversion';
+  if (entryType === 'OPENING_DRIVE_CONTINUATION')    return 'momentum_continuation';
+  if (entryType === 'SHORT_COVERING_SQUEEZE')        return 'momentum_continuation';
+  if (entryType === 'LONG_LIQUIDATION_CASCADE')      return 'momentum_continuation';
+  if (entryType === 'VWAP_RECLAIM_CLEAN')            return 'vwap_reclaim';
+  if (entryType === 'HVN_REJECTION_ROTATION')        return 'mean_reversion';
+  if (entryType === 'EXHAUSTION_REVERSAL')           return 'exhaustion_fade';
+  if (entryType === 'PULLBACK_CONTINUATION')         return 'pullback';
+  if (entryType === 'WEEKLY_EXPIRY_DEALER_UNWIND')   return 'breakout_expansion';
+  if (entryType === 'COMPOSITE_PROFILE_EDGE_REJECTION') return 'mean_reversion';
+  if (entryType === 'VOLATILITY_COMPRESSION_SQUEEZE') return 'breakout_expansion';
+  if (entryType === 'IV_CRUSH_FADE')                  return 'mean_reversion';
   return null;
 }
 

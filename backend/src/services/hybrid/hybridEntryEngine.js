@@ -59,6 +59,8 @@ const expiryBehaviorEngine     = require('./expiryBehaviorEngine');
 const aggressionModeEngine     = require('./aggressionModeEngine');
 const expectancyEngine         = require('./expectancyEngine');
 const metaRegimeEngine         = require('./metaRegimeEngine');
+const strategyPlaybookEngine   = require('./strategyPlaybookEngine');
+const ivVelocityTracker        = require('./ivVelocityTracker');
 
 const atrService               = require('../atr.service');
 const historicalContext        = require('../historicalContextLoader.service');
@@ -237,6 +239,27 @@ async function decide({
 
   const focus = _focusStrikes(atmStrike);
   const primaryStrikes = _buildPrimaryStrikes(aggregator, focus, atmStrike);
+
+  // ── IV velocity tracking (per-session intraday history) ──────────────
+  // Average of ATM CE+PE IV is recorded each cycle. Used by IV_CRUSH_FADE
+  // playbook to detect rapid IV decay.
+  try {
+    const atmRow = primaryStrikes.find(s => s.strike === atmStrike);
+    const ceIv = Number(atmRow?.ce?.iv);
+    const peIv = Number(atmRow?.pe?.iv);
+    let atmIv = null;
+    if (Number.isFinite(ceIv) && Number.isFinite(peIv)) atmIv = (ceIv + peIv) / 2;
+    else if (Number.isFinite(ceIv)) atmIv = ceIv;
+    else if (Number.isFinite(peIv)) atmIv = peIv;
+    if (Number.isFinite(atmIv) && atmIv > 0) {
+      ivVelocityTracker.record({
+        sessionId,
+        date: settings?.referenceDate || new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10),
+        atmIv,
+        ts: Math.floor(Date.now() / 1000),
+      });
+    }
+  } catch (_) { /* best-effort */ }
 
   // Historical context (today + prior days)
   let history = { today: null, priorDays: [], rollup: null };
@@ -810,6 +833,79 @@ async function decide({
     strategy.maxHoldSec  = Math.min(strategy.maxHoldSec, entryType.bestProfile.maxHoldSec || strategy.maxHoldSec);
   }
 
+  // ── Pipeline step 9d-quint: STRATEGY PLAYBOOK ENGINE (institutional) ──
+  // The auction-event router. Picks ONE specific institutional playbook
+  // for the current meta-regime. If a playbook matches with at least
+  // "standard" conviction, it OVERRIDES the entry type and provides its
+  // own hold/risk profile. This is what turns the engine from "generic
+  // bullish entry" into "initiative breakout after LVN acceptance".
+  const playbookCtx = {
+    direction, spotPrice,
+    metaRegime, marketRegime, volatilityRegime, gammaRegime,
+    auctionState, orderflowState, trendPhase, mtfStructure,
+    volumeAnalysis, oiAnalytics, vwap: payload?.vwap_analysis,
+    futuresData, sessionPhase, candles1m, candles5m,
+    sessionMemory: multiDayContext?.sessionMemory,
+    multiDayContext,
+    marketInternals: algorithmOutputs?.marketInternals,
+    trap,
+    // Calibrated 2026-05-18: pass IV velocity stats (intraday tracker) for
+    // IV_CRUSH_FADE playbook
+    ivStats: ivVelocityTracker.getStats({
+      sessionId,
+      date: settings?.referenceDate || new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10),
+    }),
+    ivPercentile: multiDayContext?.ivPercentile,
+  };
+  const playbook = strategyPlaybookEngine.evaluate(playbookCtx);
+  hybridLogger.info({
+    sessionId, event: 'playbook',
+    message: `${playbook.bestName || 'none'} (${playbook.bestConviction || '-'}) score=${playbook.bestScore}`,
+    data: {
+      bestName: playbook.bestName,
+      bestFamily: playbook.bestFamily,
+      bestConviction: playbook.bestConviction,
+      bestScore: playbook.bestScore,
+      bestReasoning: playbook.bestReasoning,
+      eligibleNames: playbook.eligibleNames,
+      regimeAllowed: playbook.regimeAllowed,
+      allPlaybooks: playbook.allPlaybooks,
+    },
+  });
+
+  // If a playbook matched, override:
+  //   - entry type → the playbook's name (so confidence engine sees it)
+  //   - hold profile → playbook's holdProfile
+  //   - risk profile → playbook's riskProfile (slPct, sizingFactor)
+  if (playbook.bestPlaybook) {
+    entryType.bestType        = playbook.bestName;
+    entryType.bestProfile     = playbook.bestProfile;
+    entryType.bestExitStyle   = playbook.bestPlaybook.riskProfile ? 'playbook_managed' : entryType.bestExitStyle;
+    entryType.bestScore       = playbook.bestScore;
+    entryType.bestReasoning   = `[playbook ${playbook.bestName}/${playbook.bestConviction}] ${playbook.bestReasoning}`;
+    if (playbook.bestProfile) {
+      strategy.tradeType  = playbook.bestProfile.tradeType  || strategy.tradeType;
+      strategy.maxHoldSec = playbook.bestProfile.maxHoldSec || strategy.maxHoldSec;
+    }
+  } else if (entryType.bestType === 'GENERIC_SCALP' || !entryType.bestType) {
+    // CALIBRATED: no playbook AND only generic match → don't trade.
+    // Backtest showed generic scalp = the lowest-edge bucket.
+    return _noTrade(
+      `No institutional playbook eligible for ${metaRegime.state} (${playbook.allPlaybooks.filter(p => p.valid).length} valid but none in eligibility map)`,
+      { metaRegime, playbook, entryType }
+    );
+  }
+  // Stash playbook on entryType so downstream snapshot carries it
+  entryType.playbook = playbook.bestPlaybook ? {
+    name: playbook.bestName,
+    family: playbook.bestFamily,
+    conviction: playbook.bestConviction,
+    score: playbook.bestScore,
+    risk: playbook.bestPlaybook.riskProfile,
+    confirmations: playbook.bestPlaybook.confirmations,
+    preconditions: playbook.bestPlaybook.preconditions,
+  } : null;
+
   // ── Pipeline step 9d-pen: META-REGIME FAMILY HARD-BLOCK ──────────────
   // Calibrated: meta-regime now actively blocks entry families it deems
   // structurally incompatible (gamma_pin → no breakouts, balanced_auction
@@ -1071,6 +1167,10 @@ async function decide({
   if (metaRegime?.sizingFactor && metaRegime.sizingFactor < 1.0) {
     aggressedLots = Math.max(1, Math.round(aggressedLots * metaRegime.sizingFactor));
   }
+  // Playbook sizing factor — institutional risk profile per setup family
+  if (entryType.playbook?.risk?.sizingFactor && entryType.playbook.risk.sizingFactor < 1.0) {
+    aggressedLots = Math.max(1, Math.round(aggressedLots * entryType.playbook.risk.sizingFactor));
+  }
   // CALIBRATED 2026-05-18: Premium-aware sizing. High-premium options have
   // bigger absolute rupee impact on every adverse move. Halve the lots
   // when entry premium > ₹200 (typical deep ATM of NIFTY/expensive index).
@@ -1158,27 +1258,42 @@ async function decide({
   //   The structural engine's `floorSl = max(slPoints, atr*0.5)` allows wide
   //   stops that don't translate well to option-premium %.
   //
-  // Cap rules (per-strategy/entry-type, balanced for runners vs losses):
-  //   SCALP / MEAN_REVERSION : SL ≤ 10% of entry premium
-  //   SWING / MOMENTUM       : SL ≤ 14% of entry premium (room to run)
-  //   BREAKOUT_EXPANSION     : SL ≤ 16% of entry premium
-  // Then apply absolute floor of 6pts (don't go absurdly tight on cheap OTMs).
+  // Cap rules (per-strategy/entry-type/playbook, balanced for runners vs losses):
+  //   GAMMA_PIN_MEAN_REVERSION   : SL ≤ 8%  (tight — pin range is small)
+  //   FAILED_AUCTION_REVERSAL    : SL ≤ 10%
+  //   VWAP_RECLAIM_CLEAN         : SL ≤ 9%
+  //   PULLBACK_CONTINUATION      : SL ≤ 11%
+  //   INITIATIVE_MOMENTUM_EXP.   : SL ≤ 13% (room for trend run)
+  //   BREAKOUT_EXPANSION         : SL ≤ 16%
+  //   Generic SWING              : SL ≤ 14%
+  //   Generic SCALP              : SL ≤ 10%
+  // Then apply absolute floor of 6pts.
+  //
+  // The playbook's riskProfile.slPct OVERRIDES these defaults if available.
   const entryPremium = Number(strikeRes.ltp) || 0;
   if (entryPremium > 0) {
     let slPct;
-    if (entryType.bestType === 'BREAKOUT_EXPANSION') slPct = 0.16;
-    else if (strategy.tradeType === 'SWING')        slPct = 0.14;
-    else                                             slPct = 0.10;
+    if (entryType.playbook?.risk?.slPct) {
+      slPct = entryType.playbook.risk.slPct;            // playbook-driven
+    } else if (entryType.bestType === 'BREAKOUT_EXPANSION') {
+      slPct = 0.16;
+    } else if (strategy.tradeType === 'SWING') {
+      slPct = 0.14;
+    } else {
+      slPct = 0.10;
+    }
     const cappedSl = Math.max(6, Math.round(entryPremium * slPct));
     if (cappedSl < slPoints) {
       hybridLogger.info({
         sessionId, event: 'sl_capped',
         message: `SL capped: ${slPoints}pts → ${cappedSl}pts (${(slPct*100).toFixed(0)}% of ₹${entryPremium})`,
-        data: { originalSl: slPoints, cappedSl, entryPremium, slPct },
+        data: { originalSl: slPoints, cappedSl, entryPremium, slPct,
+                playbook: entryType.playbook?.name },
       });
       slPoints = cappedSl;
       // Maintain RR — also cap target proportionally if structural was huge
-      const maxTarget = cappedSl * (strategy.tradeType === 'SWING' ? 4 : 1.6);
+      const rrTarget = entryType.playbook?.holdProfile?.rrTarget || (strategy.tradeType === 'SWING' ? 4 : 1.6);
+      const maxTarget = cappedSl * rrTarget;
       if (targetOut > maxTarget) targetOut = maxTarget;
     }
   }
@@ -1263,6 +1378,7 @@ async function decide({
     entryType: entryType ? {
       type: entryType.bestType, score: entryType.bestScore,
       exitStyle: entryType.bestExitStyle, holdProfile: entryType.bestProfile,
+      playbook: entryType.playbook || null,
     } : null,
     aggression: aggression ? { mode: aggression.mode, sizingFactor: aggression.sizingFactor } : null,
     expiry: expiry?.active ? { behavior: expiry.behavior, overrides: expiry.overrides } : null,
