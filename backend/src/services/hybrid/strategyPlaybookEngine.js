@@ -301,10 +301,10 @@ function _gammaPinMeanReversion(ctx) {
     valid: conviction !== 'weak',
     score: _clamp(score),
     conviction,
-    // CALIBRATED 2026-05-18 cycle 1: TIMEOUT bleeds were 16 small losses
-    // totalling -₹25k. Cut hold from 240s to 150s — pin moves resolve fast
-    // or not at all. Tight SL too.
-    holdProfile: { tradeType: 'SCALP', maxHoldSec: 150, rrTarget: 1.0 },
+    // CALIBRATED 2026-05-18 cycle 4: 150s was too tight (cut wins short
+    // mid-flight). 200s is the sweet spot — pin moves resolve in 60-180s
+    // window, with a small buffer.
+    holdProfile: { tradeType: 'SCALP', maxHoldSec: 200, rrTarget: 1.0 },
     riskProfile: { slPct: 0.07, sizingFactor: 0.6 },
     allowedDirections: ['bullish', 'bearish'],
     preconditions: ['gamma_pin', 'positive_gamma', 'inside_va', 'edge_position'],

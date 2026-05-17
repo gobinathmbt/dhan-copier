@@ -151,6 +151,23 @@ function _meanReversion(ctx) {
   // Weak delta (we're fading)
   const deltaPct = Math.abs(_safe(ctx.volumeAnalysis?.delta?.cvdPctLong));
   if (deltaPct < 15) { score += 10; reasons.push(`weak delta ${deltaPct}%`); }
+  // CALIBRATED 2026-05-18 cycle 4: relaxed VA-edge requirement (was too
+  // strict, killed entries from 50 → 0). Now: prefer (not require) edge
+  // position. Mid-range setups still allowed but score lower.
+  const va = ctx.volumeAnalysis?.frvp;
+  if (va?.vaHigh && va?.vaLow && Number.isFinite(ctx.spotPrice)) {
+    const range = va.vaHigh - va.vaLow;
+    if (range > 0) {
+      const posInRange = (ctx.spotPrice - va.vaLow) / range;
+      if (ctx.direction === 'bullish' && posInRange < 0.40) {
+        score += 12; reasons.push(`near VAL (${(posInRange*100).toFixed(0)}%)`);
+      } else if (ctx.direction === 'bearish' && posInRange > 0.60) {
+        score += 12; reasons.push(`near VAH (${(posInRange*100).toFixed(0)}%)`);
+      } else if (Math.abs(posInRange - 0.5) < 0.10) {
+        score -= 8; reasons.push('mid-VA fade — risky');
+      }
+    }
+  }
   // Failed breakout history (session memory)
   if (ctx.sessionMemory?.failedBreakouts > 0 || ctx.sessionMemory?.failedBreakdowns > 0) {
     score += 10; reasons.push(`prior failures (${ctx.sessionMemory.failedBreakouts}/${ctx.sessionMemory.failedBreakdowns})`);
@@ -165,7 +182,8 @@ function _meanReversion(ctx) {
   return {
     type: 'MEAN_REVERSION',
     valid, score: Math.max(0, score),
-    holdProfile: { tradeType: 'SCALP', maxHoldSec: 240, rrTarget: 1.0 },
+    // Hold 200s — pin moves resolve fast but a few seconds of patience helps
+    holdProfile: { tradeType: 'SCALP', maxHoldSec: 200, rrTarget: 1.0 },
     exitStyle: 'fixed_target_tight_sl',
     reasoning: reasons.join(' | '),
   };
@@ -177,14 +195,21 @@ function _breakoutExpansion(ctx) {
   // Need volatility expansion regime
   if (ctx.volatilityRegime?.state !== 'expansion') { valid = false; reasons.push('not in expansion regime'); }
   else { score += 20; reasons.push('volatility expansion'); }
+  // CALIBRATED 2026-05-18 cycle 3: 2 losses, both in expiry afternoon with
+  // late-stage moves. Block expiry afternoons + require initiative orderflow
+  // (not just orderflow_state.state being neutral).
+  if (ctx.sessionPhase?.isExpiryDay && ctx.sessionPhase?.hhmm >= 1300) {
+    valid = false; reasons.push('expiry afternoon — late-stage');
+  }
   // LVN breakout (price moving into low-volume zone)
-  // Approximation: spot is near a recently-formed LVN
   const lvns = ctx.volumeAnalysis?.frvp?.lvn || [];
   const spot = ctx.spotPrice;
   if (spot && lvns.some(l => Math.abs(l.price - spot) < 15)) { score += 15; reasons.push('near LVN'); }
-  // Initiative
-  if (ctx.orderflowState?.state === 'initiative_buying' && ctx.direction === 'bullish') { score += 18; reasons.push('initiative buying'); }
-  if (ctx.orderflowState?.state === 'initiative_selling' && ctx.direction === 'bearish') { score += 18; reasons.push('initiative selling'); }
+  // Initiative — REQUIRED (not optional)
+  const ofOK = (ctx.orderflowState?.state === 'initiative_buying' && ctx.direction === 'bullish')
+            || (ctx.orderflowState?.state === 'initiative_selling' && ctx.direction === 'bearish');
+  if (!ofOK) { valid = false; reasons.push(`orderflow ${ctx.orderflowState?.state} not initiative`); }
+  else { score += 18; reasons.push(`orderflow ${ctx.orderflowState.state}`); }
   // Futures lead
   const futDir = ctx.futuresData?.direction;
   if (futDir === ctx.direction) { score += 10; reasons.push('futures aligned'); }
@@ -208,14 +233,33 @@ function _pullback(ctx) {
            (phase === 'markdown' && ctx.direction === 'bearish')) {
     score += 25; reasons.push(`with-trend ${phase}`);
   } else { valid = false; reasons.push('counter-trend pullback'); }
+  // CALIBRATED 2026-05-18 cycle 3: legacy _pullback degraded from 85% to
+  // 54% WR after admitting more entries. Add stricter preconditions:
+  //   - Block midday_chop (fragile pullbacks fail in chop)
+  //   - Block expiry afternoons (theta brutal)
+  //   - Require delta to be RECOVERING (rising/falling), not just present
+  //   - Trend phase strength ≥ 60
+  if (ctx.sessionPhase?.phase === 'midday_chop') {
+    valid = false; reasons.push('midday_chop session');
+  }
+  if (ctx.sessionPhase?.isExpiryDay && ctx.sessionPhase?.hhmm >= 1300) {
+    valid = false; reasons.push('expiry afternoon');
+  }
+  if (_safe(ctx.trendPhase?.strength) < 60) {
+    valid = false; reasons.push(`trend strength ${ctx.trendPhase?.strength} < 60`);
+  }
   // VWAP reclaim
   const vwapPos = ctx.vwap?.position;
   if ((ctx.direction === 'bullish' && vwapPos === 'above') ||
       (ctx.direction === 'bearish' && vwapPos === 'below')) { score += 12; reasons.push('VWAP supportive'); }
-  // Delta still positive in direction (responsive buying)
+  else { valid = false; reasons.push('VWAP wrong side'); }
+  // Delta RECOVERING in direction
   const deltaPct = _safe(ctx.volumeAnalysis?.delta?.cvdPctLong);
-  if ((ctx.direction === 'bullish' && deltaPct > 0) ||
-      (ctx.direction === 'bearish' && deltaPct < 0)) { score += 10; reasons.push(`delta ${deltaPct}%`); }
+  const deltaTrend = ctx.volumeAnalysis?.delta?.trend;
+  const deltaOK = (ctx.direction === 'bullish' && deltaPct > 5 && deltaTrend === 'rising')
+              || (ctx.direction === 'bearish' && deltaPct < -5 && deltaTrend === 'falling');
+  if (!deltaOK) { valid = false; reasons.push(`delta not recovering (${deltaPct}%, ${deltaTrend})`); }
+  else { score += 10; reasons.push(`delta ${deltaTrend} ${deltaPct}%`); }
   // Shallow retrace — price not far from VWAP / POC
   const distPct = Math.abs(_safe(ctx.vwap?.distance_pct));
   if (distPct < 0.5) { score += 8; reasons.push(`near VWAP (${distPct.toFixed(2)}%)`); }
@@ -223,7 +267,7 @@ function _pullback(ctx) {
   return {
     type: 'PULLBACK',
     valid, score: Math.max(0, score),
-    holdProfile: { tradeType: 'SWING', maxHoldSec: 600, rrTarget: 2.0 },
+    holdProfile: { tradeType: 'SWING', maxHoldSec: 480, rrTarget: 2.0 },
     exitStyle: 'trail_swing',
     reasoning: reasons.join(' | '),
   };
