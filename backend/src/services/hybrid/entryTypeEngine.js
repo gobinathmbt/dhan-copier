@@ -146,6 +146,20 @@ function _meanReversion(ctx) {
   // Positive gamma essential
   if (ctx.gammaRegime?.regime !== 'positive') { valid = false; reasons.push('not positive gamma'); }
   else { score += 25; reasons.push('positive gamma'); }
+  // CALIBRATED 2026-05-18 cycle 7-8: 13 losses on MEAN_REVERSION, 11 TIMEOUTs.
+  // Pattern: gamma_pin meta but regime is trending — pin already starting
+  // to break. Require spot to be reasonably close to gamma pinning level
+  // (<30pts). 20pts was too tight (cut wins).
+  const spotVsPin = Math.abs(_safe(ctx.gammaRegime?.spotVsPin));
+  if (spotVsPin > 30) {
+    valid = false; reasons.push(`spotVsPin ${spotVsPin}pts > 30 (pin breaking)`);
+  } else if (spotVsPin > 0 && spotVsPin <= 15) {
+    score += 8; reasons.push(`tight pin ${spotVsPin}pts`);
+  }
+  // Block on Friday afternoons (theta + position-square risk)
+  if (ctx.sessionPhase?.weekday === 'Fri' && ctx.sessionPhase?.hhmm >= 1300) {
+    valid = false; reasons.push('Fri afternoon — position square risk');
+  }
   // Inside value area
   if (ctx.volumeAnalysis?.acceptance === 'inside_va') { score += 15; reasons.push('inside VA'); }
   // Weak delta (we're fading)
