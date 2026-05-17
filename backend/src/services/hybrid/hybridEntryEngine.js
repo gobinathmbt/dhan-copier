@@ -217,9 +217,10 @@ async function decide({
     return _noTrade(`Daily trade cap reached (${tradesToday}/${maxTradesPerDay})`);
   }
   // ── Daily loss-streak halt (preserves capital after bad start) ──────
-  // Stop entries the moment 3 losses have printed today. Prevents drift
-  // into churn-trading after a rough morning.
-  const maxLossesPerDay = Number(settings?.maxLossesPerDay) || 3;
+  // Stop entries the moment 2 losses have printed today (was 3).
+  // Calibration: 2026-02-17 had 3 losses in a row before halt fired.
+  // Tighter cap prevents same-day cascade.
+  const maxLossesPerDay = Number(settings?.maxLossesPerDay) || 2;
   if (lossesToday >= maxLossesPerDay) {
     return _noTrade(`Daily loss-streak halt (${lossesToday}/${maxLossesPerDay})`);
   }
@@ -1079,6 +1080,24 @@ async function decide({
   });
   if (!strikeRes.ok) {
     return _noTrade(`Strike selection failed: ${strikeRes.reason}`);
+  }
+  // CALIBRATED 2026-05-18 cycle 6: For mean-reversion / vwap-reclaim style
+  // playbooks, block deep-OTM fades (entry premium < 60 + delta < 0.30).
+  // These are statistically the worst — premium is too far from price for
+  // a small mean-reversion move to recover the gap.
+  // Backtest evidence: 2026-02-17 had 3 losses on strike 25700 CE with spot
+  // ~25530 (170pts OTM, premium ~60). All hit SL within 60-120s.
+  const meanRevertPlaybooks = new Set([
+    'GAMMA_PIN_MEAN_REVERSION', 'MEAN_REVERSION', 'HVN_REJECTION_ROTATION',
+    'COMPOSITE_PROFILE_EDGE_REJECTION', 'IV_CRUSH_FADE',
+  ]);
+  if (meanRevertPlaybooks.has(entryType.bestType)
+      && Number(strikeRes.ltp) < 60
+      && Number(strikeRes.delta) < 0.32) {
+    return _noTrade(
+      `Deep-OTM mean-revert block: ltp=${strikeRes.ltp} delta=${strikeRes.delta} on ${entryType.bestType}`,
+      { strike: strikeRes.strike, ltp: strikeRes.ltp, delta: strikeRes.delta }
+    );
   }
   hybridLogger.info({
     sessionId, event: 'strike',

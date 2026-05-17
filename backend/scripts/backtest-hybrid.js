@@ -514,7 +514,7 @@ async function backtestDay(dayLabel) {
     trapBlockThreshold: 80,                       // was 70 (engine default 80)
     aggressionMode: 'institutional',
     maxTradesPerDay: 8,                           // institutional spec daily cap
-    maxLossesPerDay: 3,                           // halt after 3 losses today
+    maxLossesPerDay: 2,                           // halt after 2 losses today (was 3)
   };
 
   const session = {
