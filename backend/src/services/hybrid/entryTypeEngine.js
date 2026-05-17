@@ -46,14 +46,20 @@ function _momentumContinuation(ctx) {
   // Trend alignment — full MTF required
   if (ctx.mtfStructure?.alignment !== 'full') { valid = false; reasons.push('not full MTF alignment'); }
   else { score += 20; reasons.push('full MTF alignment'); }
-  // CALIBRATED 2026-05-18 cycle 1: momentum was the biggest loss bucket
-  // (-₹49,258 across 9 losses). Add stricter preconditions:
+  // CALIBRATED 2026-05-18 cycle 2: momentum still bleeding (37.5% WR with
+  // 5 losses -₹16k). Add stricter preconditions:
   //   - Volatility must be expansion or normal (not dead)
   //   - Gamma must be negative OR explicit short_covering / long_liquidation
   //     OI regime (institutions actually pushing the move)
   //   - Delta must be rising/falling in direction (not just absolute)
+  //   - Orderflow MUST be initiative_buying / initiative_selling — otherwise
+  //     the institutional push isn't there yet
+  //   - Block midday_chop session (most losses here)
   if (ctx.volatilityRegime?.state === 'dead') {
     valid = false; reasons.push('dead volatility');
+  }
+  if (ctx.sessionPhase?.phase === 'midday_chop') {
+    valid = false; reasons.push('midday_chop session');
   }
   const gammaOK = ctx.gammaRegime?.regime === 'negative';
   const oiPush = (ctx.direction === 'bullish' && ctx.oiAnalytics?.regime === 'violent_short_covering')
@@ -65,6 +71,11 @@ function _momentumContinuation(ctx) {
   } else {
     score += 18; reasons.push(`OI ${ctx.oiAnalytics.regime}`);
   }
+  // Orderflow MUST be initiative (not neutral)
+  const ofOK = (ctx.direction === 'bullish' && ctx.orderflowState?.state === 'initiative_buying')
+            || (ctx.direction === 'bearish' && ctx.orderflowState?.state === 'initiative_selling');
+  if (!ofOK) { valid = false; reasons.push(`orderflow ${ctx.orderflowState?.state} not initiative`); }
+  else { score += 12; reasons.push(`orderflow ${ctx.orderflowState.state}`); }
   // Delta expanding in direction (must be RISING/FALLING, not just absolute)
   const deltaPct = _safe(ctx.volumeAnalysis?.delta?.cvdPctLong);
   const deltaTrend = ctx.volumeAnalysis?.delta?.trend;

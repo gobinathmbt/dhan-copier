@@ -732,6 +732,10 @@ function _pullbackContinuation(ctx) {
   if (ctx.sessionPhase?.isExpiryDay && ctx.sessionPhase?.hhmm >= 1300) {
     required.push('expiry afternoon — too much theta');
   }
+  // Block midday_chop session (fragile pullbacks fail in chop)
+  if (ctx.sessionPhase?.phase === 'midday_chop') {
+    required.push('midday_chop session');
+  }
 
   // Delta must be RECOVERING in direction (was just positive/negative)
   const deltaPct = _safe(ctx.volumeAnalysis?.delta?.cvdPctLong);
@@ -1023,6 +1027,12 @@ function _volatilityCompressionSqueeze(ctx) {
               || (ctx.direction === 'bearish' && deltaPct < -5 && (deltaTrend === 'falling' || deltaTrend === 'flat'));
   if (!deltaOK) required.push(`delta not breaking out (pct ${deltaPct}, trend ${deltaTrend})`);
 
+  // CALIBRATED cycle 2: Squeeze playbook had 33% WR. Require initiative
+  // orderflow — without it the move is dealer hedging, not real expansion.
+  const ofOK = (ctx.direction === 'bullish' && ctx.orderflowState?.state === 'initiative_buying')
+            || (ctx.direction === 'bearish' && ctx.orderflowState?.state === 'initiative_selling');
+  if (!ofOK) required.push(`orderflow ${ctx.orderflowState?.state} not initiative`);
+
   const valid = required.length === 0;
   if (!valid) {
     return { name: 'VOLATILITY_COMPRESSION_SQUEEZE', family: 'breakout_expansion',
@@ -1185,7 +1195,7 @@ function _vwapBounceScalp(ctx) {
   const vwapVal = Number(vwap?.vwap);
   const dist = Math.abs(_safe(vwap?.distance_pct));
   if (!vwapVal) required.push('no VWAP');
-  if (dist > 0.4) required.push(`too far from VWAP (${dist.toFixed(2)}%)`);
+  if (dist > 0.6) required.push(`too far from VWAP (${dist.toFixed(2)}%)`);
 
   // Direction must align with VWAP position (price near VWAP, on right side)
   const vwapPos = vwap?.position;
