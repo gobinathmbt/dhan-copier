@@ -518,6 +518,8 @@ function evaluate(ctx = {}) {
     IV_CRUSH_FADE:                 'mean_reversion',
     VWAP_BOUNCE_SCALP:             'vwap_reclaim',
     TREND_VWAP_FOLLOW:             'pullback',
+    COUNTER_TREND_REVERSAL:        'reversal',
+    DELTA_DRIVE_SCALP:             'momentum_continuation',
   };
 
   // Pre-filter: drop any setup whose family is blocked under the current

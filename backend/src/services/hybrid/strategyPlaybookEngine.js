@@ -1283,7 +1283,7 @@ function _vwapBounceScalp(ctx) {
   return {
     name: 'VWAP_BOUNCE_SCALP',
     family: 'vwap_reclaim',
-    valid: conviction !== 'weak' && score >= 50,
+    valid: conviction !== 'weak' && score >= 45,
     score: _clamp(score),
     conviction,
     holdProfile: { tradeType: 'SCALP', maxHoldSec: 240, rrTarget: 1.3 },
@@ -1336,12 +1336,13 @@ function _trendVwapFollow(ctx) {
     required.push('dead volatility');
   }
 
-  // CALIBRATED 2026-05-18 cycle 14: 4 TIMEOUT losses on TREND_VWAP_FOLLOW.
-  // All had delta ≤ 8%. Require delta > 8% AND OI alignment to avoid
-  // stalled trend-follow entries.
+  // CALIBRATED 2026-05-18 cycle 14-15: 4 TIMEOUT losses on TREND_VWAP_FOLLOW.
+  // Cycle 15 still showed 88 trend_auction zero blocks — too tight at 8%.
+  // Require delta > 6% AND OI alignment to keep quality without starving
+  // the trend_auction regime.
   const deltaPctReq = _safe(ctx.volumeAnalysis?.delta?.cvdPctLong);
-  const deltaStrong = (ctx.direction === 'bullish' && deltaPctReq > 8)
-                  || (ctx.direction === 'bearish' && deltaPctReq < -8);
+  const deltaStrong = (ctx.direction === 'bullish' && deltaPctReq > 6)
+                  || (ctx.direction === 'bearish' && deltaPctReq < -6);
   if (!deltaStrong) required.push(`delta too weak for trend-follow (${deltaPctReq}%)`);
 
   const oiR2 = ctx.oiAnalytics?.regime || '';
@@ -1408,20 +1409,218 @@ function _trendVwapFollow(ctx) {
   };
 }
 
+// ─── PLAYBOOK 16: COUNTER_TREND_REVERSAL (regime-counter setup) ──────────
+// When the meta is trending but direction is OPPOSITE the regime, we may
+// be catching a clean reversal at a key level. Strict preconditions —
+// only fires on very high-quality counter-trend setups (sweep + absorption
+// + delta divergence) so it doesn't bleed.
+//
+// Used in: trend_auction, short_covering, long_liquidation, dealer_hedging
+// when the playbook engine has no other valid match for the
+// (regime, direction) combo.
+function _counterTrendReversal(ctx) {
+  const reasons = [];
+  let score = 0;
+  const required = [];
+  const confirmations = [];
+
+  // Need a trending regime
+  const regime = ctx.marketRegime?.regime;
+  const inTrendRegime = regime === 'trending_bullish' || regime === 'trending_bearish';
+  if (!inTrendRegime) required.push('not trending regime');
+
+  // Direction must OPPOSE the trend (counter-trend setup)
+  if (regime === 'trending_bullish' && ctx.direction !== 'bearish') required.push('direction not counter-trend');
+  if (regime === 'trending_bearish' && ctx.direction !== 'bullish') required.push('direction not counter-trend');
+
+  // Delta divergence in our direction (price going one way, delta the other)
+  const div = ctx.volumeAnalysis?.delta?.divergence;
+  const divBias = ctx.volumeAnalysis?.delta?.divergenceBias;
+  const hasDivergence = div && div !== 'none' && divBias === ctx.direction;
+
+  // OR VSA absorption / spring / upthrust supporting our direction
+  const vsa = ctx.volumeAnalysis?.vsa;
+  const hasVsaSupport = vsa?.bias === ctx.direction && _safe(vsa.strength) >= 50;
+
+  // OR auction excess in our direction (spike rejection at an extreme)
+  const hasExcess = (ctx.direction === 'bullish' && ctx.auctionState?.excessLow)
+                 || (ctx.direction === 'bearish' && ctx.auctionState?.excessHigh);
+
+  if (!hasDivergence && !hasVsaSupport && !hasExcess) {
+    required.push('need divergence OR VSA absorption/spring/upthrust OR auction excess');
+  }
+
+  // Block midday_chop and expiry afternoons (low quality)
+  if (ctx.sessionPhase?.phase === 'midday_chop') required.push('midday_chop');
+  if (ctx.sessionPhase?.isExpiryDay && ctx.sessionPhase?.hhmm >= 1300) required.push('expiry afternoon');
+
+  // Block dead vol
+  if (ctx.volatilityRegime?.state === 'dead') required.push('dead volatility');
+
+  const valid = required.length === 0;
+  if (!valid) {
+    return { name: 'COUNTER_TREND_REVERSAL', family: 'reversal',
+             valid: false, score: 0, conviction: 'weak', missing: required,
+             reasoning: `missing: ${required.join(', ')}` };
+  }
+  score += 35; reasons.push(`counter-trend ${ctx.direction} vs ${regime}`);
+
+  // Confirmations — counts each evidence piece
+  if (hasDivergence) { score += 12; confirmations.push(`delta div ${div}`); }
+  if (hasVsaSupport) { score += 12; confirmations.push(`VSA ${vsa.pattern}`); }
+  if (hasExcess) { score += 10; confirmations.push('auction excess'); }
+
+  // VWAP context — look for reclaim/rejection at VWAP
+  const vwapPos = ctx.vwap?.position;
+  const dist = Math.abs(_safe(ctx.vwap?.distance_pct));
+  if ((ctx.direction === 'bullish' && vwapPos === 'above' && dist < 0.4)
+   || (ctx.direction === 'bearish' && vwapPos === 'below' && dist < 0.4)) {
+    score += 10; confirmations.push(`VWAP supportive (${dist.toFixed(2)}%)`);
+  }
+
+  // 5m CHOCH supports
+  if ((ctx.direction === 'bullish' && ctx.mtfStructure?.choch5 === 'bullish_choch')
+   || (ctx.direction === 'bearish' && ctx.mtfStructure?.choch5 === 'bearish_choch')) {
+    score += 12; confirmations.push(`5m ${ctx.mtfStructure.choch5}`);
+  }
+
+  // OI absorption
+  if (ctx.oiAnalytics?.absorption?.detected) {
+    score += 10; confirmations.push(`OI absorption ${ctx.oiAnalytics.absorption.side}`);
+  }
+
+  // Trap engine corroborates (failed breakout in trend direction)
+  if ((ctx.trap?.trapScore || 0) >= 50) {
+    score += 8; confirmations.push(`trap ${ctx.trap.trapScore}`);
+  }
+
+  // Need at least 2 confirmations beyond the precondition
+  const conviction = confirmations.length >= 4 ? 'elite' :
+                     confirmations.length >= 3 ? 'standard' : 'weak';
+
+  return {
+    name: 'COUNTER_TREND_REVERSAL',
+    family: 'reversal',
+    valid: conviction !== 'weak' && score >= 60,
+    score: _clamp(score),
+    conviction,
+    holdProfile: { tradeType: 'SCALP', maxHoldSec: 300, rrTarget: 1.6 },
+    riskProfile: { slPct: 0.09, sizingFactor: 0.6 },
+    allowedDirections: ['bullish', 'bearish'],
+    preconditions: ['trending_regime', 'counter_direction', 'divergence_or_absorption'],
+    confirmations,
+    reasoning: `${conviction.toUpperCase()} | ${confirmations.join(' | ')}`,
+  };
+}
+
+// ─── PLAYBOOK 17: DELTA_DRIVE_SCALP (very-high-availability scalp) ───────
+// Simplest possible scalp filter — fires when delta is meaningfully in
+// our direction AND VWAP supports AND no trap. This is a last-resort
+// "the market is moving" entry, used when regime-specific playbooks miss.
+// Tight risk to keep losses small if it fires on a fakeout.
+function _deltaDriveScalp(ctx) {
+  const reasons = [];
+  let score = 0;
+  const required = [];
+  const confirmations = [];
+
+  // Delta must be clearly in direction (≥10% absolute, >7 strength)
+  const deltaPct = _safe(ctx.volumeAnalysis?.delta?.cvdPctLong);
+  const deltaStr = _safe(ctx.volumeAnalysis?.delta?.strength);
+  const deltaOK = (ctx.direction === 'bullish' && deltaPct > 10 && deltaStr >= 40)
+              || (ctx.direction === 'bearish' && deltaPct < -10 && deltaStr >= 40);
+  if (!deltaOK) required.push(`delta not strong (${deltaPct}%, str ${deltaStr})`);
+
+  // VWAP supportive (right side, < 0.7% away)
+  const vwapPos = ctx.vwap?.position;
+  const dist = Math.abs(_safe(ctx.vwap?.distance_pct));
+  if ((ctx.direction === 'bullish' && vwapPos !== 'above')
+   || (ctx.direction === 'bearish' && vwapPos !== 'below')) {
+    required.push('VWAP wrong side');
+  }
+  if (dist > 0.7) required.push(`too far from VWAP (${dist.toFixed(2)}%)`);
+
+  // OI must not actively oppose
+  const oiR = ctx.oiAnalytics?.regime || '';
+  const oiAgainst = (ctx.direction === 'bullish' && (oiR === 'aggressive_short_buildup' || oiR === 'long_unwinding_collapse'))
+                || (ctx.direction === 'bearish' && (oiR === 'aggressive_long_buildup' || oiR === 'violent_short_covering'));
+  if (oiAgainst) required.push(`OI ${oiR} against`);
+
+  // Block dead vol, midday chop, expiry afternoons
+  if (ctx.volatilityRegime?.state === 'dead') required.push('dead vol');
+  if (ctx.sessionPhase?.phase === 'midday_chop') required.push('midday chop');
+  if (ctx.sessionPhase?.isExpiryDay && ctx.sessionPhase?.hhmm >= 1400) required.push('expiry afternoon');
+
+  // Block trap
+  if ((ctx.trap?.trapScore || 0) >= 50) required.push(`trap score ${ctx.trap.trapScore}`);
+
+  // Block when same direction as auction trend in mean-revert regimes
+  if (ctx.metaRegime?.state === 'gamma_pin'
+      || ctx.metaRegime?.state === 'balanced_auction') {
+    required.push(`mean-revert regime (${ctx.metaRegime.state}) — use specific playbook`);
+  }
+
+  const valid = required.length === 0;
+  if (!valid) {
+    return { name: 'DELTA_DRIVE_SCALP', family: 'momentum_continuation',
+             valid: false, score: 0, conviction: 'weak', missing: required,
+             reasoning: `missing: ${required.join(', ')}` };
+  }
+  score += 30; reasons.push(`delta ${deltaPct}% str ${deltaStr}`);
+
+  // Confirmations
+  if ((ctx.direction === 'bullish' && (oiR === 'aggressive_long_buildup' || oiR === 'violent_short_covering'))
+   || (ctx.direction === 'bearish' && (oiR === 'aggressive_short_buildup' || oiR === 'long_unwinding_collapse'))) {
+    score += 12; confirmations.push(`OI ${oiR}`);
+  }
+  if (ctx.mtfStructure?.alignment === 'full' || ctx.mtfStructure?.alignment === 'partial') {
+    score += 10; confirmations.push(`MTF ${ctx.mtfStructure.alignment}`);
+  }
+  if (ctx.futuresData?.direction === ctx.direction) {
+    score += 8; confirmations.push('futures aligned');
+  }
+  // VSA bullish or bearish in our direction
+  if (ctx.volumeAnalysis?.vsa?.bias === ctx.direction && _safe(ctx.volumeAnalysis.vsa.strength) >= 50) {
+    score += 8; confirmations.push(`VSA ${ctx.volumeAnalysis.vsa.pattern}`);
+  }
+  // Liquidity good
+  if (ctx.liquidity?.health === 'good' || ctx.liquidity?.health === 'excellent') {
+    score += 5; confirmations.push(`liq ${ctx.liquidity.health}`);
+  }
+
+  // Need at least 2 confirmations
+  const conviction = confirmations.length >= 4 ? 'elite' :
+                     confirmations.length >= 2 ? 'standard' : 'weak';
+
+  return {
+    name: 'DELTA_DRIVE_SCALP',
+    family: 'momentum_continuation',
+    valid: conviction !== 'weak' && score >= 45,
+    score: _clamp(score),
+    conviction,
+    holdProfile: { tradeType: 'SCALP', maxHoldSec: 240, rrTarget: 1.4 },
+    riskProfile: { slPct: 0.08, sizingFactor: 0.5 },
+    allowedDirections: ['bullish', 'bearish'],
+    preconditions: ['strong_delta', 'vwap_supportive', 'oi_not_against', 'no_trap'],
+    confirmations,
+    reasoning: `${conviction.toUpperCase()} | ${confirmations.join(' | ')}`,
+  };
+}
+
 // ─── REGIME → PLAYBOOK ELIGIBILITY MAP (institutional spec) ────────────────
 // This is the orchestrator's "permission map". Even if a playbook scores
 // high, it must match the current meta-regime to be eligible.
 const REGIME_PLAYBOOKS = {
-  trend_auction:    ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'OPENING_DRIVE_CONTINUATION', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW'],
-  short_covering:   ['SHORT_COVERING_SQUEEZE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW'],
-  long_liquidation: ['LONG_LIQUIDATION_CASCADE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW'],
+  trend_auction:    ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'OPENING_DRIVE_CONTINUATION', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP'],
+  short_covering:   ['SHORT_COVERING_SQUEEZE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP'],
+  long_liquidation: ['LONG_LIQUIDATION_CASCADE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP'],
   gamma_pin:        ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'FAILED_AUCTION_REVERSAL', 'EXHAUSTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP'],
   balanced_auction: ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP'],
   slow_grind:       ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'PULLBACK_CONTINUATION', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP'],
-  dealer_hedging:   ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW'],
-  expiry_expansion: ['WEEKLY_EXPIRY_DEALER_UNWIND', 'INITIATIVE_MOMENTUM_EXPANSION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW'],
+  dealer_hedging:   ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP'],
+  expiry_expansion: ['WEEKLY_EXPIRY_DEALER_UNWIND', 'INITIATIVE_MOMENTUM_EXPANSION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'DELTA_DRIVE_SCALP'],
   panic:            ['EXHAUSTION_REVERSAL', 'FAILED_AUCTION_REVERSAL'],
-  unknown:          ['GAMMA_PIN_MEAN_REVERSION', 'VWAP_RECLAIM_CLEAN', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'VWAP_BOUNCE_SCALP'],
+  unknown:          ['GAMMA_PIN_MEAN_REVERSION', 'VWAP_RECLAIM_CLEAN', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'VWAP_BOUNCE_SCALP', 'DELTA_DRIVE_SCALP'],
 };
 
 const ALL_PLAYBOOKS = [
@@ -1440,6 +1639,8 @@ const ALL_PLAYBOOKS = [
   _ivCrushFade,
   _vwapBounceScalp,
   _trendVwapFollow,
+  _counterTrendReversal,
+  _deltaDriveScalp,
 ];
 
 /**

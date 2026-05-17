@@ -191,6 +191,8 @@ function familyOf(entryType) {
   if (entryType === 'IV_CRUSH_FADE')                  return 'mean_reversion';
   if (entryType === 'VWAP_BOUNCE_SCALP')              return 'vwap_reclaim';
   if (entryType === 'TREND_VWAP_FOLLOW')              return 'pullback';
+  if (entryType === 'COUNTER_TREND_REVERSAL')         return 'reversal';
+  if (entryType === 'DELTA_DRIVE_SCALP')              return 'momentum_continuation';
   return null;
 }
 
