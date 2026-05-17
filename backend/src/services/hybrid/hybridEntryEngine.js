@@ -603,14 +603,16 @@ async function decide({
 
   // ── PE-side enhanced filter (calibration: BUY_PE win rate was 38.3%) ──
   // Bearish trades fail more in NIFTY because of bullish drift bias and
-  // gamma suppression. CALIBRATED 2026-05-18 cycle 12: 470 zero-trade-day
-  // blocks came from this filter being too strict (required 5m AND 15m
-  // bearish). Relax to:
-  //   - At least ONE of (5m bearish OR 15m bearish) AND
-  //   - below VWAP AND
-  //   - bearish derivative evidence (OI, futures, or gamma flip below)
-  //   - AND not gamma-suppressed without acceleration
-  if (direction === 'bearish') {
+  // gamma suppression. CALIBRATED 2026-05-18 cycle 12-14: 470+ zero-trade-day
+  // blocks came from this filter.
+  //
+  // SKIP this filter when direction was resolved via OI/futures/delta —
+  // those signals already validate the bearish bias and the filter was
+  // designed for cases where derivatives are neutral.
+  // APPLY the filter when direction came from derivatives or marketRegime.
+  const directionViaTfFilter = directionSource === 'derivatives'
+    || directionSource === 'marketRegime' || directionSource === '5m+vwap';
+  if (direction === 'bearish' && directionViaTfFilter) {
     const tf5  = algorithmOutputs?.multiTimeframe?.timeframes?.['5m']?.trend;
     const tf15 = algorithmOutputs?.multiTimeframe?.timeframes?.['15m']?.trend;
     const vwapPos = payload?.vwap_analysis?.position || payload?.vwap_analysis?.price_vs_vwap;
@@ -892,15 +894,10 @@ async function decide({
     data: { bestType: entryType.bestType, bestScore: entryType.bestScore,
             allEvals: entryType.allEvaluations.map(e => ({ type: e.type, valid: e.valid, score: e.score })) },
   });
-  if (!entryType.bestType) {
-    // CALIBRATED (institutional spec): no setup matched OR all candidates
-    // were blocked by meta-regime. Don't trade — generic scalp fallback was
-    // a major source of low-edge trades in the backtest.
-    return _noTrade(
-      `No valid entry type for ${metaRegime.state} (${entryType.allEvaluations.length} evaluated, blocked=${(entryType.blockedFamilies||[]).join('/')})`,
-      { metaRegime, entryType }
-    );
-  }
+  // CALIBRATED 2026-05-18 cycle 14: Don't early-return here when
+  // entryType.bestType is null. The playbook engine (run next) is the
+  // primary entry router and may match even when the legacy entry-type
+  // evaluator finds nothing. We check after the playbook layer.
   // Apply entry-type's hold profile (overrides strategy's tradeType / maxHold)
   if (entryType.bestProfile) {
     strategy.tradeType   = entryType.bestProfile.tradeType   || strategy.tradeType;
@@ -961,14 +958,17 @@ async function decide({
       strategy.tradeType  = playbook.bestProfile.tradeType  || strategy.tradeType;
       strategy.maxHoldSec = playbook.bestProfile.maxHoldSec || strategy.maxHoldSec;
     }
-  } else if (entryType.bestType === 'GENERIC_SCALP' || !entryType.bestType) {
-    // CALIBRATED: no playbook AND only generic match → don't trade.
-    // Backtest showed generic scalp = the lowest-edge bucket.
+  } else if (!entryType.bestType || entryType.bestType === 'GENERIC_SCALP') {
+    // CALIBRATED: no playbook AND no legacy entry-type → don't trade.
+    // (Generic scalp fallback was the lowest-edge bucket in the backtest.)
     return _noTrade(
-      `No institutional playbook eligible for ${metaRegime.state} (${playbook.allPlaybooks.filter(p => p.valid).length} valid but none in eligibility map)`,
+      `No playbook or entry type for ${metaRegime.state} ` +
+      `(${playbook.allPlaybooks.filter(p => p.valid).length} playbooks valid, ` +
+      `${entryType.allEvaluations.filter(e => e.valid).length} entry-types valid)`,
       { metaRegime, playbook, entryType }
     );
   }
+  // else: no playbook matched but legacy entry-type did — proceed with that
   // Stash playbook on entryType so downstream snapshot carries it
   entryType.playbook = playbook.bestPlaybook ? {
     name: playbook.bestName,
