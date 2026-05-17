@@ -1276,10 +1276,11 @@ function _vwapBounceScalp(ctx) {
     score += 6; confirmations.push('futures aligned');
   }
 
-  // Need at least 2 confirmations to graduate to standard
+  // CALIBRATED cycle 24: require 3+ confirmations for graduation. Cycle 18-22
+  // showed 32 losses dominated by 'standard' conviction trades (only 2 confs).
+  // Boosting bar to 3 confs cuts the weakest signals while keeping 100+ trades.
   const conviction = confirmations.length >= 4 ? 'elite' :
-                     confirmations.length >= 2 ? 'standard' : 'weak';
-
+                     confirmations.length >= 3 ? 'standard' : 'weak';
   return {
     name: 'VWAP_BOUNCE_SCALP',
     family: 'vwap_reclaim',
