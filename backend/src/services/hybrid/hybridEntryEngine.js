@@ -58,6 +58,7 @@ const entryTypeEngine          = require('./entryTypeEngine');
 const expiryBehaviorEngine     = require('./expiryBehaviorEngine');
 const aggressionModeEngine     = require('./aggressionModeEngine');
 const expectancyEngine         = require('./expectancyEngine');
+const metaRegimeEngine         = require('./metaRegimeEngine');
 
 const atrService               = require('../atr.service');
 const historicalContext        = require('../historicalContextLoader.service');
@@ -387,6 +388,23 @@ async function decide({
     message: `${gammaRegime.regime} netGEX=${gammaRegime.netGex} pin=${gammaRegime.pinningLevel} flip=${gammaRegime.gammaFlip}`,
     data: gammaRegime,
   });
+  const oiAnalytics0 = oiAnalyticsEngine.analyze({
+    primaryStrikes, atmStrike, spotPrice, sessionId,
+  });
+  // ── Pipeline step 7a-bis: META-REGIME (institutional behaviour state) ─
+  // The brain that fuses every sub-state into ONE label and drives entry
+  // family permission + sizing + hold time. Centralised — no other engine
+  // applies penalties for these states from here on.
+  const metaRegime = metaRegimeEngine.classify({
+    marketRegime, volatilityRegime, auctionState, gammaRegime,
+    oiAnalytics: oiAnalytics0,    // first OI snapshot (we re-derive with direction later)
+    sessionPhase,
+  });
+  hybridLogger.info({
+    sessionId, event: 'meta_regime',
+    message: `${metaRegime.state} | allowed=[${metaRegime.allowedFamilies.join(',')}] | ${metaRegime.reasoning}`,
+    data: metaRegime,
+  });
 
   // ── Pipeline step 7b: Volume analysis (FRVP + VSA + time-volume) ─────
   // Volume tells the truth behind the candle. FRVP reveals the price levels
@@ -443,9 +461,7 @@ async function decide({
   // analyze() once without direction here so the snapshot history is recorded
   // even when we later abort the cycle. We re-run with direction inside the
   // confidence scorer block.
-  const oiAnalytics0 = oiAnalyticsEngine.analyze({
-    primaryStrikes, atmStrike, spotPrice, sessionId,
-  });
+
   if (oiAnalytics0) {
     hybridLogger.info({
       sessionId, event: 'oi_analytics',
@@ -745,27 +761,15 @@ async function decide({
     strategy.maxHoldSec  = Math.min(strategy.maxHoldSec, entryType.bestProfile.maxHoldSec || strategy.maxHoldSec);
   }
 
-  // ── Pipeline step 9d-quint: Expectancy adjustment ─────────────────────
-  // Adjusts confidence floor based on historical performance of this exact
-  // bucket (entry type × regime × phase × expiry).
+  // ── Pipeline step 9e: Confidence scoring (centralised) ────────────────
+  // ALL penalties (trap, MTF, trend phase, gamma family fit, expectancy)
+  // are applied here in ONE place. No duplicate adjustments after this.
   const expAdj = expectancyEngine.getAdjustment({
     entryType: entryType.bestType,
     regime: marketRegime?.regime,
     phase: sessionPhase?.phase,
     expiry: !!sessionPhase?.isExpiryDay,
   });
-  if (expAdj.adjustment !== 0) {
-    strategy.minScore = Math.max(50, Math.min(95, strategy.minScore - expAdj.adjustment));
-    hybridLogger.info({
-      sessionId, event: 'expectancy_adjust',
-      message: `${expAdj.reasoning} → minScore ${strategy.minScore - expAdj.adjustment} → ${strategy.minScore}`,
-      data: expAdj,
-    });
-  }
-
-  // ── Pipeline step 9e: Confidence scoring (institutional weights) ─────
-  // Uses the spec weights: OI 25 / Orderflow 20 / VWAP 15 / Structure 10
-  // / Volume 10 / Liquidity 5 / Breadth 5 / Futures 5 / UT Bot 5.
   const confidence = confidenceScoringEngine.score({
     direction,
     oiAnalytics,
@@ -777,50 +781,32 @@ async function decide({
     derivatives,
     utBot,
     minScore: strategy.minScore,
+    // Centralised inputs — all soft signals routed through here
+    metaRegime,
+    trap,
+    trendPhase,
+    mtfStructure,
+    entryType: entryType.bestType,
+    expectancyAdj: expAdj,
   });
-  // Layer in gamma + MTF structure as small bumps on the composite
-  if (gammaRegime?.regime === 'negative' && (entryType.bestType === 'MOMENTUM_CONTINUATION' || entryType.bestType === 'BREAKOUT_EXPANSION')) {
-    confidence.score = Math.min(100, confidence.score + 4);
-  } else if (gammaRegime?.regime === 'positive' && entryType.bestType === 'MEAN_REVERSION') {
-    confidence.score = Math.min(100, confidence.score + 4);
-  }
-  if (mtfStructure?.score >= 75) {
-    confidence.score = Math.min(100, confidence.score + 3);
-  }
   hybridLogger.info({
     sessionId, event: 'confidence',
     message: confidence.reasoning,
     data: {
       direction, total: confidence.score, tier: confidence.tier, allowed: confidence.allowed,
+      raw: confidence.rawScore, adjustments: confidence.adjustmentBreakdown,
       perPillar: Object.fromEntries(Object.entries(confidence.parts || {}).map(([k, v]) => [k, v.score])),
     },
   });
 
   if (!confidence.allowed) {
-    return _noTrade(`Confidence ${confidence.score} below ${strategy.strategy} threshold ${strategy.minScore}`, {
-      hybridScore: scoreResult, confidence, strategy,
+    return _noTrade(`Confidence ${confidence.score} < ${strategy.minScore} (${strategy.strategy}/${entryType.bestType})`, {
+      confidence, strategy, scoreResult,
     });
   }
 
-  // Apply trap-score penalty (mid-range = downgrade, not block)
-  // Score 30-49 = -3pts, 50-69 = -8pts. ≥70 was already blocked above.
-  if (trap.trapScore >= 30) {
-    const penalty = trap.trapScore >= 50 ? 8 : 3;
-    confidence.score = Math.max(0, confidence.score - penalty);
-    if (confidence.score < strategy.minScore) {
-      return _noTrade(`Confidence ${confidence.score} below threshold after trap penalty (-${penalty}): ${trap.reasoning}`, {
-        hybridScore: scoreResult, confidence, strategy, trap,
-      });
-    }
-    hybridLogger.info({
-      sessionId, event: 'trap_penalty',
-      message: `confidence -${penalty} due to trap score ${trap.trapScore}`,
-      data: { trapScore: trap.trapScore, newConfidence: confidence.score },
-    });
-  }
-
-  // Tier guard: SCALPING is only allowed in 'scalp_only' tier or above. Higher-
-  // RR strategies need 'standard' (75+) or 'aggressive' (85+).
+  // Tier guard: INTRADAY_MOMENTUM needs standard tier. Other strategies are
+  // fine at scalp_only.
   if (strategy.strategy === 'INTRADAY_MOMENTUM' && confidence.tier === 'scalp_only') {
     return _noTrade(`INTRADAY_MOMENTUM requires standard tier (≥75); got ${confidence.score} (${confidence.tier})`);
   }
@@ -937,10 +923,13 @@ async function decide({
     liquidity,
     risk,
   });
-  // Apply aggression mode sizing factor + trap size-cut on top
+  // Apply aggression mode sizing factor + trap size-cut + meta-regime factor
   let aggressedLots = Math.max(1, Math.round(sizing.lots * (aggression.sizingFactor || 1)));
   if (trap?.sizeReduce && trap.sizeReduce < 1.0) {
     aggressedLots = Math.max(1, Math.round(aggressedLots * trap.sizeReduce));
+  }
+  if (metaRegime?.sizingFactor && metaRegime.sizingFactor < 1.0) {
+    aggressedLots = Math.max(1, Math.round(aggressedLots * metaRegime.sizingFactor));
   }
   sizing.lots = Math.min(Number(settings?.maxLots) || 3, aggressedLots);
   hybridLogger.info({
@@ -1015,7 +1004,9 @@ async function decide({
   const expectedPoints = strategy.tradeType === 'SWING'
     ? Math.max(targetOut, 30)
     : targetOut;
-  const maxHoldSeconds = strategy.maxHoldSec;
+  // Meta-regime stretches/compresses hold time per institutional state
+  const baseHold = strategy.maxHoldSec;
+  const maxHoldSeconds = Math.max(60, Math.round(baseHold * (metaRegime?.holdMultiplier || 1)));
 
   // Snapshot — saved on the trade for monitor's decay engine
   const hybridSnapshot = {
@@ -1094,6 +1085,10 @@ async function decide({
     } : null,
     aggression: aggression ? { mode: aggression.mode, sizingFactor: aggression.sizingFactor } : null,
     expiry: expiry?.active ? { behavior: expiry.behavior, overrides: expiry.overrides } : null,
+    metaRegime: metaRegime ? {
+      state: metaRegime.state, allowedFamilies: metaRegime.allowedFamilies,
+      sizingFactor: metaRegime.sizingFactor, holdMultiplier: metaRegime.holdMultiplier,
+    } : null,
     structural: structural ? {
       spotTargetPrice: structural.spotTargetPrice, spotStopPrice: structural.spotStopPrice,
       targetSource: structural.targetSource, stopSource: structural.stopSource,
@@ -1103,6 +1098,7 @@ async function decide({
 
   const reasoning = [
     `[hybrid:${grade.grade}/${strategy.strategy}/${tradeType}/${entryType.bestType}]`,
+    `meta=${metaRegime?.state}`,
     `regime=${marketRegime.regime}`,
     `vol=${volatilityRegime.state}`,
     `gamma=${gammaRegime?.regime}`,
@@ -1118,7 +1114,7 @@ async function decide({
     utBot ? `ut=${utBot.score}` : null,
     `agg=${aggression.mode}`,
     expiry?.active ? `expiry=${expiry.behavior}` : null,
-    `confidence=${confidence.score}(${confidence.tier})`,
+    `confidence=${confidence.score}(${confidence.tier}|raw${confidence.rawScore})`,
     advisory ? `advisory=${advisory.advise}` : null,
   ].filter(Boolean).join(' | ');
 
@@ -1153,7 +1149,7 @@ async function decide({
       strike: strikeRes, advisory,
       multiDayContext, structural, trap,
       auctionState, gammaRegime, mtfStructure, orderflowState, trendPhase,
-      entryType, aggression, expiry,
+      entryType, aggression, expiry, metaRegime,
     },
   };
 

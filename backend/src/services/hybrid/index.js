@@ -47,6 +47,7 @@ module.exports = {
   expiryBehaviorEngine:     require('./expiryBehaviorEngine'),
   aggressionModeEngine:     require('./aggressionModeEngine'),
   expectancyEngine:         require('./expectancyEngine'),
+  metaRegimeEngine:         require('./metaRegimeEngine'),
   probabilityScoringEngine: require('./probabilityScoringEngine'),
   probabilityDecayEngine:   require('./probabilityDecayEngine'),
   riskEngine:               require('./riskEngine'),

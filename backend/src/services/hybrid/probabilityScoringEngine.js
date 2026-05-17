@@ -311,20 +311,12 @@ function score(ctx, direction, thresholds = {}) {
 
   const finalScore = Number(Math.max(0, Math.min(100, weightedScore + lightBonus)).toFixed(1));
 
-  // Soft penalties for non-blocking warnings (regime/volatility downgrade)
-  let regimePenalty = 0;
+  // NOTE: regime-related penalties moved to confidenceScoringEngine (the
+  // single penalty owner). probabilityScoringEngine only emits the raw
+  // tier-1/2/3 score now.
+  const calibratedScore = finalScore;
+  const regimePenalty = 0;
   const regimeReasons = [];
-  if (ctx.marketRegime?.allowEntries === false) {
-    regimePenalty -= 12;
-    regimeReasons.push(`regime ${ctx.marketRegime.regime} normally blocks`);
-  } else if (ctx.marketRegime?.regime === 'choppy' || ctx.marketRegime?.regime === 'reversal_risk') {
-    regimePenalty -= 6;
-    regimeReasons.push(`regime ${ctx.marketRegime.regime} disfavours direction`);
-  }
-  if (ctx.volatilityRegime?.state === 'dead')         { regimePenalty -= 10; regimeReasons.push('volatility dead'); }
-  else if (ctx.volatilityRegime?.state === 'event_driven') { regimePenalty -= 4; regimeReasons.push('event-driven volatility'); }
-
-  const calibratedScore = Number(Math.max(0, Math.min(100, finalScore + regimePenalty)).toFixed(1));
 
   // Build reasoning string from top contributors
   const reasoningTop = Object.entries(tier2Parts)

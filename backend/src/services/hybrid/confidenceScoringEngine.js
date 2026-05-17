@@ -187,17 +187,26 @@ function _scoreUtBot(utBot) {
 /**
  * Compute the directional confidence score.
  *
+ * Centralised penalty point — every other engine should ONLY classify state.
+ * This is the single place that converts state → numeric score adjustment.
+ *
  * @param {Object} ctx
  * @param {string} ctx.direction          - 'bullish' | 'bearish'
  * @param {Object} ctx.oiAnalytics
  * @param {Object} ctx.volumeAnalysis
  * @param {Object} ctx.vwap
- * @param {Object} ctx.smc                - smartMoneyConcepts output (optional)
+ * @param {Object} ctx.smc
  * @param {Object} ctx.liquidity
  * @param {Object} ctx.marketInternals
  * @param {Object} ctx.derivatives
  * @param {Object} ctx.utBot
- * @param {number} [ctx.minScore=60]      - threshold from strategy
+ * @param {number} [ctx.minScore=60]
+ * @param {Object} [ctx.metaRegime]      - centralised state from metaRegimeEngine
+ * @param {Object} [ctx.trap]            - trapDetectionEngine output
+ * @param {Object} [ctx.trendPhase]      - { phase, softBlock }
+ * @param {Object} [ctx.mtfStructure]    - { score, alignment }
+ * @param {string} [ctx.entryType]       - selected entry type for family-aware adj
+ * @param {Object} [ctx.expectancyAdj]   - { adjustment } from expectancyEngine
  */
 function score(ctx = {}) {
   const direction = ctx.direction;
@@ -217,14 +226,50 @@ function score(ctx = {}) {
     utBot:     _scoreUtBot(ctx.utBot),
   };
 
-  // Weighted sum (weights total 100, so result is naturally 0..100)
-  let total = 0;
+  // Weighted sum (weights total ~98, so result is 0..98 — close enough to 0..100)
+  const totalWeight = Object.values(WEIGHTS).reduce((a, b) => a + b, 0);
+  let raw = 0;
   for (const [k, w] of Object.entries(WEIGHTS)) {
-    total += (parts[k].score) * (w / 100);
+    raw += (parts[k].score) * (w / totalWeight);
   }
-  total = Number(total.toFixed(1));
+  raw = Number(raw.toFixed(1));
 
-  // Tier classification (from spec)
+  // ── Centralised penalty / bonus block ───────────────────────────────────
+  // Every other engine emits state. We translate to score here. All bumps
+  // are bounded so no single signal dominates.
+  const adjustments = [];
+  let adj = 0;
+
+  // Meta-regime: family-aware nudge
+  if (ctx.metaRegime && ctx.entryType) {
+    const _meta = require('./metaRegimeEngine');
+    const fam = _meta.familyScoreAdjustment(ctx.metaRegime, ctx.entryType);
+    if (fam !== 0) { adj += fam; adjustments.push(`meta:${ctx.metaRegime.state}/${ctx.entryType}=${fam>=0?'+':''}${fam}`); }
+  }
+
+  // Trap detection: graduated penalty (NO double counting elsewhere)
+  if (ctx.trap?.trapScore >= 90)        { adj -= 15; adjustments.push(`trap:${ctx.trap.trapScore}=-15`); }
+  else if (ctx.trap?.trapScore >= 75)   { adj -= 8;  adjustments.push(`trap:${ctx.trap.trapScore}=-8`); }
+  else if (ctx.trap?.trapScore >= 50)   { adj -= 4;  adjustments.push(`trap:${ctx.trap.trapScore}=-4`); }
+  else if (ctx.trap?.trapScore >= 30)   { adj -= 2;  adjustments.push(`trap:${ctx.trap.trapScore}=-2`); }
+
+  // Trend phase soft block
+  if (ctx.trendPhase?.softBlock)        { adj -= 6;  adjustments.push('trendPhase:softBlock=-6'); }
+
+  // MTF structure quality bonus / penalty
+  if (ctx.mtfStructure?.score >= 80)    { adj += 5;  adjustments.push('mtf:strong=+5'); }
+  else if (ctx.mtfStructure?.score < 45){ adj -= 4;  adjustments.push(`mtf:weak(${ctx.mtfStructure.score})=-4`); }
+
+  // Expectancy engine — historical performance of this bucket
+  if (ctx.expectancyAdj?.adjustment)    {
+    adj += ctx.expectancyAdj.adjustment;
+    adjustments.push(`expectancy=${ctx.expectancyAdj.adjustment>=0?'+':''}${ctx.expectancyAdj.adjustment}`);
+  }
+
+  // Hard cap so a stack of penalties can't drive us below 0 or above 100
+  const total = Number(Math.max(0, Math.min(100, raw + adj)).toFixed(1));
+
+  // Tier classification
   let tier = 'reject';
   if (total >= 85) tier = 'aggressive';
   else if (total >= 75) tier = 'standard';
@@ -233,21 +278,25 @@ function score(ctx = {}) {
   const minScore = Number(ctx.minScore ?? 60);
   const allowed = total >= minScore;
 
-  // Build a tight reasoning string from the strongest pillars
+  // Reasoning summary — strongest pillars + adjustments
   const sortedParts = Object.entries(parts)
     .sort((a, b) => Math.abs((b[1].score) - 50) - Math.abs((a[1].score) - 50))
-    .slice(0, 5)
+    .slice(0, 4)
     .map(([k, v]) => `${k}=${Math.round(v.score)}(${WEIGHTS[k]}%)`)
     .join(' | ');
 
   return {
     allowed,
     score: total,
+    rawScore: raw,
+    centralisedAdjustment: adj,
+    adjustmentBreakdown: adjustments,
     tier,
     minScore,
     parts,
     weights: WEIGHTS,
-    reasoning: `score=${total} tier=${tier} (need ≥${minScore}) | ${sortedParts}`,
+    reasoning: `score=${total} (raw ${raw}${adj>=0?' +':' '}${adj}) tier=${tier} (need ≥${minScore}) | ${sortedParts}` +
+               (adjustments.length ? ` | adj: ${adjustments.join(',')}` : ''),
   };
 }
 

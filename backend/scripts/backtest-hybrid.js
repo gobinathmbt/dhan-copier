@@ -35,6 +35,34 @@
 const fs = require('fs');
 const path = require('path');
 
+// ─── Log capture: every hybrid log entry + cycle/decision/trade events go
+// to a structured file under backend/logs/ for post-run debugging.
+const LOG_DIR  = path.resolve(__dirname, '../logs');
+if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+const _runStamp = new Date().toISOString().replace(/[:.]/g, '-');
+const LOG_FILE = path.join(LOG_DIR, `backtest-${_runStamp}.log`);
+const _logStream = fs.createWriteStream(LOG_FILE, { flags: 'a' });
+function _writeLog(level, source, message, data) {
+  const ts = new Date().toISOString();
+  let safeData = null;
+  if (data !== undefined && data !== null) {
+    try {
+      // Strip very large fields (option chains, candle arrays) to keep file small
+      safeData = JSON.parse(JSON.stringify(data, (k, v) => {
+        if (k === 'allEvaluations') return undefined;          // keep summary only
+        if (k === 'perStrike' && Array.isArray(v) && v.length > 13) return v.slice(0, 13);
+        if (k === 'candidates' && Array.isArray(v) && v.length > 5) return v.slice(0, 5);
+        if (k === 'levelsUsed' && Array.isArray(v) && v.length > 8) return v.slice(0, 8);
+        return v;
+      }));
+    } catch (_) { safeData = String(data).slice(0, 800); }
+  }
+  const line = JSON.stringify({ ts, level, source, message, data: safeData });
+  _logStream.write(line + '\n');
+}
+process.on('exit',   () => { try { _logStream.end(); } catch (_) {} });
+process.on('SIGINT', () => { try { _logStream.end(); } catch (_) {} process.exit(130); });
+
 // ─── Module-level stubs (must run BEFORE requiring hybrid) ────────────────
 const Module = require('module');
 const origRequire = Module.prototype.require;
@@ -55,8 +83,8 @@ const stubs = {
   './openai.service':  { callOpenAICustom: async () => ({}) },
   '../openai.service': { callOpenAICustom: async () => ({}) },
 
-  './engineLogger.service':  { logEvent: async () => {} },
-  '../engineLogger.service': { logEvent: async () => {} },
+  './engineLogger.service':  { logEvent: async (e) => { _writeLog(e.level || 'info', 'engineLogger', `[${e.eventType}] ${e.message}`, e.data); } },
+  '../engineLogger.service': { logEvent: async (e) => { _writeLog(e.level || 'info', 'engineLogger', `[${e.eventType}] ${e.message}`, e.data); } },
 
   './historicalContextLoader.service': {
     buildHistoricalContext: async () => _activeContext,
@@ -115,6 +143,16 @@ Module.prototype.require = function (id) {
 };
 
 const hybrid = require('../src/services/hybrid');
+
+// Override hybridLogger so we capture every internal emit (per-engine logs,
+// scoring breakdowns, decay reasons, etc.) directly to the file.
+{
+  const hl = hybrid.hybridLogger;
+  hl.log   = async (e = {}) => { _writeLog(e.level || 'info', `hybrid:${e.event || 'log'}`, e.message || '', e.data); };
+  hl.info  = async (e = {}) => { _writeLog('info',  `hybrid:${e.event || 'log'}`, e.message || '', e.data); };
+  hl.warn  = async (e = {}) => { _writeLog('warn',  `hybrid:${e.event || 'log'}`, e.message || '', e.data); };
+  hl.error = async (e = {}) => { _writeLog('error', `hybrid:${e.event || 'log'}`, e.message || '', e.data); };
+}
 
 // ─── IO helpers ────────────────────────────────────────────────────────────
 const ROOT = path.resolve(__dirname, '../live-feed');
@@ -458,7 +496,7 @@ async function backtestDay(dayLabel) {
     minLots: LOTS_PER_TRADE, maxLots: LOTS_PER_TRADE,
     maxConcurrentTrades: 1,
     maxDailyLossPct: 3,
-    cooldownSec: 300,                              // 5 min cooldown between trades
+    cooldownSec: 5,                              // 5 min cooldown between trades
     enableSwing: true,                             // entry types may pick SWING profile
     swingMaxHoldMinutes: 15,
     maxHoldTimeSeconds: 180,
@@ -499,12 +537,26 @@ async function backtestDay(dayLabel) {
   // Reset per-day session memory (failed breakouts, sweeps, etc.)
   hybrid.multiDayContextEngine.resetSessionMemory(dayLabel);
 
+  _writeLog('info', 'backtest', `day_start ${dayLabel}`, {
+    dayLabel, openingStrike: meta?.openingAtm,
+    candleCounts: { c1m: candles1m.length, c5m: candles5m.length, c15m: candles15m.length },
+    optionChainSnapshots: optionChain.length,
+  });
+
   for (let t = cycleStart; t <= cycleEnd; t += stepSec) {
     cycles++;
     if (t < cooldownUntil) continue;
 
     const inputs = buildCycleInputs(day, t, null);
-    if (!inputs) continue;
+    if (!inputs) {
+      _writeLog('debug', 'backtest', `cycle_skipped (no inputs)`, { dayLabel, hhmm: _activeHhmm, t });
+      continue;
+    }
+
+    _writeLog('info', 'backtest', `cycle_begin`, {
+      dayLabel, hhmm: _activeHhmm, t,
+      spotPrice: inputs.spotLtp, atmStrike: inputs.atmStrike,
+    });
 
     let decision;
     try {
@@ -517,20 +569,51 @@ async function backtestDay(dayLabel) {
         futuresData:      inputs.futuresData,
       });
     } catch (e) {
+      _writeLog('error', 'backtest', `cycle_error: ${e.message}`, { dayLabel, hhmm: _activeHhmm, stack: e.stack });
       console.log(`    × cycle ${dayLabel} ${_activeHhmm}: error ${e.message}`);
       continue;
     }
+
+    _writeLog('info', 'backtest', `cycle_decision`, {
+      dayLabel, hhmm: _activeHhmm,
+      signal: decision.signal,
+      strategy: decision.strategy,
+      tradeType: decision.trade_type,
+      entryType: decision.hybridSnapshot?.entryType?.type,
+      strike: decision.strike,
+      optionType: decision.option_type,
+      moneyness: decision.moneyness,
+      confidence: decision.confidence,
+      confidenceScore: decision.confidenceScore,
+      confidenceTier: decision.confidenceTier,
+      lots: decision.lots_suggested,
+      reasoning: decision.reasoning,
+    });
 
     if (decision.signal === 'NO_TRADE') continue;
     signalsGenerated++;
 
     // Simulate the trade
     const result = simulateTrade(day, decision, t);
-    if (!result) continue;
+    if (!result) {
+      _writeLog('warn', 'backtest', `simulation_failed`, { dayLabel, decision: { signal: decision.signal, strike: decision.strike, entryPremium: decision.entry_premium_estimate } });
+      continue;
+    }
 
     result.entryHhmm = epochSecToIstHhmm(t);
     result.exitHhmm  = epochSecToIstHhmm(t + result.heldSec);
     trades.push(result);
+
+    _writeLog('info', 'backtest', `trade_closed`, {
+      dayLabel, entryHhmm: result.entryHhmm, exitHhmm: result.exitHhmm,
+      reason: result.reason, signal: result.signal, strike: result.strike,
+      entry: result.entry, exit: result.exit, pts: result.pts,
+      heldSec: result.heldSec, qty: result.qty,
+      grossPnl: result.grossPnl, netPnl: result.netPnl, result: result.result,
+      strategy: result.strategy, entryType: result.entryType, grade: result.grade,
+      confidence: result.confidence, confidenceScore: result.confidenceScore,
+      regime: result.regime, phase: result.phase, expiry: result.expiry,
+    });
 
     cooldownUntil = t + result.heldSec + (settings.cooldownSec || 300);
   }
@@ -541,6 +624,11 @@ async function backtestDay(dayLabel) {
   const grossPnL = trades.reduce((a, t) => a + t.grossPnl, 0);
   const netPnL   = trades.reduce((a, t) => a + t.netPnl, 0);
   const avgHold  = trades.length ? trades.reduce((a, t) => a + t.heldSec, 0) / trades.length : 0;
+
+  _writeLog('info', 'backtest', `day_summary`, {
+    dayLabel, cycles, signalsGenerated, trades: trades.length,
+    wins, losses, grossPnL, netPnL, avgHold,
+  });
 
   return { dayLabel, cycles, signalsGenerated, trades, wins, losses, grossPnL, netPnL, avgHold };
 }
@@ -554,6 +642,13 @@ async function backtestDay(dayLabel) {
   console.log(`\nBacktesting ${days.length} day(s) from ${days[0]} to ${days[days.length - 1]}`);
   console.log(`Settings: ${LOTS_PER_TRADE} lots (${LOTS_PER_TRADE * NIFTY_LOT_SIZE} qty), SL 15pts, Target 10pts, Max-hold 180s, Cooldown 5min, Strategy SCALPING`);
   console.log(`Brokerage: ₹${ROUND_TRIP_BROKERAGE} flat per round-trip\n`);
+  console.log(`Logging to: ${LOG_FILE}\n`);
+
+  _writeLog('info', 'backtest', 'run_start', {
+    days: days.length, from: days[0], to: days[days.length - 1],
+    lots: LOTS_PER_TRADE, qty: LOTS_PER_TRADE * NIFTY_LOT_SIZE,
+    brokerage: ROUND_TRIP_BROKERAGE,
+  });
 
   // Reset expectancy at the start so we measure true single-pass behaviour
   try { hybrid.expectancyEngine.reset(); } catch (_) {}
@@ -683,6 +778,17 @@ async function backtestDay(dayLabel) {
   console.log('\n' + '═'.repeat(78));
   console.log(`FINAL: ${totalWins}/${totalTrades} wins (${winRate.toFixed(2)}%) — Net ₹${netPnL.toFixed(2)} over ${all.length} days`);
   console.log('═'.repeat(78) + '\n');
+  console.log(`Full debug log: ${LOG_FILE}\n`);
+
+  _writeLog('info', 'backtest', 'run_complete', {
+    days: all.length, totalCycles, totalSignals, totalTrades,
+    totalWins, totalLoss, winRate: Number(winRate.toFixed(2)),
+    grossPnL: Number(grossPnL.toFixed(2)),
+    netPnL: Number(netPnL.toFixed(2)),
+    profitFactor: Number((winners.reduce((a,t)=>a+t.netPnl,0) / Math.max(1, Math.abs(losers.reduce((a,t)=>a+t.netPnl,0)))).toFixed(2)),
+    avgHoldSec: Number(avgHold.toFixed(0)),
+  });
+  _logStream.end();
 })().catch(e => {
   console.error('BACKTEST ERROR:', e.stack);
   process.exit(1);
