@@ -190,6 +190,7 @@ function familyOf(entryType) {
   if (entryType === 'VOLATILITY_COMPRESSION_SQUEEZE') return 'breakout_expansion';
   if (entryType === 'IV_CRUSH_FADE')                  return 'mean_reversion';
   if (entryType === 'VWAP_BOUNCE_SCALP')              return 'vwap_reclaim';
+  if (entryType === 'TREND_VWAP_FOLLOW')              return 'pullback';
   return null;
 }
 

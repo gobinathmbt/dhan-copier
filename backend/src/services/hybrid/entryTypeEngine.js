@@ -506,6 +506,7 @@ function evaluate(ctx = {}) {
     VOLATILITY_COMPRESSION_SQUEEZE: 'breakout_expansion',
     IV_CRUSH_FADE:                 'mean_reversion',
     VWAP_BOUNCE_SCALP:             'vwap_reclaim',
+    TREND_VWAP_FOLLOW:             'pullback',
   };
 
   // Pre-filter: drop any setup whose family is blocked under the current

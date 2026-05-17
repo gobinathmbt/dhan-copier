@@ -536,47 +536,113 @@ async function decide({
   // If both neutral, use 5m + VWAP fallback so we don't reject every cycle
   // in the common "balanced derivatives" market state.
   let direction = derivatives.overallBias;
+  let directionSource = 'derivatives';
   if (direction === 'neutral' && marketRegime.bias !== 'neutral') {
     direction = marketRegime.bias;
+    directionSource = 'marketRegime';
   }
   if (direction === 'neutral') {
     const tf5 = algorithmOutputs?.multiTimeframe?.timeframes?.['5m']?.trend;
     const vwapPos = payload?.vwap_analysis?.position || payload?.vwap_analysis?.price_vs_vwap;
-    if (tf5 === 'bullish' && vwapPos === 'above') direction = 'bullish';
-    else if (tf5 === 'bearish' && vwapPos === 'below') direction = 'bearish';
+    if (tf5 === 'bullish' && vwapPos === 'above') { direction = 'bullish'; directionSource = '5m+vwap'; }
+    else if (tf5 === 'bearish' && vwapPos === 'below') { direction = 'bearish'; directionSource = '5m+vwap'; }
+  }
+  // CALIBRATED 2026-05-18 cycle 12: 309 zero-trade-day cycles failed at this
+  // gate. Add 4 additional fallback paths to reduce neutrality stranding:
+  //
+  //   (a) OI velocity — strong CE writing or PE unwinding = bearish flow.
+  //       Strong PE writing or CE unwinding = bullish flow.
+  //   (b) Futures direction — when futures lead spot.
+  //   (c) Volume-analysis delta + acceptance — when delta cleanly trends
+  //       and price is on the right side of value.
+  //   (d) MTF full alignment — if 15m+5m+1m all agree, that IS the bias.
+  if (direction === 'neutral') {
+    const ceVel = oiAnalytics0?.diff?.ceVelocity || 0;
+    const peVel = oiAnalytics0?.diff?.peVelocity || 0;
+    // PE writing (peVel > 0 large) + CE unwinding (ceVel < 0) = bullish
+    // CE writing (ceVel > 0 large) + PE unwinding (peVel < 0) = bearish
+    if (peVel > 200_000 && ceVel < 0)       { direction = 'bullish'; directionSource = 'oi_pe_writing'; }
+    else if (ceVel > 200_000 && peVel < 0)  { direction = 'bearish'; directionSource = 'oi_ce_writing'; }
+    else if (oiAnalytics0?.regime === 'violent_short_covering')   { direction = 'bullish'; directionSource = 'oi_short_covering'; }
+    else if (oiAnalytics0?.regime === 'long_unwinding_collapse')  { direction = 'bearish'; directionSource = 'oi_long_liq'; }
   }
   if (direction === 'neutral') {
-    return _noTrade('No clear directional bias from derivatives, regime, or 5m+VWAP', {
+    const futDir = futuresData?.direction;
+    if (futDir === 'bullish' || futDir === 'up') { direction = 'bullish'; directionSource = 'futures'; }
+    else if (futDir === 'bearish' || futDir === 'down') { direction = 'bearish'; directionSource = 'futures'; }
+  }
+  if (direction === 'neutral' && volumeAnalysis?.delta && volumeAnalysis?.acceptance) {
+    const dBias = volumeAnalysis.delta.bias;
+    const dStr = Number(volumeAnalysis.delta.strength) || 0;
+    if (dStr >= 40) {
+      if ((dBias === 'bullish' || dBias === 'mild_bullish') && volumeAnalysis.acceptance === 'above_va') {
+        direction = 'bullish'; directionSource = 'delta+acceptance';
+      } else if ((dBias === 'bearish' || dBias === 'mild_bearish') && volumeAnalysis.acceptance === 'below_va') {
+        direction = 'bearish'; directionSource = 'delta+acceptance';
+      }
+    }
+  }
+  if (direction === 'neutral' && mtfStructureBoth) {
+    // If MTF full alignment exists for one direction, pick that
+    if (mtfStructureBoth.bullish?.alignment === 'full' && mtfStructureBoth.bearish?.alignment !== 'full') {
+      direction = 'bullish'; directionSource = 'mtf_full';
+    } else if (mtfStructureBoth.bearish?.alignment === 'full' && mtfStructureBoth.bullish?.alignment !== 'full') {
+      direction = 'bearish'; directionSource = 'mtf_full';
+    }
+  }
+  if (direction === 'neutral') {
+    return _noTrade('No clear directional bias from derivatives, regime, 5m+VWAP, OI, futures, delta, or MTF', {
       session: sessionPhase, volatilityRegime, marketRegime, liquidity, derivatives, risk,
     });
   }
+  hybridLogger.info({
+    sessionId, event: 'direction_resolved',
+    message: `direction=${direction} via ${directionSource}`,
+    data: { direction, source: directionSource },
+  });
 
   // ── PE-side enhanced filter (calibration: BUY_PE win rate was 38.3%) ──
   // Bearish trades fail more in NIFTY because of bullish drift bias and
-  // gamma suppression. Require stronger confirmation:
-  //   - 5m AND 15m bearish (not just one)
-  //   - below VWAP
-  //   - either downside acceleration OR negative gamma OR gamma flip below
+  // gamma suppression. CALIBRATED 2026-05-18 cycle 12: 470 zero-trade-day
+  // blocks came from this filter being too strict (required 5m AND 15m
+  // bearish). Relax to:
+  //   - At least ONE of (5m bearish OR 15m bearish) AND
+  //   - below VWAP AND
+  //   - bearish derivative evidence (OI, futures, or gamma flip below)
+  //   - AND not gamma-suppressed without acceleration
   if (direction === 'bearish') {
     const tf5  = algorithmOutputs?.multiTimeframe?.timeframes?.['5m']?.trend;
     const tf15 = algorithmOutputs?.multiTimeframe?.timeframes?.['15m']?.trend;
     const vwapPos = payload?.vwap_analysis?.position || payload?.vwap_analysis?.price_vs_vwap;
-    const bothBearish = tf5 === 'bearish' && tf15 === 'bearish';
+    const eitherBearish = tf5 === 'bearish' || tf15 === 'bearish';
+    const notBullish = tf5 !== 'bullish' && tf15 !== 'bullish';
 
-    // Gamma must NOT suppress downside
-    const gammaSuppresses = gammaRegime?.regime === 'positive'
-      && gammaRegime.pinningLevel
-      && Math.abs(spotPrice - gammaRegime.pinningLevel) < 30;
-
-    // Downside acceleration check via OI velocity
+    // Bearish-side evidence (any one suffices)
     const ceVelocity = oiAnalytics0?.diff?.ceVelocity || 0;
     const peVelocity = oiAnalytics0?.diff?.peVelocity || 0;
-    const downsideAccel = ceVelocity > 200 || peVelocity < -200;
+    const downsideAccel = ceVelocity > 200_000 || peVelocity < -200_000;
+    const oiBearish = oiAnalytics0?.regime === 'long_unwinding_collapse'
+                  || oiAnalytics0?.regime === 'aggressive_short_buildup';
+    const futBearish = futuresData?.direction === 'bearish' || futuresData?.direction === 'down';
+    const gammaFlipBelow = gammaRegime?.gammaFlip && spotPrice && spotPrice < gammaRegime.gammaFlip;
+    const bearEvidence = downsideAccel || oiBearish || futBearish || gammaFlipBelow;
 
-    if (!bothBearish || vwapPos !== 'below') {
-      return _noTrade(`PE filter: need 5m+15m bearish + below VWAP (got tf5=${tf5}, tf15=${tf15}, vwap=${vwapPos})`);
+    // Gamma must NOT actively suppress downside without acceleration
+    const gammaSuppresses = gammaRegime?.regime === 'positive'
+      && gammaRegime.pinningLevel
+      && Math.abs(spotPrice - gammaRegime.pinningLevel) < 25
+      && !downsideAccel;
+
+    if (!eitherBearish && notBullish === false) {
+      return _noTrade(`PE filter: need 5m or 15m bearish (got tf5=${tf5}, tf15=${tf15})`);
     }
-    if (gammaSuppresses && !downsideAccel) {
+    if (vwapPos !== 'below') {
+      return _noTrade(`PE filter: need below VWAP (got vwap=${vwapPos})`);
+    }
+    if (!bearEvidence) {
+      return _noTrade(`PE filter: need bearish OI/futures/gamma evidence`);
+    }
+    if (gammaSuppresses) {
       return _noTrade(`PE filter: positive gamma pin at ${gammaRegime.pinningLevel} suppresses downside (no acceleration)`);
     }
   }
@@ -597,8 +663,15 @@ async function decide({
   const mtfStructure = mtfStructureBoth[direction];
   if (mtfStructure?.blocked && mtfStructure.tf15 && mtfStructure.tf15 !== 'neutral'
       && mtfStructure.tf15 !== direction) {
-    // Truly opposing 15m trend with no reversal permission — block.
-    return _noTrade(`MTF blocked: ${mtfStructure.reasoning}`, { mtfStructure });
+    // CALIBRATED 2026-05-18 cycle 12: 41 zero-trade-day blocks here.
+    // Soften: only hard-block when 15m AND 5m both oppose direction.
+    // If only 15m opposes (5m agrees with direction), allow with penalty.
+    if (mtfStructure.tf5 && mtfStructure.tf5 !== 'neutral' && mtfStructure.tf5 !== direction) {
+      // Truly opposing 15m + 5m trend with no reversal permission — block.
+      return _noTrade(`MTF blocked: ${mtfStructure.reasoning}`, { mtfStructure });
+    }
+    // Otherwise just flag for the confidence engine via softBlock
+    if (mtfStructure) mtfStructure.softBlock = true;
   }
   hybridLogger.info({
     sessionId, event: 'mtf_structure',

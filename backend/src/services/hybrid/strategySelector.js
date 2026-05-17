@@ -79,7 +79,9 @@ const STRATEGIES = {
     maxHoldSec: 240,
     minScore: 72,                    // was 58 — gamma-pin fades only
     utBotRequired: false,
-    allowedRegimes: ['ranging','reversal_risk','trending_bullish','trending_bearish'],
+    // CALIBRATED cycle 12: choppy is exactly when mean-reversion shines.
+    // Previous allowlist excluded it which caused 77 zero-trade-day blocks.
+    allowedRegimes: ['ranging','reversal_risk','choppy','trending_bullish','trending_bearish'],
   },
   // NEW: Breakout-expansion strategy (institutional spec). Triggered only
   // in trending + expansion volatility, with explicit LVN-or-IB-extension
