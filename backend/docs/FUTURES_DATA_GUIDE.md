@@ -264,7 +264,7 @@ node scripts/backfill-2weeks.js
 ```
 
 ## Data Retention
-- Live feed data is kept for **30 days** (configurable)
+- Live feed data is kept for **365 days (1 year)** (configurable)
 - Older folders are automatically pruned
 - Backfilled data follows the same retention policy
 - Adjust `RETENTION_DAYS` in `feedRecorder.service.js` if needed

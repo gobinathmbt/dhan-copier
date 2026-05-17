@@ -26,7 +26,7 @@ const NIFTY_SECURITY_ID = 13;
 const OPTION_STRIKE_WINDOW = 6;         // ± 6 strikes around ATM
 const OPTION_CHAIN_FLUSH_MS = 60 * 1000; // 1-min OI cadence (matches Dhan refresh)
 const SPOT_THROTTLE_MS = 250;            // drop duplicate-price ticks faster than this
-const RETENTION_DAYS = 30;
+const RETENTION_DAYS = 365;
 const CANDLE_INTERVALS = ['1', '5', '15']; // 1min, 5min, 15min
 
 // Market hours in IST
