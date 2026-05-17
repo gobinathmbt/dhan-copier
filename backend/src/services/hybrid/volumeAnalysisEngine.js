@@ -282,9 +282,11 @@ function _timeVolume(candles, lookback = 20) {
   const ratio  = avgVol > 0 ? last.v / avgVol : 0;
 
   let state = 'normal';
-  if (ratio >= 2.5)      state = 'climax';
-  else if (ratio >= 1.5) state = 'spike';
-  else if (ratio <= 0.4) state = 'dry_up';
+  // Calibrated: previous thresholds (2.5/1.5/0.4) classified 95% of bars as
+  // 'normal'. Real NIFTY has more variance — loosen.
+  if (ratio >= 2.0)      state = 'climax';
+  else if (ratio >= 1.3) state = 'spike';
+  else if (ratio <= 0.5) state = 'dry_up';
 
   return {
     lastVolume: last.v,
@@ -322,38 +324,40 @@ function _vsa(candles) {
   const longLowerWick = body > 0 && lowerWick >= 2 * body && lowerWick >= 0.5 * lastRange;
 
   // Pattern classification (priority order — wick patterns first)
+  // Calibrated: thresholds loosened — 98% consolidation in backtest was
+  // unrealistic. Real NIFTY 5m bars have far more momentum / no_demand
+  // patterns than the old 1.4×/1.5× thresholds caught.
   let pattern = 'consolidation';
   let bias = 'neutral';
   let strength = 0;
   const reasons = [];
 
-  if (longUpperWick && volRatio >= 1.5) {
+  if (longUpperWick && volRatio >= 1.3) {
     pattern = 'upthrust';
     bias = 'bearish';
     strength = 80;
     reasons.push(`upper wick rejection on ${volRatio.toFixed(2)}× volume`);
-  } else if (longLowerWick && volRatio >= 1.5) {
+  } else if (longLowerWick && volRatio >= 1.3) {
     pattern = 'spring';
     bias = 'bullish';
     strength = 80;
     reasons.push(`lower wick rejection on ${volRatio.toFixed(2)}× volume`);
-  } else if (rangeRatio < 0.6 && volRatio >= 1.8) {
+  } else if (rangeRatio < 0.65 && volRatio >= 1.5) {
     pattern = 'absorption';
-    // Direction-of-absorption is decided by the candle close relative to its open and tail
     bias = last.c >= last.o ? 'bullish' : 'bearish';
     strength = 75;
     reasons.push(`small candle + ${volRatio.toFixed(2)}× volume`);
-  } else if (rangeRatio >= 1.4 && volRatio >= 1.4) {
+  } else if (rangeRatio >= 1.2 && volRatio >= 1.2) {
     pattern = 'momentum';
     bias = direction === 'up' ? 'bullish' : direction === 'down' ? 'bearish' : 'neutral';
     strength = 85;
     reasons.push(`big candle + ${volRatio.toFixed(2)}× volume`);
-  } else if (rangeRatio >= 1.4 && volRatio < 0.8) {
+  } else if (rangeRatio >= 1.2 && volRatio < 0.85) {
     pattern = direction === 'up' ? 'no_demand' : 'no_supply';
     bias = direction === 'up' ? 'bearish' : 'bullish';   // contrarian — fake move
     strength = 65;
     reasons.push(`big candle on weak ${volRatio.toFixed(2)}× volume — likely fake`);
-  } else if (rangeRatio < 0.7 && volRatio < 0.7) {
+  } else if (rangeRatio < 0.7 && volRatio < 0.75) {
     pattern = 'consolidation';
     bias = 'neutral';
     strength = 30;

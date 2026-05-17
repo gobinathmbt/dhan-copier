@@ -226,47 +226,85 @@ function score(ctx = {}) {
     utBot:     _scoreUtBot(ctx.utBot),
   };
 
-  // Weighted sum (weights total ~98, so result is 0..98 — close enough to 0..100)
+  // ── Hierarchical scoring (institutional fix for score compression) ─────
+  // Old approach: weighted sum → mid-zone (55-74) became random clustering.
+  // New approach: identify the STRONGEST aligned pillars and let them
+  // dominate. Weak opposing signals reduce sizing, not score.
+  //
+  // Each pillar's deviation-from-50 = "edge magnitude". Top-3 magnitudes
+  // (in trade direction) drive the headline score.
   const totalWeight = Object.values(WEIGHTS).reduce((a, b) => a + b, 0);
-  let raw = 0;
-  for (const [k, w] of Object.entries(WEIGHTS)) {
-    raw += (parts[k].score) * (w / totalWeight);
-  }
-  raw = Number(raw.toFixed(1));
+  const weightedRaw = Object.entries(WEIGHTS).reduce((sum, [k, w]) =>
+    sum + (parts[k].score * (w / totalWeight)), 0);
+
+  // Pillar-edge analysis: how strongly each pillar deviates in our favour.
+  // Positive deviation = supports trade. Negative = opposes.
+  const pillarEdges = Object.entries(parts).map(([k, v]) => ({
+    name: k, weight: WEIGHTS[k], score: v.score, deviation: v.score - 50,
+  })).sort((a, b) => b.deviation - a.deviation);
+
+  // Top-3 supporting + bottom-1 opposing
+  const top3   = pillarEdges.slice(0, 3);
+  const worst1 = pillarEdges[pillarEdges.length - 1];
+
+  // Hierarchical score: weighted average of top-3 (60%) + opposing penalty
+  // (40% from worst). Compresses less than 9-pillar additive sum.
+  const top3Avg   = top3.reduce((a, p) => a + p.score, 0) / 3;
+  const worstScore = worst1.score;
+  let hierScore = top3Avg * 0.7 + worstScore * 0.3;
+
+  // Boost when 3+ pillars all > 65 in same direction (clear conviction)
+  const stronglyAligned = pillarEdges.filter(p => p.deviation >= 15).length;
+  if (stronglyAligned >= 4) hierScore = Math.min(100, hierScore + 6);
+  else if (stronglyAligned >= 3) hierScore = Math.min(100, hierScore + 3);
+
+  // Use the higher of weighted-raw and hierarchical so both views inform
+  const raw = Number(Math.max(weightedRaw, hierScore).toFixed(1));
 
   // ── Centralised penalty / bonus block ───────────────────────────────────
-  // Every other engine emits state. We translate to score here. All bumps
-  // are bounded so no single signal dominates.
+  // Calibration: penalties capped at -15 total to prevent score compression.
+  // Strongest single penalty wins; secondary penalties only count at half.
   const adjustments = [];
-  let adj = 0;
+  const penalties = [];
 
-  // Meta-regime: family-aware nudge
   if (ctx.metaRegime && ctx.entryType) {
     const _meta = require('./metaRegimeEngine');
     const fam = _meta.familyScoreAdjustment(ctx.metaRegime, ctx.entryType);
-    if (fam !== 0) { adj += fam; adjustments.push(`meta:${ctx.metaRegime.state}/${ctx.entryType}=${fam>=0?'+':''}${fam}`); }
+    if (fam !== 0) {
+      adjustments.push({ name: 'meta_family', value: fam });
+      penalties.push({ name: `meta:${ctx.metaRegime.state}/${ctx.entryType}`, value: fam });
+    }
   }
 
-  // Trap detection: graduated penalty (NO double counting elsewhere)
-  if (ctx.trap?.trapScore >= 90)        { adj -= 15; adjustments.push(`trap:${ctx.trap.trapScore}=-15`); }
-  else if (ctx.trap?.trapScore >= 75)   { adj -= 8;  adjustments.push(`trap:${ctx.trap.trapScore}=-8`); }
-  else if (ctx.trap?.trapScore >= 50)   { adj -= 4;  adjustments.push(`trap:${ctx.trap.trapScore}=-4`); }
-  else if (ctx.trap?.trapScore >= 30)   { adj -= 2;  adjustments.push(`trap:${ctx.trap.trapScore}=-2`); }
+  if (ctx.trap?.trapScore >= 90)        penalties.push({ name: `trap:${ctx.trap.trapScore}`, value: -15 });
+  else if (ctx.trap?.trapScore >= 75)   penalties.push({ name: `trap:${ctx.trap.trapScore}`, value: -8 });
+  else if (ctx.trap?.trapScore >= 50)   penalties.push({ name: `trap:${ctx.trap.trapScore}`, value: -3 });
 
-  // Trend phase soft block
-  if (ctx.trendPhase?.softBlock)        { adj -= 6;  adjustments.push('trendPhase:softBlock=-6'); }
+  if (ctx.trendPhase?.softBlock)        penalties.push({ name: 'trendPhase:softBlock', value: -5 });
 
-  // MTF structure quality bonus / penalty
-  if (ctx.mtfStructure?.score >= 80)    { adj += 5;  adjustments.push('mtf:strong=+5'); }
-  else if (ctx.mtfStructure?.score < 45){ adj -= 4;  adjustments.push(`mtf:weak(${ctx.mtfStructure.score})=-4`); }
+  if (ctx.mtfStructure?.score >= 80)    penalties.push({ name: 'mtf:strong', value: +5 });
+  else if (ctx.mtfStructure?.score < 45) penalties.push({ name: `mtf:weak(${ctx.mtfStructure.score})`, value: -3 });
 
-  // Expectancy engine — historical performance of this bucket
-  if (ctx.expectancyAdj?.adjustment)    {
-    adj += ctx.expectancyAdj.adjustment;
-    adjustments.push(`expectancy=${ctx.expectancyAdj.adjustment>=0?'+':''}${ctx.expectancyAdj.adjustment}`);
+  if (ctx.expectancyAdj?.adjustment)    penalties.push({ name: 'expectancy', value: ctx.expectancyAdj.adjustment });
+
+  // Apply hierarchical penalty: strongest negative dominates, secondary at 50%.
+  // Positive bumps add normally (capped at +8 total).
+  const negs = penalties.filter(p => p.value < 0).sort((a, b) => a.value - b.value);
+  const poss = penalties.filter(p => p.value > 0).sort((a, b) => b.value - a.value);
+  let adj = 0;
+  if (negs.length) {
+    adj += negs[0].value;                                    // strongest neg
+    if (negs.length > 1) adj += negs[1].value * 0.5;         // secondary at half
+    if (negs.length > 2) adj += negs.slice(2).reduce((a, p) => a + p.value, 0) * 0.25;
   }
+  if (poss.length) {
+    adj += Math.min(8, poss.reduce((a, p) => a + p.value, 0));
+  }
+  // Hard floor: net penalty capped at -18
+  adj = Math.max(-18, adj);
 
-  // Hard cap so a stack of penalties can't drive us below 0 or above 100
+  for (const p of penalties) adjustments.push({ name: p.name, value: p.value });
+
   const total = Number(Math.max(0, Math.min(100, raw + adj)).toFixed(1));
 
   // Tier classification
@@ -278,25 +316,27 @@ function score(ctx = {}) {
   const minScore = Number(ctx.minScore ?? 60);
   const allowed = total >= minScore;
 
-  // Reasoning summary — strongest pillars + adjustments
-  const sortedParts = Object.entries(parts)
-    .sort((a, b) => Math.abs((b[1].score) - 50) - Math.abs((a[1].score) - 50))
-    .slice(0, 4)
-    .map(([k, v]) => `${k}=${Math.round(v.score)}(${WEIGHTS[k]}%)`)
-    .join(' | ');
+  // Reasoning: which pillars carried the score
+  const top3Str  = top3.map(p => `${p.name}=${Math.round(p.score)}`).join(',');
+  const worstStr = `${worst1.name}=${Math.round(worst1.score)}`;
+  const adjStr   = adjustments.map(a => `${a.name}=${a.value>=0?'+':''}${a.value}`).join(',');
 
   return {
     allowed,
     score: total,
     rawScore: raw,
-    centralisedAdjustment: adj,
+    weightedRaw: Number(weightedRaw.toFixed(1)),
+    hierScore: Number(hierScore.toFixed(1)),
+    centralisedAdjustment: Number(adj.toFixed(1)),
     adjustmentBreakdown: adjustments,
+    pillarEdges,
+    stronglyAligned,
     tier,
     minScore,
     parts,
     weights: WEIGHTS,
-    reasoning: `score=${total} (raw ${raw}${adj>=0?' +':' '}${adj}) tier=${tier} (need ≥${minScore}) | ${sortedParts}` +
-               (adjustments.length ? ` | adj: ${adjustments.join(',')}` : ''),
+    reasoning: `score=${total} (raw ${raw}${adj>=0?' +':' '}${adj.toFixed(1)}) tier=${tier} (need ≥${minScore}) | top3=${top3Str} worst=${worstStr}` +
+               (adjStr ? ` | adj: ${adjStr}` : ''),
   };
 }
 

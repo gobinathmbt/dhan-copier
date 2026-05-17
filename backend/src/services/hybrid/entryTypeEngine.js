@@ -220,45 +220,97 @@ function _exhaustionFade(ctx) {
   };
 }
 
-// G. VWAP RECLAIM — high probability NIFTY setup
-//    Price was on one side of VWAP, briefly crossed, and reclaimed.
-//    Look for: VWAP position aligned with direction + delta improving + OI stable.
+// G. VWAP RECLAIM — institutional setup, requires actual reclaim event
+//    A real reclaim is: price WAS below VWAP (recently) → CROSSED above →
+//    HELD above for 2-3 candles → delta IMPROVED. Not just "above VWAP".
 function _vwapReclaim(ctx) {
   const reasons = [];
   let score = 0, valid = true;
-  const vwapPos = ctx.vwap?.position;
-  const dist = Math.abs(Number(ctx.vwap?.distance_pct) || 0);
 
-  if (!vwapPos || vwapPos === 'unknown') { valid = false; reasons.push('no VWAP'); }
-  else if ((ctx.direction === 'bullish' && vwapPos === 'above') ||
-           (ctx.direction === 'bearish' && vwapPos === 'below')) {
-    if (dist < 0.25) { score += 25; reasons.push(`recently reclaimed VWAP (${dist.toFixed(2)}%)`); }
-    else if (dist < 0.5) { score += 15; reasons.push(`above/below VWAP (${dist.toFixed(2)}%)`); }
-    else valid = false;
-  } else valid = false;
+  const vwap = ctx.vwap;
+  const vwapPos = vwap?.position;
+  const vwapVal = Number(vwap?.vwap);
+  const dist = Math.abs(Number(vwap?.distance_pct) || 0);
 
-  // Delta turning in direction
-  const deltaPct = Number(ctx.volumeAnalysis?.delta?.cvdPctLong) || 0;
-  if ((ctx.direction === 'bullish' && deltaPct > 0) ||
-      (ctx.direction === 'bearish' && deltaPct < 0)) { score += 12; reasons.push(`delta ${deltaPct}%`); }
+  if (!vwapVal || !vwapPos || vwapPos === 'unknown') { valid = false; reasons.push('no VWAP'); }
 
-  // OI not exploding against direction
-  const oiRegime = ctx.oiAnalytics?.regime;
-  if (oiRegime !== 'aggressive_short_buildup' && oiRegime !== 'aggressive_long_buildup') {
-    score += 8; reasons.push(`OI stable (${oiRegime})`);
-  } else if ((ctx.direction === 'bullish' && oiRegime === 'aggressive_short_buildup') ||
-             (ctx.direction === 'bearish' && oiRegime === 'aggressive_long_buildup')) {
-    valid = false; reasons.push('OI building against direction');
+  // Need recent candles to detect reclaim event
+  const c1m = ctx.candles1m || [];
+  const recent = c1m.slice(-12);                       // last ~12 minutes
+  if (recent.length < 6) { valid = false; reasons.push('insufficient candles'); }
+
+  if (valid) {
+    // Detect a reclaim event in last 12 bars:
+    //   bullish reclaim: at least one bar had close < vwap, and last 2-3 bars closed > vwap
+    //   bearish reclaim (rejection): mirror
+    const closes = recent.map(c => c.c);
+    const wasBelow = closes.some(c => c < vwapVal);
+    const wasAbove = closes.some(c => c > vwapVal);
+    const last3   = closes.slice(-3);
+    const last3AllAbove = last3.every(c => c > vwapVal);
+    const last3AllBelow = last3.every(c => c < vwapVal);
+
+    if (ctx.direction === 'bullish') {
+      if (wasBelow && last3AllAbove && dist < 0.4) {
+        score += 30; reasons.push('crossed up + held 3 bars above VWAP');
+      } else if (wasBelow && last3AllAbove) {
+        score += 18; reasons.push('reclaim but extended');
+      } else if (vwapPos === 'above' && dist < 0.2) {
+        score += 8; reasons.push('above VWAP but no reclaim event');
+      } else {
+        valid = false; reasons.push('no bullish reclaim pattern');
+      }
+    } else if (ctx.direction === 'bearish') {
+      if (wasAbove && last3AllBelow && dist < 0.4) {
+        score += 30; reasons.push('rejected from VWAP + held 3 bars below');
+      } else if (wasAbove && last3AllBelow) {
+        score += 18; reasons.push('rejection but extended');
+      } else if (vwapPos === 'below' && dist < 0.2) {
+        score += 8; reasons.push('below VWAP but no rejection event');
+      } else {
+        valid = false; reasons.push('no bearish rejection pattern');
+      }
+    }
   }
 
-  // VSA / volume support
-  if (ctx.volumeAnalysis?.timeVolume?.state === 'spike' || ctx.volumeAnalysis?.timeVolume?.state === 'climax') {
-    score += 10; reasons.push(`vol ${ctx.volumeAnalysis.timeVolume.state}`);
+  // Delta must IMPROVE in our direction (not just any positive)
+  const deltaPct = Number(ctx.volumeAnalysis?.delta?.cvdPctLong) || 0;
+  const deltaTrend = ctx.volumeAnalysis?.delta?.trend;
+  if (ctx.direction === 'bullish' && deltaPct > 5 && deltaTrend === 'rising') {
+    score += 14; reasons.push(`delta rising +${deltaPct}%`);
+  } else if (ctx.direction === 'bearish' && deltaPct < -5 && deltaTrend === 'falling') {
+    score += 14; reasons.push(`delta falling ${deltaPct}%`);
+  } else if ((ctx.direction === 'bullish' && deltaPct < -5) ||
+             (ctx.direction === 'bearish' && deltaPct > 5)) {
+    valid = false; reasons.push('delta against reclaim');
+  }
+
+  // OI confirms (PE writing for bullish, CE writing for bearish)
+  const oiRegime = ctx.oiAnalytics?.regime;
+  if (ctx.direction === 'bullish' &&
+      (oiRegime === 'aggressive_long_buildup' || oiRegime === 'violent_short_covering')) {
+    score += 10; reasons.push(`OI ${oiRegime}`);
+  }
+  if (ctx.direction === 'bearish' &&
+      (oiRegime === 'aggressive_short_buildup' || oiRegime === 'long_unwinding_collapse')) {
+    score += 10; reasons.push(`OI ${oiRegime}`);
+  }
+
+  // Time-volume must NOT be dry-up
+  if (ctx.volumeAnalysis?.timeVolume?.state === 'dry_up') {
+    score -= 10; reasons.push('volume dry-up');
+  }
+
+  // VSA absorption near VWAP is the ideal reclaim confirmation
+  if (ctx.volumeAnalysis?.vsa?.pattern === 'absorption' &&
+      ctx.volumeAnalysis.vsa.bias === ctx.direction) {
+    score += 8; reasons.push('VSA absorption at VWAP');
   }
 
   return {
     type: 'VWAP_RECLAIM',
-    valid, score: Math.max(0, score),
+    valid: valid && score >= 30,
+    score: Math.max(0, score),
     holdProfile: { tradeType: 'SCALP', maxHoldSec: 240, rrTarget: 1.5 },
     exitStyle: 'tight_sl_target_va',
     reasoning: reasons.join(' | '),

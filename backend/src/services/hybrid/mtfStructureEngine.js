@@ -77,21 +77,22 @@ function evaluate({ candles1m = [], candles5m = [], candles15m = [], direction, 
   if (tf15 === direction && tf5 === direction) alignment = 'full';
   else if (tf15 === direction || tf5 === direction) alignment = 'partial';
 
-  // Block decision: 1m direction against 15m bearish (or vice versa) is only
-  // allowed when auction state provides reversal permission AND we have a
-  // CHOCH on 5m in the candidate direction.
+  // Block decision: ONLY when 15m primary trend is clearly opposed AND no
+  // reversal permission. Calibrated: 15m=neutral or 5m-only opposition is
+  // a confidence penalty, not a block.
   let blocked = false;
   let reason = '';
   if (tf15 !== 'neutral' && tf15 !== direction) {
     const reversalPermitted =
          auctionState?.tradingImplication === 'reversal_setup'
-      && ((direction === 'bullish' && choch5 === 'bullish_choch')
+      || auctionState?.tradingImplication === 'mean_reversion'
+      || ((direction === 'bullish' && choch5 === 'bullish_choch')
        || (direction === 'bearish' && choch5 === 'bearish_choch'));
     if (!reversalPermitted) {
       blocked = true;
       reason = `15m ${tf15} blocks ${direction} (no reversal permission)`;
     } else {
-      reason = `counter-trend ${direction} permitted (reversal_setup + ${choch5})`;
+      reason = `counter-trend ${direction} permitted (${auctionState?.tradingImplication} or ${choch5})`;
     }
   } else {
     reason = `${alignment} alignment (15m=${tf15} 5m=${tf5} 1m=${tf1})`;

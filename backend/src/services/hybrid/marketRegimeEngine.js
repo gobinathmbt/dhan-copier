@@ -145,12 +145,14 @@ function classify({
   }
 
   // ── Permissions per regime ──────────────────────────────────────────────
+  // Calibrated: choppy / reversal_risk allow SOFT entries (reduced sizing,
+  // forced scalp). Only `exhaustion` hard-blocks because the move is over.
   const policy = {
     trending_bullish:  { allowEntries: true,  bias: 'bullish',  sizingFactor: 1.0 },
     trending_bearish:  { allowEntries: true,  bias: 'bearish',  sizingFactor: 1.0 },
     ranging:           { allowEntries: true,  bias: 'neutral',  sizingFactor: 0.6 },
-    choppy:            { allowEntries: false, bias: 'neutral',  sizingFactor: 0   },
-    reversal_risk:     { allowEntries: true,  bias: 'neutral',  sizingFactor: 0.5 },  // soft (was hard block)
+    choppy:            { allowEntries: true,  bias: 'neutral',  sizingFactor: 0.4 },  // soft
+    reversal_risk:     { allowEntries: true,  bias: 'neutral',  sizingFactor: 0.5 },
     exhaustion:        { allowEntries: false, bias: 'neutral',  sizingFactor: 0   },
     unknown:           { allowEntries: false, bias: 'neutral',  sizingFactor: 0   },
   }[regime];

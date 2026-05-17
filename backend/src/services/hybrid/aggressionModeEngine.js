@@ -21,13 +21,14 @@
  *   }
  */
 
-// Calibrated thresholds — lowered after over-gating analysis. Real NIFTY
-// intraday flow rarely produces "perfect alignment" so we trade tiers, not
-// boolean confirmation.
+// Calibrated thresholds (from backtest log analysis):
+//   - Score in 55-74 band was NOT predictive (wins ≈ losses)
+//   - Score 75+ showed clear edge (6:2 winners)
+//   - Therefore raise floors so we trade only where score predicts
 const PROFILES = {
-  conservative:  { minScore: 68, sizingFactor: 0.6,  requireUtBot: false, requireFullMtf: false, confirmationFraction: 1.00 },
-  balanced:      { minScore: 58, sizingFactor: 0.85, requireUtBot: false, requireFullMtf: false, confirmationFraction: 0.70 },
-  aggressive:    { minScore: 52, sizingFactor: 1.0,  requireUtBot: false, requireFullMtf: false, confirmationFraction: 0.55 },
+  conservative:  { minScore: 72, sizingFactor: 0.6,  requireUtBot: false, requireFullMtf: false, confirmationFraction: 1.00 },
+  balanced:      { minScore: 65, sizingFactor: 0.85, requireUtBot: false, requireFullMtf: false, confirmationFraction: 0.70 },
+  aggressive:    { minScore: 58, sizingFactor: 1.0,  requireUtBot: false, requireFullMtf: false, confirmationFraction: 0.55 },
 };
 
 function _institutional(ctx) {
@@ -45,19 +46,24 @@ function _institutional(ctx) {
   const expiry = ctx.sessionPhase?.isExpiryDay;
 
   if ((regime === 'trending_bullish' || regime === 'trending_bearish') && vol !== 'dead' && vol !== 'panic') {
-    reasons.push(`${regime}+${vol} → trend-mode 54`);
-    return { minScore: 54, sizingFactor: 1.0, requireUtBot: false, requireFullMtf: false, confirmationFraction: 0.55,
+    reasons.push(`${regime}+${vol} → trend-mode 60`);
+    return { minScore: 60, sizingFactor: 1.0, requireUtBot: false, requireFullMtf: false, confirmationFraction: 0.55,
              mode: 'institutional[trend]', reasoning: reasons.join(' | ') };
   }
   if (expiry) {
-    reasons.push(`expiry → 57`);
-    return { minScore: 57, sizingFactor: 0.8, requireUtBot: false, requireFullMtf: false, confirmationFraction: 0.6,
+    reasons.push(`expiry → 62`);
+    return { minScore: 62, sizingFactor: 0.8, requireUtBot: false, requireFullMtf: false, confirmationFraction: 0.6,
              mode: 'institutional[expiry]', reasoning: reasons.join(' | ') };
   }
-  if (regime === 'ranging' || regime === 'reversal_risk') {
-    reasons.push(`${regime} → range-mode 60`);
-    return { minScore: 60, sizingFactor: 0.7, requireUtBot: false, requireFullMtf: false, confirmationFraction: 0.65,
+  if (regime === 'ranging' || regime === 'reversal_risk' || regime === 'choppy') {
+    reasons.push(`${regime} → range-mode 65`);
+    return { minScore: 65, sizingFactor: 0.7, requireUtBot: false, requireFullMtf: false, confirmationFraction: 0.65,
              mode: 'institutional[range]', reasoning: reasons.join(' | ') };
+  }
+  if (vol === 'dead') {
+    reasons.push(`dead vol → mean-revert mode 65 small size`);
+    return { minScore: 65, sizingFactor: 0.5, requireUtBot: false, requireFullMtf: false, confirmationFraction: 0.65,
+             mode: 'institutional[dead_vol]', reasoning: reasons.join(' | ') };
   }
   if (vol === 'panic') {
     reasons.push('panic vol → conservative');

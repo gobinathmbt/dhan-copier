@@ -506,6 +506,36 @@ async function decide({
     });
   }
 
+  // ── PE-side enhanced filter (calibration: BUY_PE win rate was 38.3%) ──
+  // Bearish trades fail more in NIFTY because of bullish drift bias and
+  // gamma suppression. Require stronger confirmation:
+  //   - 5m AND 15m bearish (not just one)
+  //   - below VWAP
+  //   - either downside acceleration OR negative gamma OR gamma flip below
+  if (direction === 'bearish') {
+    const tf5  = algorithmOutputs?.multiTimeframe?.timeframes?.['5m']?.trend;
+    const tf15 = algorithmOutputs?.multiTimeframe?.timeframes?.['15m']?.trend;
+    const vwapPos = payload?.vwap_analysis?.position || payload?.vwap_analysis?.price_vs_vwap;
+    const bothBearish = tf5 === 'bearish' && tf15 === 'bearish';
+
+    // Gamma must NOT suppress downside
+    const gammaSuppresses = gammaRegime?.regime === 'positive'
+      && gammaRegime.pinningLevel
+      && Math.abs(spotPrice - gammaRegime.pinningLevel) < 30;
+
+    // Downside acceleration check via OI velocity
+    const ceVelocity = oiAnalytics0?.diff?.ceVelocity || 0;
+    const peVelocity = oiAnalytics0?.diff?.peVelocity || 0;
+    const downsideAccel = ceVelocity > 200 || peVelocity < -200;
+
+    if (!bothBearish || vwapPos !== 'below') {
+      return _noTrade(`PE filter: need 5m+15m bearish + below VWAP (got tf5=${tf5}, tf15=${tf15}, vwap=${vwapPos})`);
+    }
+    if (gammaSuppresses && !downsideAccel) {
+      return _noTrade(`PE filter: positive gamma pin at ${gammaRegime.pinningLevel} suppresses downside (no acceleration)`);
+    }
+  }
+
   // Sanity: HTF strongly contradicts direction → block
   const htfBias = algorithmOutputs?.multiTimeframe?.higher_tf_bias;
   if (htfBias === 'strongly_bullish' && direction === 'bearish') {
@@ -734,6 +764,8 @@ async function decide({
     multiDayContext,
     volatilityRegime,
     futuresData,
+    candles1m,
+    candles5m,
   });
   hybridLogger.info({
     sessionId, event: 'entry_type',
@@ -805,11 +837,9 @@ async function decide({
     });
   }
 
-  // Tier guard: INTRADAY_MOMENTUM needs standard tier. Other strategies are
-  // fine at scalp_only.
-  if (strategy.strategy === 'INTRADAY_MOMENTUM' && confidence.tier === 'scalp_only') {
-    return _noTrade(`INTRADAY_MOMENTUM requires standard tier (≥75); got ${confidence.score} (${confidence.tier})`);
-  }
+  // Tier guard removed — INTRADAY_MOMENTUM had 75% WR in backtest but tier
+  // requirement filtered most setups away. The strategy's minScore now does
+  // the gating directly.
 
   // ── Pipeline step 10: Hard requirement — risk engine OK ──────────────
   if (!risk.allowEntries) {

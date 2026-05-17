@@ -27,20 +27,19 @@
 
 function _safe(n) { const x = Number(n); return Number.isFinite(x) ? x : null; }
 
-// ── Permission map: which entry families this meta-regime allows ─────────
-// Allowed = preferred entry types (will get score bonus / preserved threshold).
-// Discouraged = still allowed but no bonus.
-// Blocked = entry type rejected unless absolutely overwhelming evidence.
+// Permission map: which entry families this meta-regime PREFERS.
+// Calibrated: no family is "blocked" outright — discouraged just gets a
+// confidence/size multiplier instead. Only `panic` hard-restricts.
 const FAMILY_POLICY = {
-  balanced_auction:  { allowed: ['mean_reversion','vwap_reclaim','reversal'],          discouraged: ['breakout_expansion'],     blocked: [] },
-  trend_auction:     { allowed: ['momentum_continuation','breakout_expansion','pullback'], discouraged: ['mean_reversion'],         blocked: [] },
-  short_covering:    { allowed: ['momentum_continuation','breakout_expansion'],         discouraged: ['reversal'],               blocked: ['mean_reversion'] },
-  long_liquidation:  { allowed: ['momentum_continuation','breakout_expansion'],         discouraged: ['reversal'],               blocked: ['mean_reversion'] },
-  gamma_pin:         { allowed: ['mean_reversion','vwap_reclaim'],                       discouraged: ['breakout_expansion'],     blocked: ['momentum_continuation'] },
-  expiry_expansion:  { allowed: ['momentum_continuation','breakout_expansion'],         discouraged: [],                         blocked: [] },
-  dealer_hedging:    { allowed: ['mean_reversion','vwap_reclaim','reversal'],            discouraged: ['breakout_expansion'],     blocked: [] },
-  panic:             { allowed: ['exhaustion_fade'],                                     discouraged: [],                         blocked: ['breakout_expansion','momentum_continuation'] },
-  slow_grind:        { allowed: ['pullback','vwap_reclaim'],                             discouraged: ['breakout_expansion'],     blocked: [] },
+  balanced_auction:  { allowed: ['mean_reversion','vwap_reclaim','reversal'],         discouraged: ['breakout_expansion','momentum_continuation'], blocked: [] },
+  trend_auction:     { allowed: ['momentum_continuation','breakout_expansion','pullback'], discouraged: ['mean_reversion'],                          blocked: [] },
+  short_covering:    { allowed: ['momentum_continuation','breakout_expansion'],        discouraged: ['reversal','mean_reversion'],                  blocked: [] },
+  long_liquidation:  { allowed: ['momentum_continuation','breakout_expansion'],        discouraged: ['reversal','mean_reversion'],                  blocked: [] },
+  gamma_pin:         { allowed: ['mean_reversion','vwap_reclaim','reversal'],          discouraged: ['breakout_expansion','momentum_continuation'], blocked: [] },
+  expiry_expansion:  { allowed: ['momentum_continuation','breakout_expansion'],        discouraged: [],                                              blocked: [] },
+  dealer_hedging:    { allowed: ['mean_reversion','vwap_reclaim','reversal','momentum_continuation'], discouraged: ['breakout_expansion'],          blocked: [] },
+  panic:             { allowed: ['exhaustion_fade','reversal'],                        discouraged: ['breakout_expansion','momentum_continuation'], blocked: [] },
+  slow_grind:        { allowed: ['mean_reversion','pullback','vwap_reclaim'],          discouraged: ['breakout_expansion'],                          blocked: [] },
   unknown:           { allowed: ['momentum_continuation','mean_reversion','vwap_reclaim'], discouraged: [], blocked: [] },
 };
 

@@ -39,9 +39,11 @@ const STRATEGIES = {
     slPointsRatio:     1.0,
     rrTarget: { min: 1.0, max: 1.5 },
     maxHoldSec: 180,
-    minScore: 55,                    // calibrated down from 60
-    utBotRequired: false,            // never required (calibration spec)
-    allowedRegimes: ['trending_bullish','trending_bearish','ranging','reversal_risk'],
+    minScore: 55,
+    utBotRequired: false,
+    // Calibrated: scalping LIVES in choppy/ranging/gamma — institutional
+    // responsive trading. Only excluded from `exhaustion`.
+    allowedRegimes: ['trending_bullish','trending_bearish','ranging','reversal_risk','choppy'],
   },
   INTRADAY_MOMENTUM: {
     name: 'INTRADAY_MOMENTUM',
@@ -50,8 +52,10 @@ const STRATEGIES = {
     slPointsRatio:     1.5,
     rrTarget: { min: 2.0, max: 4.0 },
     maxHoldSec: 15 * 60,
-    minScore: 65,                    // calibrated down from 75
-    utBotRequired: true,             // momentum swings — UT Bot helps
+    // Calibrated: backtest showed 75% WR but system filtered most away.
+    // Lower activation barrier; structural quality already vets the setup.
+    minScore: 60,
+    utBotRequired: false,            // remove UT requirement (8 trades/cycle blocked)
     allowedRegimes: ['trending_bullish','trending_bearish'],
   },
   MEAN_REVERSION: {
@@ -105,7 +109,7 @@ function select({ marketRegime, volatilityRegime, session, settings, derivatives
   let pick = STRATEGIES.SCALPING;
   const reasons = [];
 
-  // 1. Trending + expansion → momentum
+  // 1. Trending + expansion → momentum (the proven 75% WR strategy)
   if ((regime === 'trending_bullish' || regime === 'trending_bearish')
       && (vol === 'expansion' || vol === 'normal')) {
     pick = STRATEGIES.INTRADAY_MOMENTUM;
@@ -117,12 +121,19 @@ function select({ marketRegime, volatilityRegime, session, settings, derivatives
     pick = STRATEGIES.INTRADAY_MOMENTUM;
     reasons.push(`${phase} + ${regime} → momentum`);
   }
-  // 3. Ranging → mean reversion
-  else if (regime === 'ranging' && (vol === 'normal' || vol === 'expansion')) {
+  // 3. RANGING / CHOPPY / REVERSAL → mean reversion (the proven 63% WR strategy)
+  //    Calibration: backtest showed mean reversion is the natural edge on
+  //    NIFTY for ~46% of cycles. Don't over-strict the regime requirement.
+  else if (regime === 'ranging' || regime === 'choppy' || regime === 'reversal_risk') {
     pick = STRATEGIES.MEAN_REVERSION;
-    reasons.push(`${regime} + ${vol} → mean reversion`);
+    reasons.push(`${regime} → mean reversion`);
   }
-  // 4. Midday chop or normal mixed → scalping
+  // 4. Dead volatility → mean reversion (rotational scalps still work)
+  else if (vol === 'dead') {
+    pick = STRATEGIES.MEAN_REVERSION;
+    reasons.push(`dead volatility → mean reversion`);
+  }
+  // 5. Default → scalping
   else {
     pick = STRATEGIES.SCALPING;
     reasons.push(`default scalping (regime=${regime}, vol=${vol}, phase=${phase})`);

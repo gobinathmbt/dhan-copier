@@ -142,9 +142,11 @@ function classify({ candles1m = [], candles5m = [], vix = null } = {}) {
   }
 
   // ── Trading permission per regime ───────────────────────────────────────
-  // Even when allowed, sizing is multiplied by sizingFactor.
+  // Calibrated: dead volatility allows scalps/mean-reversion at reduced size.
+  // Breakouts and momentum continuation are downgraded by the meta-regime
+  // engine, not by hard blocking here. Only `panic` hard-blocks.
   const policy = {
-    dead:         { allowEntries: false, sizingFactor: 0    },
+    dead:         { allowEntries: true,  sizingFactor: 0.45, allowedFamilies: ['mean_reversion','vwap_reclaim','reversal'] },
     normal:       { allowEntries: true,  sizingFactor: 1.0  },
     expansion:    { allowEntries: true,  sizingFactor: 1.0  },
     panic:        { allowEntries: false, sizingFactor: 0    },
