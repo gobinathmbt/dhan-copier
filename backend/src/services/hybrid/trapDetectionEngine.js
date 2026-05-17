@@ -161,11 +161,13 @@ function _detectRepeatedFailure({ direction, sessionMemory }) {
  * @returns {Object} { trapScore, blocked, breakdown, reasons }
  */
 function evaluate(ctx = {}, opts = {}) {
-  // Calibrated thresholds:
-  //   ≥ 90  → hard block (institutional fakes)
-  //   75-89 → size cut + tighten + score penalty (don't block)
+  // CALIBRATED thresholds (2026-05-18):
+  //   ≥ 80  → hard block (was 90 — still high but not impossible)
+  //   75-79 → size cut + score penalty
   //   ≥ 30  → score penalty only
-  const blockThreshold = Number(opts.blockThreshold ?? 90);   // was 70 — too tight
+  // Additionally, several SINGLE-DETECTOR fires now hard-block regardless
+  // of composite score (institutional fakes — never trade through them).
+  const blockThreshold = Number(opts.blockThreshold ?? 80);
   const detectors = {
     breakoutIntoHvn:    _detectBreakoutIntoHvn(ctx),
     weakDeltaBreakout:  _detectWeakDeltaBreakout(ctx),
@@ -188,10 +190,21 @@ function evaluate(ctx = {}, opts = {}) {
     if (v.score >= 30) allReasons.push(`[${k}:${v.score}] ${(v.reasons || []).join(', ')}`);
   }
 
+  // HARD-BLOCK individual detectors — these are institutional fakes that
+  // burn capital almost every time:
+  //   1. weak delta breakout (no_demand / no_supply)  ≥ 70
+  //   2. hidden absorption against direction          ≥ 60
+  //   3. breakout INTO an HVN within 25pts            ≥ 70 (combined intra+composite)
+  const hardBlock =
+       detectors.weakDeltaBreakout.score   >= 70
+    || detectors.hiddenAbsorption.score    >= 60
+    || detectors.breakoutIntoHvn.score     >= 70;
+
   return {
     trapScore: composite,
-    blocked: composite >= blockThreshold,
-    sizeReduce: composite >= 75 ? 0.5 : (composite >= 50 ? 0.7 : 1.0),
+    blocked: composite >= blockThreshold || hardBlock,
+    hardBlock,
+    sizeReduce: composite >= 70 ? 0.4 : (composite >= 50 ? 0.6 : (composite >= 30 ? 0.8 : 1.0)),
     breakdown: detectors,
     reasoning: allReasons.length ? allReasons.join(' | ') : 'no traps detected',
   };

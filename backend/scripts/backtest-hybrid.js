@@ -493,7 +493,10 @@ async function backtestDay(dayLabel) {
 
   const settings = {
     targetPoints: 10, slPoints: 15,
-    minLots: LOTS_PER_TRADE, maxLots: LOTS_PER_TRADE,
+    // CALIBRATED 2026-05-18: institutional spec — fewer lots, longer holds.
+    // Allow engine to scale lots down to 1 on high-premium strikes (saves
+    // absolute rupee loss on adverse moves) while still capping at 5.
+    minLots: 1, maxLots: LOTS_PER_TRADE,
     maxConcurrentTrades: 1,
     maxDailyLossPct: 3,
     cooldownSec: 5,                              // 5 min cooldown between trades
@@ -507,8 +510,11 @@ async function backtestDay(dayLabel) {
     executionMinScore: 50,
     enableHybridAIAdvisory: false,
     referenceDate: dayLabel,
-    trapBlockThreshold: 70,
+    // CALIBRATED 2026-05-18: align with engine defaults
+    trapBlockThreshold: 80,                       // was 70 (engine default 80)
     aggressionMode: 'institutional',
+    maxTradesPerDay: 8,                           // institutional spec daily cap
+    maxLossesPerDay: 3,                           // halt after 3 losses today
   };
 
   const session = {
@@ -567,6 +573,10 @@ async function backtestDay(dayLabel) {
         settings, session,
         openTradesCount:  0,
         futuresData:      inputs.futuresData,
+        // Calibrated: pass today's trade count + loss streak to entry engine
+        // so the daily caps actually fire.
+        tradesToday: trades.length,
+        lossesToday: trades.filter(r => r.result === 'LOSS').length,
       });
     } catch (e) {
       _writeLog('error', 'backtest', `cycle_error: ${e.message}`, { dayLabel, hhmm: _activeHhmm, stack: e.stack });

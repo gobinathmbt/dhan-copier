@@ -27,33 +27,43 @@
 
 function _safe(n) { const x = Number(n); return Number.isFinite(x) ? x : null; }
 
-// Permission map: which entry families this meta-regime PREFERS.
-// Calibrated: no family is "blocked" outright — discouraged just gets a
-// confidence/size multiplier instead. Only `panic` hard-restricts.
+// CALIBRATED Permission map (2026-05-18 institutional spec):
+//   - gamma_pin       → ONLY mean-reversion / VWAP reclaim (block continuation)
+//   - balanced_auction → ONLY mean-reversion (block momentum/breakout)
+//   - slow_grind      → block all expansion entries (rotational scalps only)
+//   - panic           → ONLY exhaustion fades (true reversal setups)
+//
+// The gamma_pin and balanced_auction rules alone remove the bulk of the
+// 56% midday-chop trade leak observed in the 59-day backtest.
 const FAMILY_POLICY = {
-  balanced_auction:  { allowed: ['mean_reversion','vwap_reclaim','reversal'],         discouraged: ['breakout_expansion','momentum_continuation'], blocked: [] },
-  trend_auction:     { allowed: ['momentum_continuation','breakout_expansion','pullback'], discouraged: ['mean_reversion'],                          blocked: [] },
-  short_covering:    { allowed: ['momentum_continuation','breakout_expansion'],        discouraged: ['reversal','mean_reversion'],                  blocked: [] },
-  long_liquidation:  { allowed: ['momentum_continuation','breakout_expansion'],        discouraged: ['reversal','mean_reversion'],                  blocked: [] },
-  gamma_pin:         { allowed: ['mean_reversion','vwap_reclaim','reversal'],          discouraged: ['breakout_expansion','momentum_continuation'], blocked: [] },
-  expiry_expansion:  { allowed: ['momentum_continuation','breakout_expansion'],        discouraged: [],                                              blocked: [] },
-  dealer_hedging:    { allowed: ['mean_reversion','vwap_reclaim','reversal','momentum_continuation'], discouraged: ['breakout_expansion'],          blocked: [] },
-  panic:             { allowed: ['exhaustion_fade','reversal'],                        discouraged: ['breakout_expansion','momentum_continuation'], blocked: [] },
-  slow_grind:        { allowed: ['mean_reversion','pullback','vwap_reclaim'],          discouraged: ['breakout_expansion'],                          blocked: [] },
-  unknown:           { allowed: ['momentum_continuation','mean_reversion','vwap_reclaim'], discouraged: [], blocked: [] },
+  balanced_auction:  { allowed: ['mean_reversion','vwap_reclaim'],                                  discouraged: ['reversal'],                                                          blocked: ['breakout_expansion','momentum_continuation','pullback'] },
+  trend_auction:     { allowed: ['momentum_continuation','breakout_expansion','pullback'],          discouraged: ['mean_reversion'],                                                    blocked: [] },
+  short_covering:    { allowed: ['momentum_continuation','breakout_expansion'],                     discouraged: ['reversal','mean_reversion'],                                         blocked: [] },
+  long_liquidation:  { allowed: ['momentum_continuation','breakout_expansion'],                     discouraged: ['reversal','mean_reversion'],                                         blocked: [] },
+  // Gamma-pin: dealers actively pin price. Continuation/breakout WILL fail.
+  gamma_pin:         { allowed: ['mean_reversion','vwap_reclaim'],                                  discouraged: ['reversal'],                                                          blocked: ['breakout_expansion','momentum_continuation','pullback'] },
+  expiry_expansion:  { allowed: ['momentum_continuation','breakout_expansion'],                     discouraged: ['mean_reversion'],                                                    blocked: [] },
+  // Negative gamma forces dealer hedging INTO trends — momentum is fine,
+  // but breakouts often fail at the next strike wall.
+  dealer_hedging:    { allowed: ['momentum_continuation','pullback'],                               discouraged: ['mean_reversion','reversal'],                                         blocked: ['breakout_expansion'] },
+  panic:             { allowed: ['exhaustion_fade','reversal'],                                     discouraged: [],                                                                    blocked: ['breakout_expansion','momentum_continuation','pullback','mean_reversion'] },
+  slow_grind:        { allowed: ['mean_reversion','pullback','vwap_reclaim'],                       discouraged: ['reversal'],                                                          blocked: ['breakout_expansion','momentum_continuation'] },
+  unknown:           { allowed: ['mean_reversion','vwap_reclaim'],                                  discouraged: ['momentum_continuation'],                                             blocked: ['breakout_expansion'] },
 };
 
+// CALIBRATED sizing (was sometimes 1.0 — institutionally we want lower lots
+// almost always, except in clear trend/short-covering setups).
 const STATE_DEFAULTS = {
-  balanced_auction:  { sizingFactor: 0.85, holdMultiplier: 0.9 },
-  trend_auction:     { sizingFactor: 1.0,  holdMultiplier: 1.2 },
-  short_covering:    { sizingFactor: 1.0,  holdMultiplier: 1.3 },
-  long_liquidation:  { sizingFactor: 1.0,  holdMultiplier: 1.3 },
-  gamma_pin:         { sizingFactor: 0.7,  holdMultiplier: 0.7 },
-  expiry_expansion:  { sizingFactor: 0.85, holdMultiplier: 0.7 },
-  dealer_hedging:    { sizingFactor: 0.8,  holdMultiplier: 0.9 },
-  panic:             { sizingFactor: 0.5,  holdMultiplier: 0.5 },
-  slow_grind:        { sizingFactor: 0.7,  holdMultiplier: 1.0 },
-  unknown:           { sizingFactor: 0.85, holdMultiplier: 1.0 },
+  balanced_auction:  { sizingFactor: 0.6,  holdMultiplier: 0.8 },   // chop = small
+  trend_auction:     { sizingFactor: 1.0,  holdMultiplier: 1.4 },   // ride longer
+  short_covering:    { sizingFactor: 1.0,  holdMultiplier: 1.4 },
+  long_liquidation:  { sizingFactor: 1.0,  holdMultiplier: 1.4 },
+  gamma_pin:         { sizingFactor: 0.5,  holdMultiplier: 0.6 },   // tight + quick
+  expiry_expansion:  { sizingFactor: 0.7,  holdMultiplier: 0.7 },
+  dealer_hedging:    { sizingFactor: 0.85, holdMultiplier: 1.0 },
+  panic:             { sizingFactor: 0.4,  holdMultiplier: 0.5 },
+  slow_grind:        { sizingFactor: 0.5,  holdMultiplier: 1.0 },   // small, patient
+  unknown:           { sizingFactor: 0.6,  holdMultiplier: 0.9 },
 };
 
 /**
@@ -165,15 +175,35 @@ function familyOf(entryType) {
 /**
  * Score adjustment for an entry-type given current meta-regime.
  * Returns a small bonus (+) or penalty (-) on the confidence score.
+ *
+ * Calibrated 2026-05-18:
+ *   - Blocked family receives -25 penalty (was -12). Combined with the
+ *     entry-engine hard-block in hybridEntryEngine, blocked families
+ *     should never enter at all.
+ *   - Discouraged family receives -8 (was -3) — still tradeable but harder
+ *     to clear the threshold.
+ *   - Allowed family bonus stays at +5.
  */
 function familyScoreAdjustment(metaRegime, entryType) {
   if (!metaRegime || !entryType) return 0;
   const family = familyOf(entryType);
   if (!family) return 0;
   if (metaRegime.allowedFamilies?.includes(family))    return +5;
-  if (metaRegime.discouragedFamilies?.includes(family)) return -3;
-  if (metaRegime.blockedFamilies?.includes(family))    return -12;
+  if (metaRegime.discouragedFamilies?.includes(family)) return -8;
+  if (metaRegime.blockedFamilies?.includes(family))    return -25;
   return 0;
 }
 
-module.exports = { classify, familyOf, familyScoreAdjustment, FAMILY_POLICY };
+/**
+ * Hard-block check: returns true if the requested entry family is
+ * categorically blocked under the current meta-regime. Caller (entry engine)
+ * uses this to short-circuit the cycle.
+ */
+function isFamilyBlocked(metaRegime, entryType) {
+  if (!metaRegime || !entryType) return false;
+  const family = familyOf(entryType);
+  if (!family) return false;
+  return !!metaRegime.blockedFamilies?.includes(family);
+}
+
+module.exports = { classify, familyOf, familyScoreAdjustment, isFamilyBlocked, FAMILY_POLICY };

@@ -31,6 +31,17 @@
  *   Mean Reversion        60-75% win, RR 1:0.8 to 1:1.5
  */
 
+// CALIBRATION (2026-05-18) per institutional spec:
+//   Setup                Old   New   Why
+//   ─────────────────    ───   ───   ───────────────────────────────────────
+//   Scalp                55    68    backtest scalps had ~50% WR, push selectivity
+//   Mean reversion       58    72    needs cleaner edge — gamma_pin / VA fades
+//   Momentum             60    78    PF 1.35 only, raise the bar
+//   Breakout expansion   —     82    rare but A-grade trades only
+//   Aggressive band      55    REMOVED — see aggressionModeEngine
+//
+// All strategies retain their tradeType / hold / RR profile. The minScore
+// is the gate.
 const STRATEGIES = {
   SCALPING: {
     name: 'SCALPING',
@@ -39,7 +50,7 @@ const STRATEGIES = {
     slPointsRatio:     1.0,
     rrTarget: { min: 1.0, max: 1.5 },
     maxHoldSec: 180,
-    minScore: 55,
+    minScore: 68,                    // was 55
     utBotRequired: false,
     // Calibrated: scalping LIVES in choppy/ranging/gamma — institutional
     // responsive trading. Only excluded from `exhaustion`.
@@ -52,10 +63,11 @@ const STRATEGIES = {
     slPointsRatio:     1.5,
     rrTarget: { min: 2.0, max: 4.0 },
     maxHoldSec: 15 * 60,
-    // Calibrated: backtest showed 75% WR but system filtered most away.
-    // Lower activation barrier; structural quality already vets the setup.
-    minScore: 60,
-    utBotRequired: false,            // remove UT requirement (8 trades/cycle blocked)
+    // Calibrated 2nd pass: 78 still produced 46% WR on MOMENTUM_CONTINUATION.
+    // The pure entry signal is hard to beat unless score is genuinely elite.
+    // Raise to 80. UT Bot stays optional — confirmation only.
+    minScore: 80,
+    utBotRequired: false,
     allowedRegimes: ['trending_bullish','trending_bearish'],
   },
   MEAN_REVERSION: {
@@ -65,9 +77,24 @@ const STRATEGIES = {
     slPointsRatio:     1.0,
     rrTarget: { min: 0.8, max: 1.5 },
     maxHoldSec: 240,
-    minScore: 58,                    // calibrated down from 65
+    minScore: 72,                    // was 58 — gamma-pin fades only
     utBotRequired: false,
     allowedRegimes: ['ranging','reversal_risk','trending_bullish','trending_bearish'],
+  },
+  // NEW: Breakout-expansion strategy (institutional spec). Triggered only
+  // in trending + expansion volatility, with explicit LVN-or-IB-extension
+  // requirement to be picked. The score gate is the strictest — these
+  // setups are rare but should print outsized returns.
+  BREAKOUT_EXPANSION: {
+    name: 'BREAKOUT_EXPANSION',
+    tradeType: 'SWING',
+    targetPointsRatio: 4.0,           // bigger than momentum target
+    slPointsRatio:     1.5,
+    rrTarget: { min: 2.5, max: 5.0 },
+    maxHoldSec: 20 * 60,
+    minScore: 82,
+    utBotRequired: false,
+    allowedRegimes: ['trending_bullish','trending_bearish'],
   },
 };
 
@@ -109,8 +136,17 @@ function select({ marketRegime, volatilityRegime, session, settings, derivatives
   let pick = STRATEGIES.SCALPING;
   const reasons = [];
 
-  // 1. Trending + expansion → momentum (the proven 75% WR strategy)
+  // 0. Trending + EXPANSION volatility = the prime breakout setup. The trap
+  //    detection / structural-target engines additionally vet whether an LVN
+  //    or IB extension is in play. minScore 82 keeps these rare and clean.
   if ((regime === 'trending_bullish' || regime === 'trending_bearish')
+      && vol === 'expansion'
+      && (phase === 'morning' || phase === 'power_hour' || phase === 'opening_drive')) {
+    pick = STRATEGIES.BREAKOUT_EXPANSION;
+    reasons.push(`${regime} + expansion + ${phase} → breakout`);
+  }
+  // 1. Trending + normal/expansion → momentum
+  else if ((regime === 'trending_bullish' || regime === 'trending_bearish')
       && (vol === 'expansion' || vol === 'normal')) {
     pick = STRATEGIES.INTRADAY_MOMENTUM;
     reasons.push(`${regime} + ${vol} → momentum`);
@@ -121,9 +157,7 @@ function select({ marketRegime, volatilityRegime, session, settings, derivatives
     pick = STRATEGIES.INTRADAY_MOMENTUM;
     reasons.push(`${phase} + ${regime} → momentum`);
   }
-  // 3. RANGING / CHOPPY / REVERSAL → mean reversion (the proven 63% WR strategy)
-  //    Calibration: backtest showed mean reversion is the natural edge on
-  //    NIFTY for ~46% of cycles. Don't over-strict the regime requirement.
+  // 3. RANGING / CHOPPY / REVERSAL → mean reversion
   else if (regime === 'ranging' || regime === 'choppy' || regime === 'reversal_risk') {
     pick = STRATEGIES.MEAN_REVERSION;
     reasons.push(`${regime} → mean reversion`);

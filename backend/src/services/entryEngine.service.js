@@ -421,7 +421,7 @@ function classifyMoneyness(strike, aggregator) {
  * Call OpenAI with the full payload. Returns a structured decision or a
  * NO_TRADE fallback if the model hallucinates or rate-limits.
  */
-async function decide({ aggregator, algorithmOutputs, masterDecision, settings, session, openTradesCount, futuresData }) {
+async function decide({ aggregator, algorithmOutputs, masterDecision, settings, session, openTradesCount, futuresData, tradesToday, lossesToday }) {
   // ──────────────────────────────────────────────────────────────────────────
   // HYBRID PATH — deterministic, institutional-style. ON BY DEFAULT.
   // The hybrid engine performs its own concurrency / risk / score / strike
@@ -434,6 +434,7 @@ async function decide({ aggregator, algorithmOutputs, masterDecision, settings, 
     try {
       const decision = await hybrid.entry.decide({
         aggregator, algorithmOutputs, masterDecision, settings, session, openTradesCount, futuresData,
+        tradesToday, lossesToday,
       });
       logger.info({
         sessionId: String(session?._id || ''),

@@ -183,6 +183,8 @@ function _computeFreshness(aggregator) {
  * @param {Object} args.session
  * @param {number} args.openTradesCount
  * @param {Object} [args.futuresData]
+ * @param {number} [args.tradesToday=0]    - calibrated daily-trade cap input
+ * @param {number} [args.lossesToday=0]    - daily loss-streak halt input
  */
 async function decide({
   aggregator,
@@ -192,6 +194,8 @@ async function decide({
   session,
   openTradesCount = 0,
   futuresData,
+  tradesToday = 0,
+  lossesToday = 0,
 }) {
   const sessionId = session?._id;
 
@@ -199,6 +203,23 @@ async function decide({
   const maxConcurrent = Number(settings?.maxConcurrentTrades) || 1;
   if (openTradesCount >= maxConcurrent) {
     return _noTrade(`At max concurrent trades (${openTradesCount}/${maxConcurrent})`);
+  }
+
+  // ── Daily trade cap (institutional spec: 5-8 elite trades/day) ──────
+  // Backtest evidence (59 days, 413 trades):
+  //   3-9 trades/day:  60% WR, +₹158k net
+  //   15+ trades/day:  43% WR, -₹41k net  ← capital destruction
+  // Cap default = 8. Override via settings.maxTradesPerDay.
+  const maxTradesPerDay = Number(settings?.maxTradesPerDay) || 8;
+  if (tradesToday >= maxTradesPerDay) {
+    return _noTrade(`Daily trade cap reached (${tradesToday}/${maxTradesPerDay})`);
+  }
+  // ── Daily loss-streak halt (preserves capital after bad start) ──────
+  // Stop entries the moment 3 losses have printed today. Prevents drift
+  // into churn-trading after a rough morning.
+  const maxLossesPerDay = Number(settings?.maxLossesPerDay) || 3;
+  if (lossesToday >= maxLossesPerDay) {
+    return _noTrade(`Daily loss-streak halt (${lossesToday}/${maxLossesPerDay})`);
   }
 
   // ── Inputs ───────────────────────────────────────────────────────────
@@ -734,11 +755,11 @@ async function decide({
     },
     sessionMemory: multiDayContext?.sessionMemory,
     oiAnalytics,
-  }, { blockThreshold: Number(settings?.trapBlockThreshold ?? 90) });   // calibrated 70→90
+  }, { blockThreshold: Number(settings?.trapBlockThreshold ?? 80) });   // calibrated 90→80
   hybridLogger.info({
     sessionId, event: 'trap_detection',
     message: `trapScore=${trap.trapScore} ${trap.blocked ? '(BLOCKED)' : ''} ${trap.reasoning}`,
-    data: { trapScore: trap.trapScore, blocked: trap.blocked, breakdown: trap.breakdown },
+    data: { trapScore: trap.trapScore, blocked: trap.blocked, hardBlock: trap.hardBlock, breakdown: trap.breakdown },
   });
   if (trap.blocked) {
     return _noTrade(`Trap detection blocked: ${trap.reasoning}`, { trap, strategy });
@@ -766,6 +787,7 @@ async function decide({
     futuresData,
     candles1m,
     candles5m,
+    metaRegime,        // calibrated: pre-filter blocked families
   });
   hybridLogger.info({
     sessionId, event: 'entry_type',
@@ -774,23 +796,111 @@ async function decide({
             allEvals: entryType.allEvaluations.map(e => ({ type: e.type, valid: e.valid, score: e.score })) },
   });
   if (!entryType.bestType) {
-    // No specific institutional setup matched — fall back to generic scalp
-    // profile. The confidence engine will still gate based on minScore.
-    entryType.bestType = 'GENERIC_SCALP';
-    entryType.bestProfile = { tradeType: 'SCALP', maxHoldSec: 180, rrTarget: 1.0 };
-    entryType.bestExitStyle = 'fixed_target_tight_sl';
-    entryType.bestScore = 0;
-    entryType.bestReasoning = 'no specific entry type — generic scalp fallback';
-    hybridLogger.info({
-      sessionId, event: 'entry_type_fallback',
-      message: 'no specific entry type matched — generic scalp',
-      data: { fallback: true },
-    });
+    // CALIBRATED (institutional spec): no setup matched OR all candidates
+    // were blocked by meta-regime. Don't trade — generic scalp fallback was
+    // a major source of low-edge trades in the backtest.
+    return _noTrade(
+      `No valid entry type for ${metaRegime.state} (${entryType.allEvaluations.length} evaluated, blocked=${(entryType.blockedFamilies||[]).join('/')})`,
+      { metaRegime, entryType }
+    );
   }
   // Apply entry-type's hold profile (overrides strategy's tradeType / maxHold)
   if (entryType.bestProfile) {
     strategy.tradeType   = entryType.bestProfile.tradeType   || strategy.tradeType;
     strategy.maxHoldSec  = Math.min(strategy.maxHoldSec, entryType.bestProfile.maxHoldSec || strategy.maxHoldSec);
+  }
+
+  // ── Pipeline step 9d-pen: META-REGIME FAMILY HARD-BLOCK ──────────────
+  // Calibrated: meta-regime now actively blocks entry families it deems
+  // structurally incompatible (gamma_pin → no breakouts, balanced_auction
+  // → no momentum, slow_grind → no expansion). This is the single biggest
+  // change for win-rate improvement (was a soft penalty only).
+  if (metaRegimeEngine.isFamilyBlocked && metaRegimeEngine.isFamilyBlocked(metaRegime, entryType.bestType)) {
+    return _noTrade(
+      `Meta-regime ${metaRegime.state} blocks family for ${entryType.bestType} (${metaRegime.reasoning})`,
+      { metaRegime, entryType: entryType.bestType, strategy }
+    );
+  }
+
+  // ── Pipeline step 9d-pen-bis: NO-TRADE ZONES (institutional spec) ────
+  // A handful of states are guaranteed to bleed theta with no edge. Block
+  // them outright unless this is a clear reversal/exhaustion fade setup.
+  const noTradeReasons = [];
+  // (a) Inside-VA acceptance with neutral delta and no zone bias = pure chop
+  if (volumeAnalysis?.acceptance === 'inside_va'
+      && volumeAnalysis?.delta?.bias === 'neutral'
+      && (volumeAnalysis?.zone?.zone === 'neutral' || !volumeAnalysis?.zone?.zone)
+      && entryType.bestType !== 'REVERSAL'
+      && entryType.bestType !== 'EXHAUSTION_FADE') {
+    noTradeReasons.push('inside_va + neutral delta + neutral zone — rotational chop');
+  }
+  // (b) POC distance < 10pts with no expansion volatility = pin zone
+  const pocDist = (() => {
+    const poc = volumeAnalysis?.frvp?.pocPrice;
+    if (!Number.isFinite(poc) || !Number.isFinite(spotPrice)) return Infinity;
+    return Math.abs(spotPrice - poc);
+  })();
+  if (pocDist < 10 && volatilityRegime?.state !== 'expansion'
+      && entryType.bestType !== 'MEAN_REVERSION'
+      && entryType.bestType !== 'VWAP_RECLAIM') {
+    noTradeReasons.push(`POC distance ${pocDist.toFixed(1)}pts (<10) with no expansion`);
+  }
+  // (c) Gamma-pin within 8pts of pinning level + no expansion → pure pin zone
+  if (gammaRegime?.regime === 'positive'
+      && Math.abs(gammaRegime.spotVsPin || 999) < 8
+      && volatilityRegime?.state !== 'expansion'
+      && (entryType.bestType === 'MOMENTUM_CONTINUATION'
+        || entryType.bestType === 'BREAKOUT_EXPANSION'
+        || entryType.bestType === 'PULLBACK')) {
+    noTradeReasons.push(`positive gamma pin within 8pts (${gammaRegime.spotVsPin}pts) — dealer suppression`);
+  }
+  // (d) OI velocity weak (both CE & PE velocity < 50k abs) + dead vol = no flow
+  const ceVel = Math.abs(oiAnalytics0?.diff?.ceVelocity || 0);
+  const peVel = Math.abs(oiAnalytics0?.diff?.peVelocity || 0);
+  if (ceVel < 50_000 && peVel < 50_000 && volatilityRegime?.state === 'dead'
+      && entryType.bestType !== 'MEAN_REVERSION') {
+    noTradeReasons.push(`OI velocity weak (ce ${ceVel.toFixed(0)} pe ${peVel.toFixed(0)}) + dead vol`);
+  }
+  // (e) Dead volatility + gamma_pin = pure dealer chop. 47% WR in backtest.
+  //     Only allow REVERSAL or VWAP_RECLAIM (which catch the rare break of pin).
+  if (volatilityRegime?.state === 'dead' && metaRegime?.state === 'gamma_pin'
+      && entryType.bestType !== 'REVERSAL' && entryType.bestType !== 'VWAP_RECLAIM') {
+    noTradeReasons.push(`dead vol + gamma_pin: only reversal/vwap_reclaim (got ${entryType.bestType})`);
+  }
+  // (f) Dealer-hedging (negative gamma) but ATR percentile < 30 = stall zone
+  //     before the next big move. Skip until volatility expands.
+  if (metaRegime?.state === 'dealer_hedging'
+      && Number.isFinite(volatilityRegime?.atrPercentile)
+      && volatilityRegime.atrPercentile < 30
+      && entryType.bestType !== 'MEAN_REVERSION'
+      && entryType.bestType !== 'VWAP_RECLAIM') {
+    noTradeReasons.push(`dealer_hedging + ATR pct ${volatilityRegime.atrPercentile} (<30) — stall zone`);
+  }
+  // (g) Momentum/breakout types REQUIRE active volatility. Dead-vol momentum
+  //     was the worst category (47% WR, 32 trades, large SL hits).
+  if ((entryType.bestType === 'MOMENTUM_CONTINUATION'
+        || entryType.bestType === 'BREAKOUT_EXPANSION'
+        || entryType.bestType === 'PULLBACK')
+      && volatilityRegime?.state === 'dead') {
+    noTradeReasons.push(`${entryType.bestType} requires active vol, got dead`);
+  }
+  // (h) MOMENTUM_CONTINUATION with delta against direction: 8 of 14 losses
+  //     in this category had delta neutral or against direction at entry.
+  if (entryType.bestType === 'MOMENTUM_CONTINUATION') {
+    const deltaPct = Number(volumeAnalysis?.delta?.cvdPctLong || 0);
+    if (direction === 'bullish' && deltaPct < 8) {
+      noTradeReasons.push(`momentum bullish but delta only ${deltaPct.toFixed(1)}% (<8)`);
+    }
+    if (direction === 'bearish' && deltaPct > -8) {
+      noTradeReasons.push(`momentum bearish but delta only ${deltaPct.toFixed(1)}% (>-8)`);
+    }
+  }
+  if (noTradeReasons.length) {
+    return _noTrade(`No-trade zone: ${noTradeReasons.join(' | ')}`, {
+      metaRegime, entryType: entryType.bestType, gammaRegime: gammaRegime?.regime, volumeAnalysis: {
+        acceptance: volumeAnalysis?.acceptance, delta: volumeAnalysis?.delta?.bias, zone: volumeAnalysis?.zone?.zone,
+      },
+    });
   }
 
   // ── Pipeline step 9e: Confidence scoring (centralised) ────────────────
@@ -961,6 +1071,16 @@ async function decide({
   if (metaRegime?.sizingFactor && metaRegime.sizingFactor < 1.0) {
     aggressedLots = Math.max(1, Math.round(aggressedLots * metaRegime.sizingFactor));
   }
+  // CALIBRATED 2026-05-18: Premium-aware sizing. High-premium options have
+  // bigger absolute rupee impact on every adverse move. Halve the lots
+  // when entry premium > ₹200 (typical deep ATM of NIFTY/expensive index).
+  // Backtest evidence: largest losses were 5-lot trades at ₹300+ entry premium.
+  const _entryPrem = Number(strikeRes.ltp) || 0;
+  if (_entryPrem >= 250) {
+    aggressedLots = Math.max(1, Math.round(aggressedLots * 0.5));
+  } else if (_entryPrem >= 150) {
+    aggressedLots = Math.max(1, Math.round(aggressedLots * 0.7));
+  }
   sizing.lots = Math.min(Number(settings?.maxLots) || 3, aggressedLots);
   hybridLogger.info({
     sessionId, event: 'sizing',
@@ -1026,11 +1146,42 @@ async function decide({
   const maxLots = Number(settings?.maxLots) || 3;
   lots = Math.max(1, Math.min(maxLots, lots));
 
-  // ── Build the decision ───────────────────────────────────────────────
+  // Build the decision ───────────────────────────────────────────────────
   // Use the structural target/SL when available. Strategy-static numbers are
   // the floor.
-  const slPoints  = structural?.optionSlPts     || strategy.slPoints;
-  const targetOut = structural?.optionTargetPts || strategy.targetPoints;
+  let slPoints  = structural?.optionSlPts     || strategy.slPoints;
+  let targetOut = structural?.optionTargetPts || strategy.targetPoints;
+
+  // CALIBRATED (institutional spec, 2026-05-18): Cap option-premium SL at a
+  // fixed percentage of the entry premium. Backtest evidence:
+  //   6 SL hits = -₹51,499 net, with single -₹15,075 trade on -46pt premium SL.
+  //   The structural engine's `floorSl = max(slPoints, atr*0.5)` allows wide
+  //   stops that don't translate well to option-premium %.
+  //
+  // Cap rules (per-strategy/entry-type, balanced for runners vs losses):
+  //   SCALP / MEAN_REVERSION : SL ≤ 10% of entry premium
+  //   SWING / MOMENTUM       : SL ≤ 14% of entry premium (room to run)
+  //   BREAKOUT_EXPANSION     : SL ≤ 16% of entry premium
+  // Then apply absolute floor of 6pts (don't go absurdly tight on cheap OTMs).
+  const entryPremium = Number(strikeRes.ltp) || 0;
+  if (entryPremium > 0) {
+    let slPct;
+    if (entryType.bestType === 'BREAKOUT_EXPANSION') slPct = 0.16;
+    else if (strategy.tradeType === 'SWING')        slPct = 0.14;
+    else                                             slPct = 0.10;
+    const cappedSl = Math.max(6, Math.round(entryPremium * slPct));
+    if (cappedSl < slPoints) {
+      hybridLogger.info({
+        sessionId, event: 'sl_capped',
+        message: `SL capped: ${slPoints}pts → ${cappedSl}pts (${(slPct*100).toFixed(0)}% of ₹${entryPremium})`,
+        data: { originalSl: slPoints, cappedSl, entryPremium, slPct },
+      });
+      slPoints = cappedSl;
+      // Maintain RR — also cap target proportionally if structural was huge
+      const maxTarget = cappedSl * (strategy.tradeType === 'SWING' ? 4 : 1.6);
+      if (targetOut > maxTarget) targetOut = maxTarget;
+    }
+  }
   const expectedPoints = strategy.tradeType === 'SWING'
     ? Math.max(targetOut, 30)
     : targetOut;

@@ -23,6 +23,42 @@ const multiTimeframe = require('./algorithms/multiTimeframe.service');
 const liquidityAnalysis = require('./algorithms/liquidityAnalysis.service');
 const smartMoneyConcepts = require('./algorithms/smartMoneyConcepts.service');
 const marketInternals = require('./algorithms/marketInternals.service');
+
+// ─── Daily-cap helpers (institutional spec, 2026-05-18) ───────────────────
+// Backtest evidence shows 3-9 trades/day = +60% WR & +₹158k net,
+// while 15+ trades/day = 43% WR & -₹41k net. Cap entries at 8/day and
+// halt after 3 losses today.
+function _istDayBoundsUtc(now = new Date()) {
+  // IST = UTC+5:30. Day starts 00:00 IST = 18:30 UTC previous day.
+  const ist = new Date(now.getTime() + 5.5 * 3600 * 1000);
+  const y = ist.getUTCFullYear(), m = ist.getUTCMonth(), d = ist.getUTCDate();
+  // Convert IST midnight back to UTC for the query
+  const startUtc = new Date(Date.UTC(y, m, d) - 5.5 * 3600 * 1000);
+  const endUtc   = new Date(startUtc.getTime() + 24 * 3600 * 1000);
+  return { startUtc, endUtc };
+}
+async function _countTodayTrades(sessionId) {
+  if (!sessionId) return 0;
+  try {
+    const { startUtc, endUtc } = _istDayBoundsUtc();
+    return await ScalpingTrade.countDocuments({
+      sessionId,
+      createdAt: { $gte: startUtc, $lt: endUtc },
+    });
+  } catch (_) { return 0; }
+}
+async function _countTodayLosses(sessionId) {
+  if (!sessionId) return 0;
+  try {
+    const { startUtc, endUtc } = _istDayBoundsUtc();
+    return await ScalpingTrade.countDocuments({
+      sessionId,
+      status: 'closed',
+      result: 'LOSS',
+      closedAt: { $gte: startUtc, $lt: endUtc },
+    });
+  } catch (_) { return 0; }
+}
 const sectorRotation = require('./algorithms/sectorRotation.service');
 const globalMarkets = require('./algorithms/globalMarkets.service');
 const behavioralAnalysis = require('./algorithms/behavioralAnalysis.service');
@@ -1928,6 +1964,10 @@ async function runPredictionCycle() {
         session: state.session,
         openTradesCount: currentOpenTrades.length,
         futuresData: futuresAIDecision,
+        // Calibrated daily caps — pass today's count + loss streak so the
+        // entry engine can enforce the 8-trade/3-loss daily limits.
+        tradesToday: await _countTodayTrades(state.session?._id),
+        lossesToday: await _countTodayLosses(state.session?._id),
       });
       // Translate new-engine decision to the shape the rest of this function expects
       institutionalEntryDecision = {

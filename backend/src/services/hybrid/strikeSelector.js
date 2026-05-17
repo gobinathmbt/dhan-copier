@@ -102,22 +102,34 @@ function select({
   const windowLow  = anchor - windowHalf * strikeStep;
   const windowHigh = anchor + windowHalf * strikeStep;
 
-  // Delta band — calibrated wider per institutional review:
-  //   SCALP: 0.30 - 0.60 (was 0.40 - 0.60)
-  //   SWING: 0.45 - 0.75 (was 0.55 - 0.75)
-  let targetMin = tradeType === 'SWING' ? 0.45 : 0.30;
-  let targetMax = tradeType === 'SWING' ? 0.75 : 0.60;
+  // CALIBRATED delta band (2026-05-18 institutional review):
+  //   - Old SWING band 0.45-0.75 was picking 0.65+ ITM strikes that took
+  //     huge premium losses on adverse moves (e.g. -₹15k on entry 341.45).
+  //   - New band centres on ATM (0.40-0.55) for both SCALP and SWING.
+  //     Delta 0.40-0.55 = ATM ±1 strike, where premium % moves are smaller
+  //     in absolute rupees per point and theta is manageable.
+  //   - High-IV regime widens band slightly upward (0.45-0.60).
+  let targetMin = tradeType === 'SWING' ? 0.40 : 0.35;
+  let targetMax = tradeType === 'SWING' ? 0.55 : 0.55;
   if (Number.isFinite(ivPercentile)) {
-    if (ivPercentile > 80)      { targetMin = Math.max(targetMin, 0.50); targetMax = Math.max(targetMax, 0.78); }
-    else if (ivPercentile < 30) { targetMin = Math.min(targetMin, 0.25); }
+    if (ivPercentile > 80)      { targetMin = Math.max(targetMin, 0.45); targetMax = Math.max(targetMax, 0.60); }
+    else if (ivPercentile < 30) { targetMin = Math.min(targetMin, 0.30); }
   }
   if (expiryOverrides?.minDelta) targetMin = Math.max(targetMin, expiryOverrides.minDelta);
 
   // Theta penalty — same-day OTM after 14:00 is brutal
   const lateAfternoon = Number.isFinite(hhmm) && hhmm >= 1400;
 
+  // CALIBRATED 2026-05-18: Hard exclude strikes > 150pts from ATM. Deep ITM
+  // strikes have delta > 0.7 which means a 10pt adverse spot move = 7pt
+  // premium loss in absolute terms. Backtest's largest losses were all on
+  // deep ITM (entry premiums > ₹250, losing 8-13% per SL hit).
+  const MAX_DIST_FROM_ATM = 150;
+
   const candidates = primaryStrikes
-    .filter(s => s && Number.isFinite(s.strike) && s.strike >= windowLow && s.strike <= windowHigh)
+    .filter(s => s && Number.isFinite(s.strike)
+              && s.strike >= windowLow && s.strike <= windowHigh
+              && Math.abs(s.strike - atmStrike) <= MAX_DIST_FROM_ATM)
     .map(s => {
       const ltp = _ltp(s, direction);
       const oi  = _oi(s, direction);
@@ -138,16 +150,14 @@ function select({
         reasons.push(`delta ${dlt.toFixed(2)} out of band`);
       }
 
-      // Distance to ATM (closer is better for scalp)
+      // Distance to ATM — calibrated: prefer ATM for both scalp and swing.
+      // Deep ITM = high premium = larger absolute loss on SL hits.
       const distFromAtm = Math.abs(s.strike - atmStrike);
-      if (tradeType === 'SCALP') {
-        if (distFromAtm <= 50) score += 15;
-        else if (distFromAtm <= 100) score += 5;
-        else score -= 5;
-      } else {
-        if (moneyness === 'ITM' && distFromAtm <= 100) score += 15;
-        else if (moneyness === 'ATM') score += 5;
-      }
+      if (distFromAtm === 0) score += 15;
+      else if (distFromAtm <= 50) score += 12;
+      else if (distFromAtm <= 100) score += 5;
+      else if (distFromAtm <= 150) score -= 5;
+      else score -= 12;
 
       // Distance from opening strike (anchor)
       const distFromAnchor = Math.abs(s.strike - anchor);

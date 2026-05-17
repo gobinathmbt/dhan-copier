@@ -372,6 +372,10 @@ function _openingTrapReversal(ctx) {
  * scorecard for diagnostics.
  *
  * @param {Object} ctx - rich context bundle from the entry orchestrator
+ *   ctx.metaRegime - optional, used to pre-filter blocked families before
+ *                    picking the best entry type. This matches the meta-regime
+ *                    family hard-block applied later in the pipeline so the
+ *                    selected entry type is always one we can actually take.
  */
 function evaluate(ctx = {}) {
   const evals = [
@@ -385,9 +389,30 @@ function evaluate(ctx = {}) {
     _openingTrapReversal(ctx),         // calibrated: opening drive fade
   ];
 
-  const valid = evals.filter(e => e.valid);
-  valid.sort((a, b) => b.score - a.score);
-  const best = valid[0] || null;
+  // Map entry type → family (mirrors metaRegimeEngine.familyOf)
+  const TYPE_TO_FAMILY = {
+    MOMENTUM_CONTINUATION:  'momentum_continuation',
+    REVERSAL:               'reversal',
+    MEAN_REVERSION:         'mean_reversion',
+    BREAKOUT_EXPANSION:     'breakout_expansion',
+    PULLBACK:               'pullback',
+    EXHAUSTION_FADE:        'exhaustion_fade',
+    VWAP_RECLAIM:           'vwap_reclaim',
+    OPENING_TRAP_REVERSAL:  'reversal',
+  };
+
+  // Pre-filter: drop any setup whose family is blocked under the current
+  // meta-regime. This keeps us from picking BREAKOUT_EXPANSION while in
+  // gamma_pin and then having the orchestrator bounce the trade.
+  const blocked = new Set(ctx.metaRegime?.blockedFamilies || []);
+  const filtered = evals.filter(e => {
+    if (!e.valid) return false;
+    const fam = TYPE_TO_FAMILY[e.type];
+    return !fam || !blocked.has(fam);
+  });
+
+  filtered.sort((a, b) => b.score - a.score);
+  const best = filtered[0] || null;
 
   return {
     bestType: best ? best.type : null,
@@ -396,6 +421,7 @@ function evaluate(ctx = {}) {
     bestScore: best ? best.score : 0,
     bestReasoning: best ? best.reasoning : 'no valid entry type',
     allEvaluations: evals,
+    blockedFamilies: Array.from(blocked),
   };
 }
 

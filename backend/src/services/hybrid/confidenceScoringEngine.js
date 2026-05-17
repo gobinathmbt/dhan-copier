@@ -31,21 +31,33 @@
  * outputs. That makes it cheap, testable, and side-effect-free.
  */
 
-// Calibrated weights per institutional review:
-//   - UT Bot reduced 5 → 2 (it's a lagging trail signal, not a leading one)
-//   - Orderflow held at 20 (delta is the strongest live signal we have)
-//   - That frees 3 points which we redistribute equally to liquidity & breadth
+// CALIBRATED weights per institutional spec (2026-05-18):
+//   - Orderflow / delta is the strongest live signal — bumped 20 → 30
+//   - OI velocity / quality kept at 30 (already the largest in old weights)
+//   - VWAP held at 15 (institutional anchor)
+//   - Volume profile (FRVP/VSA) bumped 10 → 12 (structural truth)
+//   - UT Bot is a lagging trail — cut 2 → 1, never drives entries
+//   - Liquidity 6 → 6 (already calibrated)
+//   - Structure 10 → 8 (much of it duplicates volume pillar)
+//   - Breadth 5 → 4 (NIFTY-internal correlation only)
+//   - Futures 5 → 4 (subset of OI/derivatives signal)
+//                                           ─────
+//                                        Total: 110 → normalises against itself
+//
+// Institutional rationale:
+//   "The real edge is Price + Delta + OI Velocity + Futures Direction.
+//    UT Bot only confirms — never drives."
 const WEIGHTS = {
-  oi:        25,
-  orderflow: 20,
+  oi:        30,
+  orderflow: 30,
   vwap:      15,
-  structure: 10,
-  volume:    10,
-  liquidity:  6,    // 5 → 6
-  breadth:    5,
-  futures:    5,
-  utBot:      2,    // 5 → 2 (calibration: never required, lagging signal)
-};   // total 98 — close enough, weights normalise to themselves
+  volume:    12,
+  structure:  8,
+  liquidity:  6,
+  breadth:    4,
+  futures:    4,
+  utBot:      1,
+};
 
 function _clamp(s) { return Math.max(0, Math.min(100, Number(s) || 0)); }
 
