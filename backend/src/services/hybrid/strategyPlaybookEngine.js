@@ -1225,6 +1225,15 @@ function _vwapBounceScalp(ctx) {
     required.push('expiry afternoon');
   }
 
+  // CALIBRATED cycle 14: 4 losses, all had OI not aligned with direction.
+  // Require OI to confirm or at least not oppose.
+  const oiR3 = ctx.oiAnalytics?.regime || '';
+  const oiAligned3 = (ctx.direction === 'bullish' && (oiR3 === 'aggressive_long_buildup' || oiR3 === 'violent_short_covering'))
+                 || (ctx.direction === 'bearish' && (oiR3 === 'aggressive_short_buildup' || oiR3 === 'long_unwinding_collapse'));
+  const oiAgainst = (ctx.direction === 'bullish' && (oiR3 === 'aggressive_short_buildup' || oiR3 === 'long_unwinding_collapse'))
+                || (ctx.direction === 'bearish' && (oiR3 === 'aggressive_long_buildup' || oiR3 === 'violent_short_covering'));
+  if (oiAgainst) required.push(`OI ${oiR3} against direction`);
+
   const valid = required.length === 0;
   if (!valid) {
     return { name: 'VWAP_BOUNCE_SCALP', family: 'vwap_reclaim',
@@ -1234,11 +1243,9 @@ function _vwapBounceScalp(ctx) {
   score += 30; reasons.push('VWAP bounce + delta');
 
   // Confirmations
-  // OI in direction
-  const oiR = ctx.oiAnalytics?.regime || '';
-  if ((ctx.direction === 'bullish' && (oiR === 'aggressive_long_buildup' || oiR === 'violent_short_covering'))
-   || (ctx.direction === 'bearish' && (oiR === 'aggressive_short_buildup' || oiR === 'long_unwinding_collapse'))) {
-    score += 12; confirmations.push(`OI ${oiR}`);
+  // OI in direction (now also a confirmation)
+  if (oiAligned3) {
+    score += 12; confirmations.push(`OI ${oiR3}`);
   }
 
   // VSA helps
@@ -1328,6 +1335,19 @@ function _trendVwapFollow(ctx) {
   if (ctx.volatilityRegime?.state === 'dead') {
     required.push('dead volatility');
   }
+
+  // CALIBRATED 2026-05-18 cycle 14: 4 TIMEOUT losses on TREND_VWAP_FOLLOW.
+  // All had delta ≤ 8%. Require delta > 8% AND OI alignment to avoid
+  // stalled trend-follow entries.
+  const deltaPctReq = _safe(ctx.volumeAnalysis?.delta?.cvdPctLong);
+  const deltaStrong = (ctx.direction === 'bullish' && deltaPctReq > 8)
+                  || (ctx.direction === 'bearish' && deltaPctReq < -8);
+  if (!deltaStrong) required.push(`delta too weak for trend-follow (${deltaPctReq}%)`);
+
+  const oiR2 = ctx.oiAnalytics?.regime || '';
+  const oiAligned = (ctx.direction === 'bullish' && (oiR2 === 'aggressive_long_buildup' || oiR2 === 'violent_short_covering'))
+                || (ctx.direction === 'bearish' && (oiR2 === 'aggressive_short_buildup' || oiR2 === 'long_unwinding_collapse'));
+  if (!oiAligned) required.push(`OI ${oiR2} not aligned`);
 
   const valid = required.length === 0;
   if (!valid) {

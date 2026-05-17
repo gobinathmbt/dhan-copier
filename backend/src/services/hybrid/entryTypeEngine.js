@@ -156,6 +156,17 @@ function _meanReversion(ctx) {
   } else if (spotVsPin > 0 && spotVsPin <= 15) {
     score += 8; reasons.push(`tight pin ${spotVsPin}pts`);
   }
+  // CALIBRATED cycle 14: 3 losses in `choppy` regime + gamma_pin. Fade
+  // setups in choppy regime are particularly fragile because there's no
+  // anchor. Require expansion volatility OR clear absorption to enter.
+  if (ctx.marketRegime?.regime === 'choppy') {
+    const hasAbsorption = ctx.volumeAnalysis?.vsa?.pattern === 'absorption'
+                        && ctx.volumeAnalysis.vsa.bias === ctx.direction;
+    const isExpansion = ctx.volatilityRegime?.state === 'expansion';
+    if (!hasAbsorption && !isExpansion) {
+      valid = false; reasons.push('choppy regime needs absorption or expansion');
+    }
+  }
   // Block on Friday afternoons (theta + position-square risk)
   if (ctx.sessionPhase?.weekday === 'Fri' && ctx.sessionPhase?.hhmm >= 1300) {
     valid = false; reasons.push('Fri afternoon — position square risk');
