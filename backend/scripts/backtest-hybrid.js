@@ -799,6 +799,9 @@ async function backtestDay(dayLabel) {
     avgHoldSec: Number(avgHold.toFixed(0)),
   });
   _logStream.end();
+  // Ensure the node process exits cleanly so the calibration loop knows
+  // when the run is finished.
+  setImmediate(() => process.exit(0));
 })().catch(e => {
   console.error('BACKTEST ERROR:', e.stack);
   process.exit(1);
