@@ -43,23 +43,44 @@ function _safe(n) { const x = Number(n); return Number.isFinite(x) ? x : 0; }
 function _momentumContinuation(ctx) {
   const reasons = [];
   let score = 0, valid = true;
-  // Trend alignment
+  // Trend alignment — full MTF required
   if (ctx.mtfStructure?.alignment !== 'full') { valid = false; reasons.push('not full MTF alignment'); }
   else { score += 20; reasons.push('full MTF alignment'); }
-  // Negative gamma helps (but not required)
-  if (ctx.gammaRegime?.regime === 'negative') { score += 15; reasons.push('negative gamma'); }
-  else if (ctx.gammaRegime?.regime === 'positive') { score -= 10; reasons.push('positive gamma against'); }
-  // Delta expanding in direction
+  // CALIBRATED 2026-05-18 cycle 1: momentum was the biggest loss bucket
+  // (-₹49,258 across 9 losses). Add stricter preconditions:
+  //   - Volatility must be expansion or normal (not dead)
+  //   - Gamma must be negative OR explicit short_covering / long_liquidation
+  //     OI regime (institutions actually pushing the move)
+  //   - Delta must be rising/falling in direction (not just absolute)
+  if (ctx.volatilityRegime?.state === 'dead') {
+    valid = false; reasons.push('dead volatility');
+  }
+  const gammaOK = ctx.gammaRegime?.regime === 'negative';
+  const oiPush = (ctx.direction === 'bullish' && ctx.oiAnalytics?.regime === 'violent_short_covering')
+              || (ctx.direction === 'bearish' && ctx.oiAnalytics?.regime === 'long_unwinding_collapse');
+  if (!gammaOK && !oiPush) {
+    valid = false; reasons.push('need negative gamma OR positioning push');
+  } else if (gammaOK) {
+    score += 18; reasons.push('negative gamma');
+  } else {
+    score += 18; reasons.push(`OI ${ctx.oiAnalytics.regime}`);
+  }
+  // Delta expanding in direction (must be RISING/FALLING, not just absolute)
   const deltaPct = _safe(ctx.volumeAnalysis?.delta?.cvdPctLong);
-  if (ctx.direction === 'bullish' && deltaPct >= 15) { score += 15; reasons.push(`delta +${deltaPct}%`); }
-  else if (ctx.direction === 'bearish' && deltaPct <= -15) { score += 15; reasons.push(`delta ${deltaPct}%`); }
-  else { valid = false; reasons.push(`delta weak (${deltaPct}%)`); }
+  const deltaTrend = ctx.volumeAnalysis?.delta?.trend;
+  if (ctx.direction === 'bullish' && deltaPct >= 15 && deltaTrend === 'rising') {
+    score += 18; reasons.push(`delta rising +${deltaPct}%`);
+  } else if (ctx.direction === 'bearish' && deltaPct <= -15 && deltaTrend === 'falling') {
+    score += 18; reasons.push(`delta falling ${deltaPct}%`);
+  } else {
+    valid = false; reasons.push(`delta weak/flat (${deltaPct}%, trend ${deltaTrend})`);
+  }
   // Price outside value
   const acc = ctx.volumeAnalysis?.acceptance;
   if ((ctx.direction === 'bullish' && acc === 'above_va') ||
-      (ctx.direction === 'bearish' && acc === 'below_va')) { score += 15; reasons.push(`price ${acc}`); }
-  // OI building
-  if (ctx.oiAnalytics?.regime?.startsWith('aggressive_')) { score += 15; reasons.push(ctx.oiAnalytics.regime); }
+      (ctx.direction === 'bearish' && acc === 'below_va')) { score += 12; reasons.push(`price ${acc}`); }
+  // OI building (additional confirm beyond gamma/positioning gate)
+  if (ctx.oiAnalytics?.regime?.startsWith('aggressive_')) { score += 10; reasons.push(ctx.oiAnalytics.regime); }
   // Auction state
   if (ctx.auctionState?.tradingImplication === 'momentum_continuation') { score += 10; reasons.push('auction momentum'); }
 
@@ -415,6 +436,7 @@ function evaluate(ctx = {}) {
     COMPOSITE_PROFILE_EDGE_REJECTION: 'mean_reversion',
     VOLATILITY_COMPRESSION_SQUEEZE: 'breakout_expansion',
     IV_CRUSH_FADE:                 'mean_reversion',
+    VWAP_BOUNCE_SCALP:             'vwap_reclaim',
   };
 
   // Pre-filter: drop any setup whose family is blocked under the current

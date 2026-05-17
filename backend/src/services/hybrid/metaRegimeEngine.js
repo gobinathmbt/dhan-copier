@@ -189,6 +189,7 @@ function familyOf(entryType) {
   if (entryType === 'COMPOSITE_PROFILE_EDGE_REJECTION') return 'mean_reversion';
   if (entryType === 'VOLATILITY_COMPRESSION_SQUEEZE') return 'breakout_expansion';
   if (entryType === 'IV_CRUSH_FADE')                  return 'mean_reversion';
+  if (entryType === 'VWAP_BOUNCE_SCALP')              return 'vwap_reclaim';
   return null;
 }
 
