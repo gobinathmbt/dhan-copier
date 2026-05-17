@@ -35,13 +35,13 @@ const STRATEGIES = {
   SCALPING: {
     name: 'SCALPING',
     tradeType: 'SCALP',
-    targetPointsRatio: 1.0,    // multiplier on settings.targetPoints
+    targetPointsRatio: 1.0,
     slPointsRatio:     1.0,
     rrTarget: { min: 1.0, max: 1.5 },
     maxHoldSec: 180,
-    minScore: 60,              // <60 reject
-    utBotRequired: true,
-    allowedRegimes: ['trending_bullish','trending_bearish','ranging'],
+    minScore: 55,                    // calibrated down from 60
+    utBotRequired: false,            // never required (calibration spec)
+    allowedRegimes: ['trending_bullish','trending_bearish','ranging','reversal_risk'],
   },
   INTRADAY_MOMENTUM: {
     name: 'INTRADAY_MOMENTUM',
@@ -50,8 +50,8 @@ const STRATEGIES = {
     slPointsRatio:     1.5,
     rrTarget: { min: 2.0, max: 4.0 },
     maxHoldSec: 15 * 60,
-    minScore: 75,              // higher bar — wide stops need conviction
-    utBotRequired: true,
+    minScore: 65,                    // calibrated down from 75
+    utBotRequired: true,             // momentum swings — UT Bot helps
     allowedRegimes: ['trending_bullish','trending_bearish'],
   },
   MEAN_REVERSION: {
@@ -61,9 +61,9 @@ const STRATEGIES = {
     slPointsRatio:     1.0,
     rrTarget: { min: 0.8, max: 1.5 },
     maxHoldSec: 240,
-    minScore: 65,
-    utBotRequired: false,      // mean-reversion fades trend, UT Bot will be against
-    allowedRegimes: ['ranging','reversal_risk'],
+    minScore: 58,                    // calibrated down from 65
+    utBotRequired: false,
+    allowedRegimes: ['ranging','reversal_risk','trending_bullish','trending_bearish'],
   },
 };
 

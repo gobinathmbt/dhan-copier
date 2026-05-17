@@ -29,6 +29,8 @@ const liquidityEngine         = require('./liquidityEngine');
 const volatilityRegimeEngine  = require('./volatilityRegimeEngine');
 const marketRegimeEngine      = require('./marketRegimeEngine');
 const sessionEngine           = require('./sessionEngine');
+const adaptiveExitEngine      = require('./adaptiveExitEngine');
+const expectancyEngine        = require('./expectancyEngine');
 const hybridLogger            = require('./hybridLogger');
 const historicalContext       = require('../historicalContextLoader.service');
 
@@ -352,7 +354,49 @@ async function decide({
     return _hold(`Decay detected but state ${state} disallows EXIT`, 'hybrid:decay_held');
   }
 
-  // ── 6. Trailing SL when in trailing state ────────────────────────────
+  // ── 6. Adaptive exit plan (partial booking, smart trail, delta-failure) ─
+  // Only call after min hold time and once trade is in MANAGING/TRAILING state.
+  const exitStyle = trade.hybridEntrySnapshot?.entryType?.exitStyle
+                 || trade.aiEntryDecision?.hybridSnapshot?.entryType?.exitStyle
+                 || 'trail_atr_wide';
+  if (state === STATES.MANAGING || state === STATES.TRAILING) {
+    const adaptive = adaptiveExitEngine.plan({
+      trade,
+      currentLtp: trade.currentPrice,
+      volumeAnalysis,
+      oiAnalytics: oiAnalyticsCur,
+      vwap: payload?.vwap_analysis,
+      mtfStructure: null,
+      atr: volatilityRegime?.atr5m,
+      exitStyle,
+    });
+    if (adaptive.action === 'EXIT' && allowedActions.includes('EXIT')) {
+      hybridLogger.info({ sessionId, tradeId: trade._id, event: 'monitor_adaptive_exit',
+        message: adaptive.reasoning, data: { exitStyle, adaptive } });
+      return _exit(`Adaptive exit: ${adaptive.reasoning}`, 'hybrid:adaptive_exit');
+    }
+    if (adaptive.action === 'PARTIAL_EXIT') {
+      hybridLogger.info({ sessionId, tradeId: trade._id, event: 'monitor_partial_exit',
+        message: adaptive.reasoning, data: { exitStyle, adaptive } });
+      // We surface PARTIAL_EXIT as TRAIL_SL with the new breakeven SL — the
+      // backtester / live engine doesn't yet handle partial books in the row.
+      // The intent is captured in the reasoning string for analytics.
+      return {
+        action: 'TRAIL_SL', new_sl: adaptive.newSl, add_lots: null,
+        confidence: 9, reasoning: `Partial exit (40%) + breakeven: ${adaptive.reasoning}`,
+        exit_urgency: 'soft', source: 'hybrid:adaptive_partial',
+        partialExitPct: adaptive.partialPct,
+      };
+    }
+    if (adaptive.action === 'TRAIL_SL' && allowedActions.includes('TRAIL_SL')
+        && Number.isFinite(adaptive.newSl) && adaptive.newSl > (trade.sl || 0)) {
+      hybridLogger.info({ sessionId, tradeId: trade._id, event: 'monitor_adaptive_trail',
+        message: adaptive.reasoning, data: { exitStyle, adaptive } });
+      return _trail(adaptive.newSl, `Adaptive trail (${exitStyle}): ${adaptive.reasoning}`, 'hybrid:adaptive_trail');
+    }
+  }
+
+  // ── 7. Trailing SL when in trailing state (fallback to phased trail) ─
   const pnlPts = _pnlPts(trade);
   if (state === STATES.TRAILING && allowedActions.includes('TRAIL_SL')) {
     const newSl = _trailingSl(trade, pnlPts, settings);

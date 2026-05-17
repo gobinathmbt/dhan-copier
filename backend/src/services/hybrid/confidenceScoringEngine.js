@@ -31,17 +31,21 @@
  * outputs. That makes it cheap, testable, and side-effect-free.
  */
 
+// Calibrated weights per institutional review:
+//   - UT Bot reduced 5 → 2 (it's a lagging trail signal, not a leading one)
+//   - Orderflow held at 20 (delta is the strongest live signal we have)
+//   - That frees 3 points which we redistribute equally to liquidity & breadth
 const WEIGHTS = {
   oi:        25,
   orderflow: 20,
   vwap:      15,
   structure: 10,
   volume:    10,
-  liquidity:  5,
+  liquidity:  6,    // 5 → 6
   breadth:    5,
   futures:    5,
-  utBot:      5,
-};
+  utBot:      2,    // 5 → 2 (calibration: never required, lagging signal)
+};   // total 98 — close enough, weights normalise to themselves
 
 function _clamp(s) { return Math.max(0, Math.min(100, Number(s) || 0)); }
 

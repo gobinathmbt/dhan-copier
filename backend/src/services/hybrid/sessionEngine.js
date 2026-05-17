@@ -71,9 +71,10 @@ function classifySession(now = new Date()) {
     allowedStrategies.add('scalp');
   } else if (hhmm >= 1130 && hhmm < 1330) {
     phase = 'midday_chop';
-    aggressionFactor = 0.4;
-    allowEntries = true;        // permitted but heavily filtered
+    aggressionFactor = 0.5;
+    allowEntries = true;        // calibrated: was permitted but heavily filtered — same now
     allowedStrategies.add('mean_reversion');
+    allowedStrategies.add('scalp');           // allow scalps with smaller size
   } else if (hhmm >= 1330 && hhmm < 1415) {
     phase = 'afternoon';
     aggressionFactor = 0.8;

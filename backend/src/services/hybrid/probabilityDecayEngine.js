@@ -195,8 +195,14 @@ function evaluate({
 
   decay = Number(Math.max(0, Math.min(1, decay)).toFixed(2));
 
-  // If decay below 0.4 → recommend exit
-  const exit = decay < 0.4;
+  // Calibrated exit gate: only exit on decay if we've held > 90s AND we're
+  // not already in profit. Premature decay exits kill winners.
+  const elapsedMs = Date.now() - new Date(trade.openedAt || trade.createdAt || Date.now()).getTime();
+  const elapsedSec = Math.max(0, Math.floor(elapsedMs / 1000));
+  const pnlPts = (Number(trade.currentPrice) || 0) - (Number(trade.entryPrice) || 0);
+  const targetPts = Number(snapshot?.targetPoints) || 10;
+  const targetPct = (pnlPts / Math.max(1, targetPts)) * 100;
+  const exit = decay < 0.4 && elapsedSec > 90 && targetPct < 30;
 
   return {
     decay,

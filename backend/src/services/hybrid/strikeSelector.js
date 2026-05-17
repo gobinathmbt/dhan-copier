@@ -63,6 +63,9 @@ function _moneynessFromAtm(strikeVal, atmStrike, direction) {
  * @param {number} [opts.maxPain]
  * @param {number} [opts.minPremium=20]
  * @param {number} [opts.windowHalf=6]  - allowed distance (in strikes) from openingStrike
+ * @param {number} [opts.ivPercentile]  - 0..100, rotates ITM vs OTM preference
+ * @param {Object} [opts.expiryOverrides] - { preferITM, minDelta, ... }
+ * @param {number} [opts.hhmm]          - current IST time, used for theta penalty
  *
  * Strategy:
  *   - Anchor on `openingStrike` when provided. Restrict candidates to
@@ -71,6 +74,11 @@ function _moneynessFromAtm(strikeVal, atmStrike, direction) {
  *     keeps execution within the day's institutional range.
  *   - Within the window, score by delta band, distance to ATM, max-pain
  *     proximity, premium, OI.
+ *   - Theta penalty: same-day OTM after 14:00 IST gets a heavy minus.
+ *   - High-IV regime (ivPercentile > 80) prefers ITM; low-IV (< 30) is
+ *     fine with OTM.
+ *   - Expiry overrides can force `preferITM` / `minDelta` (e.g. on Thursday
+ *     after 14:00).
  */
 function select({
   direction,
@@ -81,6 +89,9 @@ function select({
   maxPain = null,
   minPremium = 20,
   windowHalf = 6,
+  ivPercentile = null,
+  expiryOverrides = null,
+  hhmm = null,
 } = {}) {
   if (!primaryStrikes.length || !atmStrike) {
     return { ok: false, reason: 'no chain or atm', strike: null };
@@ -91,10 +102,20 @@ function select({
   const windowLow  = anchor - windowHalf * strikeStep;
   const windowHigh = anchor + windowHalf * strikeStep;
 
-  const targetMin = tradeType === 'SWING' ? 0.55 : 0.40;
-  const targetMax = tradeType === 'SWING' ? 0.75 : 0.60;
+  // Delta band — calibrated wider per institutional review:
+  //   SCALP: 0.30 - 0.60 (was 0.40 - 0.60)
+  //   SWING: 0.45 - 0.75 (was 0.55 - 0.75)
+  let targetMin = tradeType === 'SWING' ? 0.45 : 0.30;
+  let targetMax = tradeType === 'SWING' ? 0.75 : 0.60;
+  if (Number.isFinite(ivPercentile)) {
+    if (ivPercentile > 80)      { targetMin = Math.max(targetMin, 0.50); targetMax = Math.max(targetMax, 0.78); }
+    else if (ivPercentile < 30) { targetMin = Math.min(targetMin, 0.25); }
+  }
+  if (expiryOverrides?.minDelta) targetMin = Math.max(targetMin, expiryOverrides.minDelta);
 
-  // Score every candidate within the day's institutional window.
+  // Theta penalty — same-day OTM after 14:00 is brutal
+  const lateAfternoon = Number.isFinite(hhmm) && hhmm >= 1400;
+
   const candidates = primaryStrikes
     .filter(s => s && Number.isFinite(s.strike) && s.strike >= windowLow && s.strike <= windowHigh)
     .map(s => {
@@ -111,7 +132,7 @@ function select({
       // Delta band
       if (dlt >= targetMin && dlt <= targetMax) {
         score += 25;
-        reasons.push(`delta ${dlt.toFixed(2)} in band ${targetMin}-${targetMax}`);
+        reasons.push(`delta ${dlt.toFixed(2)} in band ${targetMin.toFixed(2)}-${targetMax.toFixed(2)}`);
       } else if (dlt > 0) {
         score -= 10;
         reasons.push(`delta ${dlt.toFixed(2)} out of band`);
@@ -140,6 +161,20 @@ function select({
         reasons.push(`within 25 of max-pain ${maxPain}`);
       }
 
+      // Theta / IV / expiry preferences
+      if (lateAfternoon && moneyness === 'OTM') {
+        score -= 20;
+        reasons.push('late-day OTM theta penalty');
+      }
+      if (ivPercentile != null && ivPercentile > 80 && moneyness === 'OTM') {
+        score -= 15;
+        reasons.push(`high-IV (${ivPercentile}%) — OTM penalised`);
+      }
+      if (expiryOverrides?.preferITM && moneyness !== 'ITM' && moneyness !== 'ATM') {
+        score -= 25;
+        reasons.push('expiry override prefers ITM');
+      }
+
       return {
         strike: s.strike, ltp, oi, delta: dlt, moneyness, score,
         distFromAtm, distFromAnchor, reasons,
@@ -165,6 +200,8 @@ function select({
     distFromAnchor: best.distFromAnchor,
     distFromAtm: best.distFromAtm,
     window: { low: windowLow, high: windowHigh, anchor },
+    deltaBand: { min: targetMin, max: targetMax },
+    ivPercentile,
     reasoning: best.reasons.join(' | '),
     candidates: candidates.slice(0, 5),
   };

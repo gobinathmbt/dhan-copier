@@ -44,6 +44,20 @@ const tradeQualityClassifier   = require('./tradeQualityClassifier');
 const strikeSelector           = require('./strikeSelector');
 const aiAdvisory               = require('./aiAdvisoryLayer');
 const hybridLogger             = require('./hybridLogger');
+// Phase 1 institutional upgrades
+const multiDayContextEngine    = require('./multiDayContextEngine');
+const structuralTargetEngine   = require('./structuralTargetEngine');
+const trapDetectionEngine      = require('./trapDetectionEngine');
+// Phase 2-5 institutional upgrades
+const marketAuctionEngine      = require('./marketAuctionEngine');
+const gammaRegimeEngine        = require('./gammaRegimeEngine');
+const mtfStructureEngine       = require('./mtfStructureEngine');
+const orderflowStateEngine     = require('./orderflowStateEngine');
+const trendPhaseEngine         = require('./trendPhaseEngine');
+const entryTypeEngine          = require('./entryTypeEngine');
+const expiryBehaviorEngine     = require('./expiryBehaviorEngine');
+const aggressionModeEngine     = require('./aggressionModeEngine');
+const expectancyEngine         = require('./expectancyEngine');
 
 const atrService               = require('../atr.service');
 const historicalContext        = require('../historicalContextLoader.service');
@@ -216,6 +230,45 @@ async function decide({
 
   const { candles1m, candles5m, candles15m } = _getCandlesFromContext(history);
 
+  // ── Multi-day institutional context ──────────────────────────────────
+  // Reads N prior trading-day folders directly from `live-feed/` and gives
+  // us PDH/PDL/PVAH/PVAL/POC, weekly H/L, composite HVNs, OI migration,
+  // ATR/IV percentiles, and per-day session memory.
+  // We pass the spot-derived ATR for percentile calculation. IV is best-effort
+  // pulled from option-chain (we'll skip if not available).
+  let multiDayContext = null;
+  try {
+    // Use reference date from settings (backtest) or current IST date (live).
+    const refDate = settings?.referenceDate
+      || new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+    multiDayContext = multiDayContextEngine.buildContext({
+      date: refDate,
+      priorDays: 5,
+      currentAtr: null,        // will be filled after volatilityRegime computes
+      currentIv:  null,
+    });
+  } catch (e) {
+    hybridLogger.warn({ sessionId, event: 'multi_day_context_failed', message: e.message, data: { err: e.message } });
+  }
+  if (multiDayContext) {
+    hybridLogger.info({
+      sessionId, event: 'multi_day_context',
+      message: `priorDay=${multiDayContext.priorDay?.dayType || 'n/a'} ` +
+               `levels=${(multiDayContext.levels || []).length} ` +
+               `oiMig=ce${multiDayContext.oiMigration?.ce}/pe${multiDayContext.oiMigration?.pe}`,
+      data: {
+        priorDay: multiDayContext.priorDay,
+        priorWeek: multiDayContext.priorWeek,
+        compositePoc: multiDayContext.compositeProfile?.poc,
+        oiMigration: multiDayContext.oiMigration,
+        atrPercentile: multiDayContext.atrPercentile,
+        ivPercentile: multiDayContext.ivPercentile,
+        sessionMemory: multiDayContext.sessionMemory,
+        levelCount: (multiDayContext.levels || []).length,
+      },
+    });
+  }
+
   // ── Pipeline step 1: Session ─────────────────────────────────────────
   const sessionPhase = sessionEngine.classifySession();
   hybridLogger.info({
@@ -251,6 +304,27 @@ async function decide({
     message: `regime=${marketRegime.regime} bias=${marketRegime.bias} allow=${marketRegime.allowEntries}`,
     data: marketRegime,
   });
+
+  // ── Pipeline step 3b: Market auction (IB / day type / acceptance) ────
+  const auctionState = marketAuctionEngine.analyze({
+    candles1m, candles5m,
+    priorDay: multiDayContext?.priorDay,
+    currentSpot: spotPrice,
+  });
+  if (auctionState) {
+    hybridLogger.info({
+      sessionId, event: 'market_auction',
+      message: `${auctionState.dayType} | ${auctionState.openType} | acceptance=${auctionState.acceptance} → ${auctionState.tradingImplication}`,
+      data: auctionState,
+    });
+  }
+
+  // ── Pipeline step 3c: Multi-timeframe structure hierarchy ────────────
+  // We'll re-evaluate this with `direction` inside the scoring block.
+  const mtfStructureBoth = {
+    bullish: mtfStructureEngine.evaluate({ candles1m, candles5m, candles15m, direction: 'bullish', auctionState }),
+    bearish: mtfStructureEngine.evaluate({ candles1m, candles5m, candles15m, direction: 'bearish', auctionState }),
+  };
 
   // ── Pipeline step 4: Liquidity ───────────────────────────────────────
   const liquidity = liquidityEngine.evaluate(algorithmOutputs?.liquidityAnalysis);
@@ -300,6 +374,18 @@ async function decide({
     sessionId, event: 'derivatives',
     message: `bias=${derivatives.overallBias} score=${derivatives.directionScore}`,
     data: derivatives,
+  });
+
+  // ── Pipeline step 7a: Gamma regime ────────────────────────────────────
+  // Estimates dealer GEX from the chain. Negative gamma = momentum, positive
+  // gamma = mean reversion. Used by entry-type evaluator + monitor.
+  const gammaRegime = gammaRegimeEngine.analyze({
+    strikes: primaryStrikes, spotPrice, atmStrike,
+  });
+  hybridLogger.info({
+    sessionId, event: 'gamma_regime',
+    message: `${gammaRegime.regime} netGEX=${gammaRegime.netGex} pin=${gammaRegime.pinningLevel} flip=${gammaRegime.gammaFlip}`,
+    data: gammaRegime,
   });
 
   // ── Pipeline step 7b: Volume analysis (FRVP + VSA + time-volume) ─────
@@ -386,12 +472,20 @@ async function decide({
 
   // ── Pipeline step 8: Decide direction ────────────────────────────────
   // Prefer derivatives bias if strong; fall back to market regime bias.
+  // If both neutral, use 5m + VWAP fallback so we don't reject every cycle
+  // in the common "balanced derivatives" market state.
   let direction = derivatives.overallBias;
   if (direction === 'neutral' && marketRegime.bias !== 'neutral') {
     direction = marketRegime.bias;
   }
   if (direction === 'neutral') {
-    return _noTrade('No clear directional bias from derivatives or regime', {
+    const tf5 = algorithmOutputs?.multiTimeframe?.timeframes?.['5m']?.trend;
+    const vwapPos = payload?.vwap_analysis?.position || payload?.vwap_analysis?.price_vs_vwap;
+    if (tf5 === 'bullish' && vwapPos === 'above') direction = 'bullish';
+    else if (tf5 === 'bearish' && vwapPos === 'below') direction = 'bearish';
+  }
+  if (direction === 'neutral') {
+    return _noTrade('No clear directional bias from derivatives, regime, or 5m+VWAP', {
       session: sessionPhase, volatilityRegime, marketRegime, liquidity, derivatives, risk,
     });
   }
@@ -404,6 +498,22 @@ async function decide({
   if (htfBias === 'strongly_bearish' && direction === 'bullish') {
     return _noTrade(`HTF strongly_bearish vs direction bullish — block`);
   }
+
+  // ── Pipeline step 8b: Multi-timeframe structure hierarchy ─────────────
+  // Enforces 15m primary trend > 5m execution > 1m trigger. The hard block
+  // only fires when 15m trend is *strongly* against direction AND no
+  // reversal permission. Otherwise we just penalise the score.
+  const mtfStructure = mtfStructureBoth[direction];
+  if (mtfStructure?.blocked && mtfStructure.tf15 && mtfStructure.tf15 !== 'neutral'
+      && mtfStructure.tf15 !== direction) {
+    // Truly opposing 15m trend with no reversal permission — block.
+    return _noTrade(`MTF blocked: ${mtfStructure.reasoning}`, { mtfStructure });
+  }
+  hybridLogger.info({
+    sessionId, event: 'mtf_structure',
+    message: `${mtfStructure?.alignment || 'n/a'} score=${mtfStructure?.score} ${mtfStructure?.reasoning || ''}`,
+    data: mtfStructure,
+  });
 
   // ── Pipeline step 9: Probability scoring ─────────────────────────────
   const ctx = {
@@ -429,7 +539,9 @@ async function decide({
     multiTimeframe: algorithmOutputs?.multiTimeframe,
   };
 
-  const minScore = Number(settings?.hybridMinScore ?? 65);
+  // Calibrated: probability scoring uses 55 floor (was 60), aggression layer
+  // tightens it via strategy.minScore.
+  const minScore = Number(settings?.hybridMinScore ?? 55);
   const scoreResult = probabilityScoringEngine.score(ctx, direction, { minScore });
   hybridLogger.info({
     sessionId, event: 'score',
@@ -459,6 +571,46 @@ async function decide({
     primaryStrikes, atmStrike, spotPrice, sessionId, direction,
   }) || oiAnalytics0;
 
+  // ── Pipeline step 9c-bis: Orderflow state + Trend phase ──────────────
+  // Joint state of price + delta + OI + futures, mapped to one of seven
+  // institutional orderflow states (initiative buying, exhaustion, ...).
+  const priceMove = (() => {
+    const last = candles5m[candles5m.length - 1];
+    const prev = candles5m[candles5m.length - 6];
+    if (!last || !prev) return { ptsChange: 0, direction: 'flat' };
+    const d = last.c - prev.c;
+    return { ptsChange: d, direction: d > 1 ? 'up' : d < -1 ? 'down' : 'flat' };
+  })();
+  const orderflowState = orderflowStateEngine.classify({
+    volumeAnalysis, oiAnalytics, futuresData, priceMove,
+  });
+  hybridLogger.info({
+    sessionId, event: 'orderflow_state',
+    message: `${orderflowState.state} (${orderflowState.bias}, str=${orderflowState.strength}) ${orderflowState.reasoning}`,
+    data: orderflowState,
+  });
+
+  const trendPhase = trendPhaseEngine.classify({
+    candles5m, candles15m, currentPrice: spotPrice,
+    volumeAnalysis, oiAnalytics, multiDayContext,
+  });
+  hybridLogger.info({
+    sessionId, event: 'trend_phase',
+    message: `${trendPhase.phase} bias=${trendPhase.bias} ${trendPhase.reasoning}`,
+    data: trendPhase,
+  });
+  if (!trendPhaseEngine.permits(trendPhase, direction)) {
+    // Soft penalty rather than hard block — phase mismatch is information,
+    // but not a hard veto (the confidence engine will downgrade us anyway).
+    hybridLogger.info({
+      sessionId, event: 'trend_phase_soft_block',
+      message: `phase ${trendPhase.phase} disfavours ${direction} — applying penalty`,
+      data: { trendPhase: trendPhase.phase },
+    });
+    // Apply the penalty by raising minScore needed
+    if (trendPhase) trendPhase.softBlock = true;
+  }
+
   // ── Pipeline step 9d: Strategy selection ─────────────────────────────
   // Picks SCALPING / INTRADAY_MOMENTUM / MEAN_REVERSION based on regime,
   // volatility and session phase. Returns target / SL / max-hold / minScore.
@@ -471,6 +623,40 @@ async function decide({
     data: strategy,
   });
 
+  // ── Pipeline step 9d-bis: Aggression mode ────────────────────────────
+  const aggression = aggressionModeEngine.evaluate({
+    requestedMode: settings?.aggressionMode || 'institutional',
+    marketRegime, volatilityRegime, risk,
+    sessionPhase,
+  });
+  hybridLogger.info({
+    sessionId, event: 'aggression',
+    message: `mode=${aggression.mode} minScore=${aggression.minScore} sizingF=${aggression.sizingFactor}`,
+    data: aggression,
+  });
+  // Apply aggression overrides on top of strategy minScore (max of the two)
+  strategy.minScore = Math.max(strategy.minScore, aggression.minScore);
+  // Apply trend-phase soft-block penalty
+  if (trendPhase?.softBlock) strategy.minScore = Math.min(95, strategy.minScore + 8);
+
+  // ── Pipeline step 9d-ter: Expiry behavior overrides ──────────────────
+  const expiry = expiryBehaviorEngine.evaluate({
+    sessionPhase, spotPrice, atmStrike, gammaRegime, oiAnalytics, volatilityRegime,
+  });
+  if (expiry.active) {
+    hybridLogger.info({
+      sessionId, event: 'expiry_behavior',
+      message: `${expiry.behavior} | ${expiry.reasoning}`,
+      data: expiry,
+    });
+    if (expiry.overrides?.allowEntries === false) {
+      return _noTrade(`Expiry cutoff: ${expiry.reasoning}`, { expiry });
+    }
+    if (Number.isFinite(expiry.overrides?.maxHoldSec)) {
+      strategy.maxHoldSec = Math.min(strategy.maxHoldSec, expiry.overrides.maxHoldSec);
+    }
+  }
+
   // Strategy may force-block if regime isn't compatible. But we already let
   // marketRegime gate earlier; this is the secondary check.
   if (Array.isArray(strategy.allowedRegimes) && marketRegime?.regime
@@ -481,6 +667,100 @@ async function decide({
   // UT Bot requirement — strategies can demand it.
   if (strategy.utBotRequired && !utBot.aligned) {
     return _noTrade(`Strategy ${strategy.strategy} needs UT Bot alignment but 5m/15m disagree (utScore ${utBot.score})`);
+  }
+
+  // ── Pipeline step 9d-bis: Trap detection ─────────────────────────────
+  // Catches the institutional setups where retail tends to get trapped.
+  // Composite score ≥ blockThreshold blocks the trade outright; score in
+  // the mid-range downgrades confidence by a fixed amount.
+  const trap = trapDetectionEngine.evaluate({
+    spotPrice,
+    direction,
+    volumeAnalysis,
+    multiDayContext,
+    multiTimeframe: algorithmOutputs?.multiTimeframe,
+    vwap: payload?.vwap_analysis,
+    todayStats: {
+      dayHigh: history?.today?.sessionStats?.high,
+      dayLow:  history?.today?.sessionStats?.low,
+      ibHigh:  multiDayContext?.priorDay?.ibHigh,   // reusing the helper; we'll add live IB later
+      ibLow:   multiDayContext?.priorDay?.ibLow,
+    },
+    sessionMemory: multiDayContext?.sessionMemory,
+    oiAnalytics,
+  }, { blockThreshold: Number(settings?.trapBlockThreshold ?? 90) });   // calibrated 70→90
+  hybridLogger.info({
+    sessionId, event: 'trap_detection',
+    message: `trapScore=${trap.trapScore} ${trap.blocked ? '(BLOCKED)' : ''} ${trap.reasoning}`,
+    data: { trapScore: trap.trapScore, blocked: trap.blocked, breakdown: trap.breakdown },
+  });
+  if (trap.blocked) {
+    return _noTrade(`Trap detection blocked: ${trap.reasoning}`, { trap, strategy });
+  }
+
+  // ── Pipeline step 9d-quad: Entry type evaluation ─────────────────────
+  // Run all six institutional setup evaluators (Momentum / Reversal / Mean
+  // Reversion / Breakout Expansion / Pullback / Exhaustion Fade) and pick
+  // the highest-scoring valid one. Its hold profile overrides strategy.
+  const entryType = entryTypeEngine.evaluate({
+    direction,
+    spotPrice,
+    mtfStructure,
+    gammaRegime,
+    volumeAnalysis,
+    oiAnalytics,
+    auctionState,
+    orderflowState,
+    trendPhase,
+    vwap: payload?.vwap_analysis,
+    sessionMemory: multiDayContext?.sessionMemory,
+    sessionPhase,
+    multiDayContext,
+    volatilityRegime,
+    futuresData,
+  });
+  hybridLogger.info({
+    sessionId, event: 'entry_type',
+    message: `best=${entryType.bestType || 'none'} score=${entryType.bestScore} ${entryType.bestReasoning}`,
+    data: { bestType: entryType.bestType, bestScore: entryType.bestScore,
+            allEvals: entryType.allEvaluations.map(e => ({ type: e.type, valid: e.valid, score: e.score })) },
+  });
+  if (!entryType.bestType) {
+    // No specific institutional setup matched — fall back to generic scalp
+    // profile. The confidence engine will still gate based on minScore.
+    entryType.bestType = 'GENERIC_SCALP';
+    entryType.bestProfile = { tradeType: 'SCALP', maxHoldSec: 180, rrTarget: 1.0 };
+    entryType.bestExitStyle = 'fixed_target_tight_sl';
+    entryType.bestScore = 0;
+    entryType.bestReasoning = 'no specific entry type — generic scalp fallback';
+    hybridLogger.info({
+      sessionId, event: 'entry_type_fallback',
+      message: 'no specific entry type matched — generic scalp',
+      data: { fallback: true },
+    });
+  }
+  // Apply entry-type's hold profile (overrides strategy's tradeType / maxHold)
+  if (entryType.bestProfile) {
+    strategy.tradeType   = entryType.bestProfile.tradeType   || strategy.tradeType;
+    strategy.maxHoldSec  = Math.min(strategy.maxHoldSec, entryType.bestProfile.maxHoldSec || strategy.maxHoldSec);
+  }
+
+  // ── Pipeline step 9d-quint: Expectancy adjustment ─────────────────────
+  // Adjusts confidence floor based on historical performance of this exact
+  // bucket (entry type × regime × phase × expiry).
+  const expAdj = expectancyEngine.getAdjustment({
+    entryType: entryType.bestType,
+    regime: marketRegime?.regime,
+    phase: sessionPhase?.phase,
+    expiry: !!sessionPhase?.isExpiryDay,
+  });
+  if (expAdj.adjustment !== 0) {
+    strategy.minScore = Math.max(50, Math.min(95, strategy.minScore - expAdj.adjustment));
+    hybridLogger.info({
+      sessionId, event: 'expectancy_adjust',
+      message: `${expAdj.reasoning} → minScore ${strategy.minScore - expAdj.adjustment} → ${strategy.minScore}`,
+      data: expAdj,
+    });
   }
 
   // ── Pipeline step 9e: Confidence scoring (institutional weights) ─────
@@ -498,6 +778,15 @@ async function decide({
     utBot,
     minScore: strategy.minScore,
   });
+  // Layer in gamma + MTF structure as small bumps on the composite
+  if (gammaRegime?.regime === 'negative' && (entryType.bestType === 'MOMENTUM_CONTINUATION' || entryType.bestType === 'BREAKOUT_EXPANSION')) {
+    confidence.score = Math.min(100, confidence.score + 4);
+  } else if (gammaRegime?.regime === 'positive' && entryType.bestType === 'MEAN_REVERSION') {
+    confidence.score = Math.min(100, confidence.score + 4);
+  }
+  if (mtfStructure?.score >= 75) {
+    confidence.score = Math.min(100, confidence.score + 3);
+  }
   hybridLogger.info({
     sessionId, event: 'confidence',
     message: confidence.reasoning,
@@ -510,6 +799,23 @@ async function decide({
   if (!confidence.allowed) {
     return _noTrade(`Confidence ${confidence.score} below ${strategy.strategy} threshold ${strategy.minScore}`, {
       hybridScore: scoreResult, confidence, strategy,
+    });
+  }
+
+  // Apply trap-score penalty (mid-range = downgrade, not block)
+  // Score 30-49 = -3pts, 50-69 = -8pts. ≥70 was already blocked above.
+  if (trap.trapScore >= 30) {
+    const penalty = trap.trapScore >= 50 ? 8 : 3;
+    confidence.score = Math.max(0, confidence.score - penalty);
+    if (confidence.score < strategy.minScore) {
+      return _noTrade(`Confidence ${confidence.score} below threshold after trap penalty (-${penalty}): ${trap.reasoning}`, {
+        hybridScore: scoreResult, confidence, strategy, trap,
+      });
+    }
+    hybridLogger.info({
+      sessionId, event: 'trap_penalty',
+      message: `confidence -${penalty} due to trap score ${trap.trapScore}`,
+      data: { trapScore: trap.trapScore, newConfidence: confidence.score },
     });
   }
 
@@ -545,6 +851,9 @@ async function decide({
     maxPain: payload?.options_chain?.max_pain ?? payload?.options_chain?.max_pain_strike,
     minPremium: Number(settings?.minEntryPremium) || 30,
     windowHalf: 6,
+    ivPercentile: multiDayContext?.ivPercentile,
+    expiryOverrides: expiry?.overrides || null,
+    hhmm: sessionPhase?.hhmm,
   });
   if (!strikeRes.ok) {
     return _noTrade(`Strike selection failed: ${strikeRes.reason}`);
@@ -557,10 +866,38 @@ async function decide({
     data: strikeRes,
   });
 
+  // ── Pipeline step 11b: Structural targeting ──────────────────────────
+  // Replace static target/SL with dynamic structural levels (HVN, IB ext,
+  // PDH/PDL, composite VAH/VAL). Falls back to strategy's static numbers if
+  // no clean structural levels exist.
+  const structural = structuralTargetEngine.resolve({
+    spotPrice,
+    direction,
+    tradeType: strategy.tradeType,
+    volumeAnalysis,
+    multiDayContext,
+    todayStats: {
+      dayHigh: history?.today?.sessionStats?.high,
+      dayLow:  history?.today?.sessionStats?.low,
+      ibHigh:  multiDayContext?.priorDay?.ibHigh,
+      ibLow:   multiDayContext?.priorDay?.ibLow,
+    },
+    atr: volatilityRegime?.atr5m,
+    entryPrice: strikeRes.ltp,
+    optionDelta: strikeRes.delta,
+    settings,
+  });
+  hybridLogger.info({
+    sessionId, event: 'structural_target',
+    message: structural.reasoning,
+    data: structural,
+  });
+
   // ── Pipeline step 12: ATR target sanity ──────────────────────────────
-  // Use the STRATEGY's target — not the global setting — so a momentum trade
-  // doesn't get rejected for a tight scalp ATR window.
-  const targetPoints = strategy.targetPoints;
+  // Use the structural-target's option points if available, otherwise fall
+  // back to the strategy's static target. ATR confirms the target is
+  // physically achievable given current volatility.
+  const targetPoints = structural?.optionTargetPts || strategy.targetPoints;
   const atrAnalysis = atrService.getATRAnalysis(candles1m, candles5m, targetPoints, strikeRes.ltp);
   const atrConfirms = atrService.atrConfirmsEntry(atrAnalysis);
   hybridLogger.info({
@@ -600,10 +937,16 @@ async function decide({
     liquidity,
     risk,
   });
+  // Apply aggression mode sizing factor + trap size-cut on top
+  let aggressedLots = Math.max(1, Math.round(sizing.lots * (aggression.sizingFactor || 1)));
+  if (trap?.sizeReduce && trap.sizeReduce < 1.0) {
+    aggressedLots = Math.max(1, Math.round(aggressedLots * trap.sizeReduce));
+  }
+  sizing.lots = Math.min(Number(settings?.maxLots) || 3, aggressedLots);
   hybridLogger.info({
     sessionId, event: 'sizing',
-    message: `lots=${sizing.lots} factors=${sizing.factors.join('×')} product=${sizing.product}`,
-    data: sizing,
+    message: `lots=${sizing.lots} factors=${sizing.factors.join('×')} aggression=${aggression.mode}(${aggression.sizingFactor}) product=${sizing.product}`,
+    data: { ...sizing, aggressionMode: aggression.mode, aggressionSizing: aggression.sizingFactor },
   });
 
   // ── Pipeline step 15: Trade quality grade ────────────────────────────
@@ -665,10 +1008,10 @@ async function decide({
   lots = Math.max(1, Math.min(maxLots, lots));
 
   // ── Build the decision ───────────────────────────────────────────────
-  // Use the STRATEGY's target / SL / max-hold rather than raw settings —
-  // those apply to scalp-only setups.
-  const slPoints = strategy.slPoints;
-  const targetOut = strategy.targetPoints;
+  // Use the structural target/SL when available. Strategy-static numbers are
+  // the floor.
+  const slPoints  = structural?.optionSlPts     || strategy.slPoints;
+  const targetOut = structural?.optionTargetPts || strategy.targetPoints;
   const expectedPoints = strategy.tradeType === 'SWING'
     ? Math.max(targetOut, 30)
     : targetOut;
@@ -726,19 +1069,55 @@ async function decide({
       utBot15mTrend: utBot.perTimeframe?.['15m']?.trend,
       utBot30mTrend: utBot.perTimeframe?.['30m']?.trend,
     } : null,
+    // Phase 2-5 institutional context
+    auctionState:    auctionState ? {
+      dayType: auctionState.dayType, openType: auctionState.openType,
+      acceptance: auctionState.acceptance, valueMigration: auctionState.valueMigration,
+      tradingImplication: auctionState.tradingImplication,
+    } : null,
+    gammaRegime: gammaRegime ? {
+      regime: gammaRegime.regime, netGex: gammaRegime.netGex,
+      callWall: gammaRegime.callWall, putWall: gammaRegime.putWall,
+      gammaFlip: gammaRegime.gammaFlip, pinningLevel: gammaRegime.pinningLevel,
+    } : null,
+    mtfStructure: mtfStructure ? {
+      tf15: mtfStructure.tf15, tf5: mtfStructure.tf5, tf1: mtfStructure.tf1,
+      alignment: mtfStructure.alignment, score: mtfStructure.score,
+    } : null,
+    orderflowState: orderflowState ? {
+      state: orderflowState.state, bias: orderflowState.bias, holdLonger: orderflowState.holdLonger,
+    } : null,
+    trendPhase: trendPhase ? { phase: trendPhase.phase, bias: trendPhase.bias } : null,
+    entryType: entryType ? {
+      type: entryType.bestType, score: entryType.bestScore,
+      exitStyle: entryType.bestExitStyle, holdProfile: entryType.bestProfile,
+    } : null,
+    aggression: aggression ? { mode: aggression.mode, sizingFactor: aggression.sizingFactor } : null,
+    expiry: expiry?.active ? { behavior: expiry.behavior, overrides: expiry.overrides } : null,
+    structural: structural ? {
+      spotTargetPrice: structural.spotTargetPrice, spotStopPrice: structural.spotStopPrice,
+      targetSource: structural.targetSource, stopSource: structural.stopSource,
+      rrSpot: structural.rrSpot,
+    } : null,
   };
 
   const reasoning = [
-    `[hybrid:${grade.grade}/${strategy.strategy}/${tradeType}]`,
+    `[hybrid:${grade.grade}/${strategy.strategy}/${tradeType}/${entryType.bestType}]`,
     `regime=${marketRegime.regime}`,
     `vol=${volatilityRegime.state}`,
+    `gamma=${gammaRegime?.regime}`,
+    `auction=${auctionState?.dayType}/${auctionState?.tradingImplication}`,
+    `phase=${trendPhase?.phase}`,
+    `flow=${orderflowState?.state}`,
+    `mtf=${mtfStructure?.alignment}(${mtfStructure?.score})`,
     `liq=${liquidity.health}`,
     `der=${derivatives.overallBias}(${derivatives.directionScore})`,
     volumeAnalysis ? `vp=${volumeAnalysis.acceptance}/${volumeAnalysis.vsa?.pattern || 'na'}` : null,
     volumeAnalysis?.delta ? `delta=${volumeAnalysis.delta.bias}(${volumeAnalysis.delta.cvdPctLong}%)` : null,
-    volumeAnalysis?.zone?.zone && volumeAnalysis.zone.zone !== 'neutral' ? `zone=${volumeAnalysis.zone.zone}` : null,
     oiAnalytics ? `oi=${oiAnalytics.regime}/q${oiAnalytics.qualityScore ?? '-'}` : null,
     utBot ? `ut=${utBot.score}` : null,
+    `agg=${aggression.mode}`,
+    expiry?.active ? `expiry=${expiry.behavior}` : null,
     `confidence=${confidence.score}(${confidence.tier})`,
     advisory ? `advisory=${advisory.advise}` : null,
   ].filter(Boolean).join(' | ');
@@ -772,6 +1151,9 @@ async function decide({
       liquidity, derivatives, volumeAnalysis, oiAnalytics, utBot, strategy,
       scoreResult, confidence, risk, sizing, grade, exec, atrAnalysis,
       strike: strikeRes, advisory,
+      multiDayContext, structural, trap,
+      auctionState, gammaRegime, mtfStructure, orderflowState, trendPhase,
+      entryType, aggression, expiry,
     },
   };
 

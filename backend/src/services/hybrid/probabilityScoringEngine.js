@@ -55,6 +55,15 @@ const DEFAULT_LIGHT_WEIGHTS = {
 };
 
 // ── Tier 1: hard gates ──────────────────────────────────────────────────────
+// Calibrated tier-1 gates per institutional review.
+// ONLY 5 things should hard-block a trade:
+//   1. stale_data
+//   2. kill_switch
+//   3. catastrophic liquidity (health = critical)
+//   4. session closing
+//   5. volatility panic
+// Everything else (regime, MTF, trap, weak delta, etc.) is now a probability
+// penalty applied via the weighted score.
 function _checkHardGates({
   session,
   marketRegime,
@@ -70,9 +79,11 @@ function _checkHardGates({
   if (riskBlock) failed.push('risk_engine_blocked');
   if (!dataFresh) failed.push('stale_data');
   if (session && session.allowEntries === false) failed.push(`session:${session.phase}`);
-  if (marketRegime && marketRegime.allowEntries === false) failed.push(`regime:${marketRegime.regime}`);
-  if (volatilityRegime && volatilityRegime.allowEntries === false) failed.push(`volatility:${volatilityRegime.state}`);
-  if (liquidity && liquidity.allowEntries === false) failed.push(`liquidity:${liquidity.health}`);
+  // Volatility: only PANIC blocks. dead/event-driven now downgrade via score.
+  if (volatilityRegime?.state === 'panic')   failed.push(`volatility:panic`);
+  // Liquidity: only CRITICAL blocks.
+  if (liquidity?.allowEntries === false)     failed.push(`liquidity:${liquidity.health}`);
+  // Note: marketRegime no longer hard-blocks. It contributes to score.
 
   return { passed: failed.length === 0, failed };
 }
@@ -300,6 +311,21 @@ function score(ctx, direction, thresholds = {}) {
 
   const finalScore = Number(Math.max(0, Math.min(100, weightedScore + lightBonus)).toFixed(1));
 
+  // Soft penalties for non-blocking warnings (regime/volatility downgrade)
+  let regimePenalty = 0;
+  const regimeReasons = [];
+  if (ctx.marketRegime?.allowEntries === false) {
+    regimePenalty -= 12;
+    regimeReasons.push(`regime ${ctx.marketRegime.regime} normally blocks`);
+  } else if (ctx.marketRegime?.regime === 'choppy' || ctx.marketRegime?.regime === 'reversal_risk') {
+    regimePenalty -= 6;
+    regimeReasons.push(`regime ${ctx.marketRegime.regime} disfavours direction`);
+  }
+  if (ctx.volatilityRegime?.state === 'dead')         { regimePenalty -= 10; regimeReasons.push('volatility dead'); }
+  else if (ctx.volatilityRegime?.state === 'event_driven') { regimePenalty -= 4; regimeReasons.push('event-driven volatility'); }
+
+  const calibratedScore = Number(Math.max(0, Math.min(100, finalScore + regimePenalty)).toFixed(1));
+
   // Build reasoning string from top contributors
   const reasoningTop = Object.entries(tier2Parts)
     .filter(([, v]) => v.reasons?.length)
@@ -309,18 +335,21 @@ function score(ctx, direction, thresholds = {}) {
     .join(' | ');
 
   return {
-    allowed: finalScore >= minScore,
+    allowed: calibratedScore >= minScore,
     direction,
-    score: finalScore,
+    score: calibratedScore,
+    rawScore: finalScore,
     weightedScore,
     lightBonus,
+    regimePenalty,
+    regimeReasons,
     minScore,
     hardGates: { passed: true, failed: [] },
     tier2: tier2Parts,
     tier3: tier3Parts,
     weights,
     lightWeights,
-    reasoning: `score=${finalScore} (need ≥${minScore}) | ${reasoningTop}`,
+    reasoning: `score=${calibratedScore} (raw ${finalScore}, penalty ${regimePenalty}) (need ≥${minScore}) | ${reasoningTop}`,
   };
 }
 

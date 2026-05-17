@@ -150,7 +150,7 @@ function classify({
     trending_bearish:  { allowEntries: true,  bias: 'bearish',  sizingFactor: 1.0 },
     ranging:           { allowEntries: true,  bias: 'neutral',  sizingFactor: 0.6 },
     choppy:            { allowEntries: false, bias: 'neutral',  sizingFactor: 0   },
-    reversal_risk:     { allowEntries: false, bias: 'neutral',  sizingFactor: 0   },
+    reversal_risk:     { allowEntries: true,  bias: 'neutral',  sizingFactor: 0.5 },  // soft (was hard block)
     exhaustion:        { allowEntries: false, bias: 'neutral',  sizingFactor: 0   },
     unknown:           { allowEntries: false, bias: 'neutral',  sizingFactor: 0   },
   }[regime];
