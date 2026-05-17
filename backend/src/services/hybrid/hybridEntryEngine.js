@@ -224,6 +224,11 @@ async function decide({
   if (lossesToday >= maxLossesPerDay) {
     return _noTrade(`Daily loss-streak halt (${lossesToday}/${maxLossesPerDay})`);
   }
+  // CALIBRATED cycle 25: After 1 loss today, raise the bar significantly.
+  // Cycle 22 evidence: 03-18 and 03-19 each had 2 losses in a row from
+  // VWAP_BOUNCE_SCALP. After-loss caution prevents the second loss.
+  const postLossPenalty = Math.max(0, Number(lossesToday) || 0);
+  // (note: applied later via aggression.minScore boost)
 
   // ── Inputs ───────────────────────────────────────────────────────────
   const payload = aggregator?.payload || {};
@@ -804,6 +809,11 @@ async function decide({
   strategy.minScore = Math.max(strategy.minScore, aggression.minScore);
   // Apply trend-phase soft-block penalty
   if (trendPhase?.softBlock) strategy.minScore = Math.min(95, strategy.minScore + 8);
+  // CALIBRATED cycle 25: post-loss caution. After 1 loss today, raise bar
+  // by +5. After 2 losses, halt is already triggered above.
+  if (postLossPenalty >= 1) {
+    strategy.minScore = Math.min(95, strategy.minScore + 5 * postLossPenalty);
+  }
 
   // ── Pipeline step 9d-ter: Expiry behavior overrides ──────────────────
   const expiry = expiryBehaviorEngine.evaluate({
