@@ -809,10 +809,10 @@ async function decide({
   strategy.minScore = Math.max(strategy.minScore, aggression.minScore);
   // Apply trend-phase soft-block penalty
   if (trendPhase?.softBlock) strategy.minScore = Math.min(95, strategy.minScore + 8);
-  // CALIBRATED cycle 25: post-loss caution. After 1 loss today, raise bar
-  // by +5. After 2 losses, halt is already triggered above.
+  // CALIBRATED cycle 25-27: post-loss caution. After 1 loss today, raise bar
+  // by +3. Cycle 26 +5 was too aggressive (cost ₹60k). +3 is the sweet spot.
   if (postLossPenalty >= 1) {
-    strategy.minScore = Math.min(95, strategy.minScore + 5 * postLossPenalty);
+    strategy.minScore = Math.min(95, strategy.minScore + 3 * postLossPenalty);
   }
 
   // ── Pipeline step 9d-ter: Expiry behavior overrides ──────────────────
