@@ -35,7 +35,6 @@ const bollingerBandsIndicator = require('../algorithms/bollingerBands.indicator'
 const volumeProfileIndicator = require('../algorithms/volumeProfile.indicator'); // PHASE 3 - Volume Profile
 const orderBookImbalanceIndicator = require('../algorithms/orderBookImbalance.indicator'); // PHASE 3 - Order Book
 const tickVolumeIndicator = require('../algorithms/tickVolume.indicator'); // PHASE 3 - Tick Volume
-const tradeMonitor = require('./tradeMonitor.service'); // SEPARATE MONITORING SERVICE
 const dhanProd = require('./dhanProd.service'); // PRODUCTION Dhan API (replaces dhanBypass)
 const institutionalAI = require('./institutionalAI.service'); // INSTITUTIONAL AI - ENRICHED PAYLOADS
 const entryEngine = require('./entryEngine.service');         // NEW centralised entry decision
