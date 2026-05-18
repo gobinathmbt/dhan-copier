@@ -57,4 +57,8 @@ module.exports = {
   positionStateMachine:     require('./positionStateMachine'),
   aiAdvisoryLayer:          require('./aiAdvisoryLayer'),
   hybridLogger:             require('./hybridLogger'),
+  // Phase 6 (institutional spec 2026-05-18)
+  microstructureEngine:     require('./microstructureEngine'),
+  futuresLeadershipEngine:  require('./futuresLeadershipEngine'),
+  deltaVelocityEngine:      require('./deltaVelocityEngine'),
 };

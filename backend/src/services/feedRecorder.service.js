@@ -228,6 +228,8 @@ class FeedRecorder {
         vega: s.call?.greeks?.vega || 0,
         bid: s.call?.bid || 0,
         ask: s.call?.ask || 0,
+        bidQty: s.call?.bidQty || 0,
+        askQty: s.call?.askQty || 0,
         buildup: s.call?.builtupName || 'Neutral',
       },
       pe: {
@@ -242,6 +244,8 @@ class FeedRecorder {
         vega: s.put?.greeks?.vega || 0,
         bid: s.put?.bid || 0,
         ask: s.put?.ask || 0,
+        bidQty: s.put?.bidQty || 0,
+        askQty: s.put?.askQty || 0,
         buildup: s.put?.builtupName || 'Neutral',
       },
     }));

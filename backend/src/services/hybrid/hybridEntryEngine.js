@@ -61,6 +61,10 @@ const expectancyEngine         = require('./expectancyEngine');
 const metaRegimeEngine         = require('./metaRegimeEngine');
 const strategyPlaybookEngine   = require('./strategyPlaybookEngine');
 const ivVelocityTracker        = require('./ivVelocityTracker');
+// Phase 6 institutional upgrades (2026-05-18 microstructure / leadership / velocity)
+const microstructureEngine     = require('./microstructureEngine');
+const futuresLeadershipEngine  = require('./futuresLeadershipEngine');
+const deltaVelocityEngine      = require('./deltaVelocityEngine');
 
 const atrService               = require('../atr.service');
 const historicalContext        = require('../historicalContextLoader.service');
@@ -546,6 +550,98 @@ async function decide({
     });
   }
 
+  // ── Pipeline step 7d: Microstructure (bid/ask depth, absorption, iceberg) ──
+  // Reads the live order-book from the futures FULL-mode feed. Falls back
+  // to spot index if futures depth isn't available. The output drives the
+  // execution-quality + new "Microstructure" confidence pillar.
+  let microRead = null;
+  if (settings?.enableMicrostructureEngine !== false) {
+    try {
+      const futSecId = futuresData?.securityId;
+      if (Number.isFinite(futSecId)) {
+        microRead = microstructureEngine.analyze({
+          segment: 'NSE_FNO',
+          securityId: futSecId,
+          windowMs: 60_000,
+        });
+      }
+      // If futures depth unavailable, try spot — most useful when index has
+      // been subscribed in FULL mode.
+      if (!microRead?.available) {
+        microRead = microstructureEngine.analyze({
+          segment: 'IDX_I',
+          securityId: 13,
+          windowMs: 60_000,
+        });
+      }
+    } catch (e) {
+      hybridLogger.warn({ sessionId, event: 'microstructure_failed',
+        message: e.message, data: { err: e.message } });
+    }
+  }
+  if (microRead?.available) {
+    hybridLogger.info({
+      sessionId, event: 'microstructure',
+      message: `${microRead.state} bias=${microRead.bias} imb=${microRead.imbalance} ` +
+               `vel=${microRead.imbalanceVelocity} spread=${microRead.spread.status}`,
+      data: microRead,
+    });
+  } else {
+    hybridLogger.info({
+      sessionId, event: 'microstructure',
+      message: `unavailable (${microRead?.reasoning || 'no engine'})`,
+      data: microRead || {},
+    });
+  }
+
+  // ── Pipeline step 7e: Futures leadership (lead-lag, basis, fut delta) ──
+  let futuresLead = null;
+  if (settings?.enableFuturesLeadershipEngine !== false) {
+    try {
+      futuresLead = futuresLeadershipEngine.analyze({
+        futuresData,
+        futuresCandles1m: futuresData?.candles_1m || [],
+        futuresCandles5m: futuresData?.candles_5m || [],
+        candles1m, candles5m,
+        spotPrice,
+        futuresSecurityId: futuresData?.securityId,
+      });
+      hybridLogger.info({
+        sessionId, event: 'futures_leadership',
+        message: futuresLead.available
+          ? `${futuresLead.futuresDirection} lead=${futuresLead.leadLagScore} ` +
+            `basis=${futuresLead.basis?.basis ?? '-'} (${futuresLead.basis?.trend ?? '-'}) ` +
+            `aggCandle=${futuresLead.aggressiveCandle?.detected}`
+          : `unavailable: ${futuresLead.reasoning}`,
+        data: futuresLead,
+      });
+    } catch (e) {
+      hybridLogger.warn({ sessionId, event: 'futures_leadership_failed',
+        message: e.message, data: { err: e.message } });
+    }
+  }
+
+  // ── Pipeline step 7f: Delta velocity / acceleration ─────────────────
+  let deltaVelocity = null;
+  if (settings?.enableDeltaVelocityEngine !== false) {
+    try {
+      deltaVelocity = deltaVelocityEngine.analyze({
+        candles5m,
+        liveTickDelta,
+      });
+      hybridLogger.info({
+        sessionId, event: 'delta_velocity',
+        message: `${deltaVelocity.velocityState} vel=${deltaVelocity.velocity} ` +
+                 `accel=${deltaVelocity.acceleration} flip=${deltaVelocity.flipDetected || '-'} ` +
+                 `exhaustion=${deltaVelocity.exhaustionDetected}`,
+        data: deltaVelocity,
+      });
+    } catch (e) {
+      hybridLogger.warn({ sessionId, event: 'delta_velocity_failed',
+        message: e.message, data: { err: e.message } });
+    }
+  }
+
   // ── Pipeline step 8: Decide direction ────────────────────────────────
   // Prefer derivatives bias if strong; fall back to market regime bias.
   // If both neutral, use 5m + VWAP fallback so we don't reject every cycle
@@ -605,8 +701,33 @@ async function decide({
       direction = 'bearish'; directionSource = 'mtf_full';
     }
   }
+  // ── New tie-break paths (institutional spec 2026-05-18) ──────────────
+  // (e) Futures leadership — if futures clearly lead (score >65 or <35) we
+  //     follow even when spot signals are mixed.
+  if (direction === 'neutral' && futuresLead?.available) {
+    if (futuresLead.leadLagScore >= 65 && futuresLead.futuresDirection === 'bullish') {
+      direction = 'bullish'; directionSource = 'futures_lead';
+    } else if (futuresLead.leadLagScore <= 35 && futuresLead.futuresDirection === 'bearish') {
+      direction = 'bearish'; directionSource = 'futures_lead';
+    }
+  }
+  // (f) Microstructure absorption / iceberg — institutional positioning
+  if (direction === 'neutral' && microRead?.available) {
+    if (microRead.state === 'absorption_long' || microRead.state === 'iceberg_support'
+        || microRead.state === 'liquidity_pull_up') {
+      direction = 'bullish'; directionSource = `micro_${microRead.state}`;
+    } else if (microRead.state === 'absorption_short' || microRead.state === 'iceberg_resistance'
+            || microRead.state === 'liquidity_pull_down') {
+      direction = 'bearish'; directionSource = `micro_${microRead.state}`;
+    }
+  }
+  // (g) Delta velocity flip — clean scalp trigger
+  if (direction === 'neutral' && deltaVelocity?.available) {
+    if (deltaVelocity.flipDetected === 'up') { direction = 'bullish'; directionSource = 'delta_flip_up'; }
+    else if (deltaVelocity.flipDetected === 'down') { direction = 'bearish'; directionSource = 'delta_flip_down'; }
+  }
   if (direction === 'neutral') {
-    return _noTrade('No clear directional bias from derivatives, regime, 5m+VWAP, OI, futures, delta, or MTF', {
+    return _noTrade('No clear directional bias from derivatives, regime, 5m+VWAP, OI, futures, delta, MTF, microstructure, or velocity', {
       session: sessionPhase, volatilityRegime, marketRegime, liquidity, derivatives, risk,
     });
   }
@@ -950,6 +1071,12 @@ async function decide({
       date: settings?.referenceDate || new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10),
     }),
     ivPercentile: multiDayContext?.ivPercentile,
+    // Phase 6 (institutional spec 2026-05-18): microstructure +
+    // futures leadership + delta velocity for new playbooks.
+    microstructure: microRead,
+    futuresLead,
+    deltaVelocity,
+    liquidity,
   };
   const playbook = strategyPlaybookEngine.evaluate(playbookCtx);
   hybridLogger.info({
@@ -1156,6 +1283,10 @@ async function decide({
     mtfStructure,
     entryType: entryType.bestType,
     expectancyAdj: expAdj,
+    // Phase 6 institutional pillars (2026-05-18)
+    microstructure: microRead,
+    futuresLead,
+    deltaVelocity,
   });
   hybridLogger.info({
     sessionId, event: 'confidence',
@@ -1322,6 +1453,23 @@ async function decide({
   // Playbook sizing factor — institutional risk profile per setup family
   if (entryType.playbook?.risk?.sizingFactor && entryType.playbook.risk.sizingFactor < 1.0) {
     aggressedLots = Math.max(1, Math.round(aggressedLots * entryType.playbook.risk.sizingFactor));
+  }
+  // ── CONFIDENCE-TIER PROBE SIZING (institutional spec 2026-05-18) ──
+  // Three confidence bands let us safely take more entries:
+  //   Elite (aggressive tier, score ≥85)  → full size (1.0×)
+  //   Standard (75-84)                    → 0.6× sizing
+  //   Probe scalps (60-74, scalp_only)    → 0.3× sizing
+  // This 3-tier sizing is the single biggest entry-frequency boost
+  // without damaging quality. Lower tier = smaller size, not no trade.
+  const tierSizingFactor = (() => {
+    if (settings?.enableTierSizing === false) return 1.0;
+    if (confidence.tier === 'aggressive') return 1.0;     // elite
+    if (confidence.tier === 'standard')   return 0.6;
+    if (confidence.tier === 'scalp_only') return 0.35;    // probe
+    return 1.0;
+  })();
+  if (tierSizingFactor < 1.0) {
+    aggressedLots = Math.max(1, Math.round(aggressedLots * tierSizingFactor));
   }
   // CALIBRATED 2026-05-18: Premium-aware sizing. High-premium options have
   // bigger absolute rupee impact on every adverse move. Halve the lots
@@ -1543,6 +1691,33 @@ async function decide({
       targetSource: structural.targetSource, stopSource: structural.stopSource,
       rrSpot: structural.rrSpot,
     } : null,
+    // Phase 6 institutional snapshots (2026-05-18)
+    microstructure: microRead?.available ? {
+      state: microRead.state, bias: microRead.bias,
+      imbalance: microRead.imbalance,
+      imbalanceVelocity: microRead.imbalanceVelocity,
+      imbalanceAccel: microRead.imbalanceAccel,
+      spread: microRead.spread,
+      absorption: microRead.absorption,
+      iceberg: microRead.iceberg,
+      spoofRisk: microRead.spoofRisk,
+    } : null,
+    futuresLead: futuresLead?.available ? {
+      direction: futuresLead.futuresDirection,
+      leadLagScore: futuresLead.leadLagScore,
+      basis: futuresLead.basis,
+      aggressiveCandle: futuresLead.aggressiveCandle?.detected,
+      score: futuresLead.score,
+    } : null,
+    deltaVelocity: deltaVelocity?.available ? {
+      state: deltaVelocity.velocityState,
+      velocity: deltaVelocity.velocity,
+      acceleration: deltaVelocity.acceleration,
+      flipDetected: deltaVelocity.flipDetected,
+      exhaustionDetected: deltaVelocity.exhaustionDetected,
+    } : null,
+    confidenceTier: confidence.tier,
+    tierSizingFactor,
   };
 
   const reasoning = [

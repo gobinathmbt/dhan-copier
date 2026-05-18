@@ -212,6 +212,12 @@ function familyOf(entryType) {
   if (entryType === 'QUIET_RANGE_FADE')                return 'mean_reversion';
   // Phase 4 zero/low-day rescue (2026-05-18 cycle 38)
   if (entryType === 'TREND_RIDE_NO_CONFIRMATION')      return 'momentum_continuation';
+  // Phase 5 institutional spec 2026-05-18
+  if (entryType === 'DELTA_VELOCITY_BREAKOUT')         return 'momentum_continuation';
+  if (entryType === 'PDH_PDL_SWEEP_REVERSAL')          return 'reversal';
+  if (entryType === 'DOUBLE_DISTRIBUTION_TREND')       return 'breakout_expansion';
+  if (entryType === 'ABSORPTION_REVERSAL')             return 'reversal';
+  if (entryType === 'OVERNIGHT_OI_SHIFT_FOLLOW')       return 'momentum_continuation';
   return null;
 }
 

@@ -85,6 +85,16 @@ const ScalpingSessionSchema = new mongoose.Schema(
       // Consecutive-loss kill switch (used by hybrid risk engine)
       consecutiveLossStop: { type: Number, default: 3 },
 
+      // ── PHASE 6 INSTITUTIONAL ENGINES (2026-05-18) ───────────────────────
+      // Microstructure (bid/ask depth + absorption + iceberg + spoof)
+      enableMicrostructureEngine: { type: Boolean, default: true },
+      // Futures leadership (lead-lag + basis + aggressive futures candle)
+      enableFuturesLeadershipEngine: { type: Boolean, default: true },
+      // Delta velocity / acceleration / flip / exhaustion
+      enableDeltaVelocityEngine: { type: Boolean, default: true },
+      // Confidence-tier probe sizing (elite 1.0× / standard 0.6× / probe 0.35×)
+      enableTierSizing: { type: Boolean, default: true },
+
       // ── STRATEGY ─────────────────────────────────────────────────────────
       strategyMode: { type: String, default: 'Institutional Multi-Factor' }, // UPDATED name
       executionMode: { type: String, enum: ['simulation', 'live'], default: 'simulation' },

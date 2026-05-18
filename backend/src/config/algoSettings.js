@@ -156,6 +156,18 @@ const ALGO_SETTINGS = {
   // moneyness bonus: OTM +12, ATM +5, ITM 0.
   preferOTMStrikes: true,
 
+  // ── Phase 6 institutional engines (microstructure / leadership / velocity) ──
+  // Toggles for the three new institutional engines. Default ON. They are
+  // optional reads — the entry engine degrades gracefully when any of these
+  // returns `available: false` (e.g. during pre-open or feed reconnects).
+  enableMicrostructureEngine: true,    // bid/ask imbalance + absorption + iceberg + spoof
+  enableFuturesLeadershipEngine: true, // futures lead-lag + basis + aggressive candle
+  enableDeltaVelocityEngine: true,     // delta acceleration / flip / exhaustion
+  // Confidence-tier probe sizing — institutional 3-band sizing per the
+  // spec (elite 1.0× / standard 0.6× / probe scalp 0.35×). When false the
+  // engine uses a single sizing factor across all tiers (legacy behaviour).
+  enableTierSizing: true,
+
   // ============================================================
   // STRATEGY & EXECUTION MODE
   // ============================================================

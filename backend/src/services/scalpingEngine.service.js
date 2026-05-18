@@ -1516,8 +1516,21 @@ async function runPredictionCycle() {
     if (settings.enableFuturesConfirmation) {
       try {
         const liveFeedProvider = require('./liveFeedDataProvider.service');
-        const futRes = await liveFeedProvider.getFuturesCandles(state.authKey, '5', 60);
-        const futCandles = futRes.ok ? (futRes.data.candles || []) : [];
+        const niftyFuturesProd = require('./niftyFuturesProd.service');
+        const [futRes5, futRes1] = await Promise.all([
+          liveFeedProvider.getFuturesCandles(state.authKey, '5', 120),
+          liveFeedProvider.getFuturesCandles(state.authKey, '1', 30),
+        ]);
+        const futCandles = futRes5.ok ? (futRes5.data.candles || []) : [];
+        const futCandles1m = futRes1.ok ? (futRes1.data.candles || []) : [];
+
+        // Best-effort: get the futures security id (cached) for live tick delta
+        let futSecurityId = null;
+        try { futSecurityId = await niftyFuturesProd.getSecurityId(); } catch (_) {}
+
+        // Live futures price — prefers WebSocket tick, falls back to last
+        // recorded futures-1m close (provider handles freshness logic).
+        const liveFutPrice = liveFeedProvider.getCurrentFuturesPrice();
 
         if (futCandles.length >= 3) {
           // Compute basic futures direction/momentum from local candles
@@ -1530,31 +1543,67 @@ async function runPredictionCycle() {
           const trend = changeWindow > 0.15 ? 'bullish' : changeWindow < -0.15 ? 'bearish' : 'neutral';
           const momentum = Math.abs(change1m) > 0.1 ? (change1m > 0 ? 'bullish' : 'bearish') : 'neutral';
 
+          // Prefer the live tick LTP when available (WebSocket is fresher
+          // than the rolling 1m close).
+          const ltp = liveFutPrice?.ltp || last?.close || null;
+          const premium = (ltp && spotPrice) ? Number((ltp - spotPrice).toFixed(2)) : null;
+
           futuresDataForHybrid = {
             direction, trend, momentum,
             change_1m: Number(change1m.toFixed(3)),
             change_5m: Number(changeWindow.toFixed(3)),
-            premium: last?.premium || null,
-            spread: last?.premium || null,
-            spreadPct: spotPrice && last?.premium ? Number((last.premium / spotPrice * 100).toFixed(3)) : null,
+            premium,
+            spread: premium,
+            spreadPct: spotPrice && premium ? Number((premium / spotPrice * 100).toFixed(3)) : null,
             divergence: null,
-            candles_1m: [],
-            candles_5m: futCandles.slice(-12),
-            source: 'live_feed_folder',
+            ltp,
+            candles_1m: futCandles1m,
+            candles_5m: futCandles,
+            securityId: futSecurityId || liveFutPrice?.securityId || null,
+            source: liveFutPrice?.source || 'live_feed_folder',
             candleCount: futCandles.length,
           };
 
           state.lastFuturesData = futuresDataForHybrid;
 
           logger.info({
-            source: 'live_feed_folder',
+            source: futuresDataForHybrid.source,
             candles: futCandles.length,
+            candles1m: futCandles1m.length,
+            futSecurityId: futuresDataForHybrid.securityId,
+            ltp,
+            premium,
             direction, trend, momentum,
             change1m: change1m.toFixed(3),
             changeWindow: changeWindow.toFixed(3),
-          }, '[engine] Futures data from live-feed folder (no API)');
+          }, '[engine] Futures data resolved (WebSocket → folder → API fallback chain)');
+        } else if (liveFutPrice?.ltp) {
+          // No candles yet but we have a tick — emit a minimal record so
+          // downstream futures-leadership engine still has direction.
+          futuresDataForHybrid = {
+            direction: 'neutral',
+            trend: 'neutral',
+            momentum: 'neutral',
+            change_1m: 0,
+            change_5m: 0,
+            premium: spotPrice ? Number((liveFutPrice.ltp - spotPrice).toFixed(2)) : null,
+            spread: null,
+            spreadPct: null,
+            divergence: null,
+            ltp: liveFutPrice.ltp,
+            candles_1m: futCandles1m,
+            candles_5m: futCandles,
+            securityId: futSecurityId || liveFutPrice.securityId || null,
+            source: 'websocket-only',
+            candleCount: futCandles.length,
+          };
+          state.lastFuturesData = futuresDataForHybrid;
+          logger.info({
+            ltp: liveFutPrice.ltp,
+            futSecurityId: futuresDataForHybrid.securityId,
+          }, '[engine] Futures data: WebSocket tick only (insufficient candles)');
         } else {
-          logger.warn({ candles: futCandles.length }, '[engine] Insufficient futures candles in live-feed folder');
+          logger.warn({ candles: futCandles.length }, '[engine] Insufficient futures candles + no live tick');
         }
       } catch (e) {
         logger.warn({ err: e.message }, '[engine] Futures live-feed read failed');
@@ -2625,6 +2674,39 @@ async function runMonitorCycle() {
               newSl,
               currentPrice: trade.currentPrice,
               rationale: monitorDecision.rationale,
+            },
+          });
+        }
+        // Partial-exit marker (institutional spec — capture +1R partial-booking
+        // event so the adaptiveExitEngine doesn't refire on subsequent cycles).
+        // The actual order placement for partial booking is intentionally
+        // deferred (avoiding multi-leg order complexity); we record the marker
+        // and lock breakeven via the SL update above.
+        if (monitorDecision.partialExitPct && !trade.partialBooked) {
+          trade.partialBooked = true;
+          trade.partialBookedAt = new Date();
+          trade.partialBookedPrice = trade.currentPrice;
+          trade.partialBookedPct = monitorDecision.partialExitPct;
+          trade.breakevenSet = true;
+          trade.breakevenSetAt = new Date();
+          logger.info({
+            tradeId: trade._id,
+            partialPct: monitorDecision.partialExitPct,
+            entryPrice: trade.entryPrice,
+            currentPrice: trade.currentPrice,
+          }, '[engine] +1R partial-booking marker recorded (breakeven locked via TRAIL_SL above)');
+
+          await engineLogger.logEvent({
+            sessionId: state.session._id,
+            eventType: 'partial_booked_marker',
+            level: 'info',
+            message: `+1R partial-book marker (${(monitorDecision.partialExitPct * 100).toFixed(0)}% target booked); breakeven SL locked`,
+            tradeId: trade._id,
+            data: {
+              partialPct: monitorDecision.partialExitPct,
+              entryPrice: trade.entryPrice,
+              currentPrice: trade.currentPrice,
+              newSl: trade.sl,
             },
           });
         }

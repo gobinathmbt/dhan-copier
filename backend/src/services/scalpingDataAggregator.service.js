@@ -200,38 +200,51 @@ async function buildPayload(authKey) {
   const lastVol = last.volume || 0;
   const volSpike = avgVol > 0 ? lastVol > avgVol * 1.5 : false;
 
-  // 2. Expiry list
+  // 2. Expiry list — use unified provider (API → folder fallback)
   let expiries = [];
   try {
-    const res = await dhanBypass.getExpiryListBypass(authKey, {});
+    const res = await liveFeedProvider.getExpiryList(authKey, {});
     if (res.ok) expiries = res.data.expiries || [];
+    if (res.data?.meta?.source === 'live-feed-folder') {
+      logger.info({ source: 'live-feed-folder' }, '[aggregator] Expiry list served from folder fallback');
+    }
   } catch (e) {
-    logger.warn({ err: e.message }, '[aggregator] expiry fetch failed');
+    logger.warn({ err: e.message }, '[aggregator] expiry fetch failed (provider error)');
   }
   const nearestExpiry = expiries[0];
 
-  // 3. Option chain
+  // 3. Option chain — use unified provider (API → folder fallback)
   let optionChain = null;
   let oiAnalysis = null;
   let oiChange = null;
-  
+
   try {
     if (nearestExpiry) {
-      const res = await dhanBypass.getOptionChainBypass(authKey, {
+      const res = await liveFeedProvider.getOptionChain(authKey, {
         segment: 0,
         expiry: nearestExpiry.exp,
         securityId: NIFTY_SECURITY_ID,
       });
       if (res.ok) {
         optionChain = res.data;
-        // Persist ATM ± 6 strikes once per minute
-        try {
-          feedRecorder.recordOptionChain({
-            spotLtp: getLiveSpotLtp() ?? last.close,
-            strikes: optionChain.strikes,
-            expiry: nearestExpiry?._raw || nearestExpiry?.expiryDate,
-          });
-        } catch (_) {}
+        // If served fresh from API, persist a snapshot for tomorrow's
+        // fallback. If already from folder, skip the re-write.
+        if (res.data?.meta?.source !== 'live-feed-folder') {
+          try {
+            feedRecorder.recordOptionChain({
+              spotLtp: getLiveSpotLtp() ?? last.close,
+              strikes: optionChain.strikes,
+              expiry: nearestExpiry?._raw || nearestExpiry?.expiryDate,
+            });
+          } catch (_) {}
+        } else {
+          logger.info({
+            source: 'live-feed-folder',
+            strikeCount: optionChain.strikes.length,
+          }, '[aggregator] Option chain served from folder fallback');
+        }
+      } else {
+        logger.warn({ error: res.error }, '[aggregator] Option chain unavailable from both API and folder');
       }
       
       // Fetch OI Analysis

@@ -334,6 +334,7 @@ async function start() {
     const { instance: liveFeedProd } = require('./services/dhanLiveFeedProd.service');
     const { instance: feedRecorder } = require('./services/feedRecorder.service');
     const { instance: tickDelta } = require('./services/hybrid/tickDeltaClassifier');
+    const microstructure = require('./services/hybrid/microstructureEngine');
     const niftyFuturesProd = require('./services/niftyFuturesProd.service');
     const candleSynthesizer = require('./services/candleSynthesizer.service');
     feedRecorder.init(); // start day-rollover + prune old folders
@@ -345,8 +346,15 @@ async function start() {
     // every tick from the very first packet. Listening is event-driven and
     // adds zero latency to the feed parser.
     tickDelta.start(liveFeedProd);
+    // Start the microstructure engine — listens to depth-bearing FULL-mode
+    // ticks (NIFTY futures + index 50/depth) and computes bid/ask
+    // imbalance, absorption, iceberg, liquidity-pull, and spoofing reads.
+    microstructure.start(liveFeedProd);
     await liveFeedProd.connect();
-    // Default subscriptions — NIFTY 50 (13) in FULL mode so we get OI+depth too
+    // Default subscriptions — NIFTY 50 (13) in QUOTE mode (indices have no depth).
+    // The microstructure engine will get its depth feed from the futures
+    // subscription below (FULL mode), which is the institutional read anyway —
+    // futures lead spot in microstructure.
     liveFeedProd.subscribe(
       [
         { exchangeSegment: 'IDX_I', securityId: 13 }, // NIFTY 50 — required (only focus)
@@ -356,7 +364,7 @@ async function start() {
     );
     // Subscribe NIFTY futures (near-month contract)
     await niftyFuturesProd.subscribeLiveFeed('FULL');
-    logger.info('[server] Dhan production live feed + feed recorder + futures + tick-delta classifier started');
+    logger.info('[server] Dhan production live feed + feed recorder + futures + tick-delta classifier + microstructure engine started');
   } catch (e) {
     logger.warn({ err: e.message }, '[server] Dhan production live feed failed to start (will retry on demand)');
   }
@@ -380,6 +388,7 @@ process.on('SIGTERM', () => {
   hybridLiveFeedService.disconnect();
   try { require('./services/candleSynthesizer.service').stop(); } catch (_) {}
   try { require('./services/hybrid/tickDeltaClassifier').instance.stop(); } catch (_) {}
+  try { require('./services/hybrid/microstructureEngine').stop(); } catch (_) {}
   try { require('./services/dhanLiveFeedProd.service').instance.disconnect(); } catch (_) {}
   try { require('./services/feedRecorder.service').instance.shutdown(); } catch (_) {}
   server.close(() => {
@@ -393,6 +402,7 @@ process.on('SIGINT', () => {
   hybridLiveFeedService.disconnect();
   try { require('./services/candleSynthesizer.service').stop(); } catch (_) {}
   try { require('./services/hybrid/tickDeltaClassifier').instance.stop(); } catch (_) {}
+  try { require('./services/hybrid/microstructureEngine').stop(); } catch (_) {}
   try { require('./services/dhanLiveFeedProd.service').instance.disconnect(); } catch (_) {}
   try { require('./services/feedRecorder.service').instance.shutdown(); } catch (_) {}
   server.close(() => {

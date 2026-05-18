@@ -142,11 +142,13 @@ function classify({ candles1m = [], candles5m = [], vix = null } = {}) {
   }
 
   // ── Trading permission per regime ───────────────────────────────────────
-  // Calibrated: dead volatility allows scalps/mean-reversion at reduced size.
-  // Breakouts and momentum continuation are downgraded by the meta-regime
-  // engine, not by hard blocking here. Only `panic` hard-blocks.
+  // Calibrated 2026-05-18 (institutional spec): dead vol allows
+  // mean-revert / vwap-reclaim / reversal scalps at 0.65 size (was 0.45).
+  // Real edge in dead vol comes from pin rotations and IV decay fades —
+  // sizing was too punishing. Breakouts/momentum are still downgraded
+  // by meta-regime, not hard-blocked here. Only `panic` hard-blocks.
   const policy = {
-    dead:         { allowEntries: true,  sizingFactor: 0.45, allowedFamilies: ['mean_reversion','vwap_reclaim','reversal'] },
+    dead:         { allowEntries: true,  sizingFactor: 0.65, allowedFamilies: ['mean_reversion','vwap_reclaim','reversal'] },
     normal:       { allowEntries: true,  sizingFactor: 1.0  },
     expansion:    { allowEntries: true,  sizingFactor: 1.0  },
     panic:        { allowEntries: false, sizingFactor: 0    },

@@ -529,6 +529,12 @@ function evaluate(ctx = {}) {
     OPENING_DRIVE_FAILURE:         'reversal',
     MICRO_DELTA_FLIP:              'momentum_continuation',
     OI_MIGRATION_TREND:            'momentum_continuation',
+    // Phase 5 institutional spec 2026-05-18
+    DELTA_VELOCITY_BREAKOUT:       'momentum_continuation',
+    PDH_PDL_SWEEP_REVERSAL:        'reversal',
+    DOUBLE_DISTRIBUTION_TREND:     'breakout_expansion',
+    ABSORPTION_REVERSAL:           'reversal',
+    OVERNIGHT_OI_SHIFT_FOLLOW:     'momentum_continuation',
   };
 
   // Pre-filter: drop any setup whose family is blocked under the current

@@ -216,21 +216,235 @@ async function getFuturesCandles(authKey, interval, minutesBack = 60) {
     }
   }
   
-  // Fall back to API (will likely fail with 401, but try anyway)
+  // Fall back to API (will likely fail with 401, but try anyway).
+  // Best-effort — return ok:false so callers can continue gracefully.
   logger.debug({
     source: 'api-fallback',
     interval: intervalStr,
   }, '[liveFeedDataProvider] No futures candles in live-feed, falling back to API');
-  
-  const niftyFutures = require('./niftyFuturesProd.service');
-  const now = Math.floor(Date.now() / 1000);
-  const startTime = now - (minutesBack * 60);
-  
-  return await niftyFutures.getIntradayCandles({
-    interval,
-    startTime,
-    endTime: now,
-  });
+
+  try {
+    const niftyFutures = require('./niftyFuturesProd.service');
+    const now = Math.floor(Date.now() / 1000);
+    const startTime = now - (minutesBack * 60);
+    return await niftyFutures.getIntradayCandles({
+      interval,
+      startTime,
+      endTime: now,
+    });
+  } catch (e) {
+    logger.warn({ err: e.message, interval },
+      '[liveFeedDataProvider] Futures API fallback failed');
+    return { ok: false, error: e.message, data: { candles: [] } };
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// OPTION CHAIN — folder fallback
+// ────────────────────────────────────────────────────────────────────────
+//
+// The feedRecorder writes one option-chain snapshot per minute to
+//   live-feed/<date>_NIFTY_50/option-chain.jsonl
+// Each line is JSON: { t, spot, atm, expiry, strikes: [{strike,ce,pe},...] }
+//
+// The compact `ce` / `pe` shape used in the file is:
+//   { ltp, oi, oiChg, vol, iv, delta, theta, gamma, vega, bid, ask, buildup }
+//
+// The aggregator / hybrid engine expect the API shape:
+//   { call: { ltp, oi, oiChange, volume, iv, bid, ask, greeks: {delta,...} },
+//     put:  { ltp, oi, oiChange, volume, iv, bid, ask, greeks: {delta,...} } }
+//
+// `_apiShapeFromRecorded` rehydrates the API-style row from a recorder row.
+
+function _apiShapeFromRecorded(row) {
+  const c = row.ce || {};
+  const p = row.pe || {};
+  return {
+    strike: row.strike,
+    call: {
+      ltp:        c.ltp || 0,
+      oi:         c.oi || 0,
+      oiChange:   c.oiChg || 0,
+      volume:     c.vol || 0,
+      iv:         c.iv || 0,
+      bid:        c.bid || 0,
+      ask:        c.ask || 0,
+      bidQty:     c.bidQty || 0,
+      askQty:     c.askQty || 0,
+      greeks: {
+        delta: c.delta || 0,
+        theta: c.theta || 0,
+        gamma: c.gamma || 0,
+        vega:  c.vega || 0,
+        rho:   c.rho  || 0,
+      },
+      builtupName: c.buildup || 'Neutral',
+    },
+    put: {
+      ltp:        p.ltp || 0,
+      oi:         p.oi || 0,
+      oiChange:   p.oiChg || 0,
+      volume:     p.vol || 0,
+      iv:         p.iv || 0,
+      bid:        p.bid || 0,
+      ask:        p.ask || 0,
+      bidQty:     p.bidQty || 0,
+      askQty:     p.askQty || 0,
+      greeks: {
+        delta: p.delta || 0,
+        theta: p.theta || 0,
+        gamma: p.gamma || 0,
+        vega:  p.vega || 0,
+        rho:   p.rho  || 0,
+      },
+      builtupName: p.buildup || 'Neutral',
+    },
+    pcr: {
+      oi:    (c.oi || 0) > 0 ? (p.oi || 0) / (c.oi || 1) : 0,
+      volume:(c.vol || 0) > 0 ? (p.vol || 0) / (c.vol || 1) : 0,
+    },
+  };
+}
+
+/**
+ * Read the most recent option-chain snapshot for a given date from the
+ * recorded JSONL. Returns the API-shape `{ ok, data: { strikes, spotLtp,
+ * meta: { source, expiry, strikeCount, atm } } }`.
+ *
+ * Falls back to all snapshots when `latest=false`.
+ */
+function readOptionChainFromFile(date, { latest = true } = {}) {
+  try {
+    const folder = path.join(LIVE_FEED_DIR, `${date}_NIFTY_50`);
+    const file = path.join(folder, 'option-chain.jsonl');
+    if (!fs.existsSync(file)) return null;
+    const content = fs.readFileSync(file, 'utf8');
+    const lines = content.trim().split('\n').filter(l => l.length > 0);
+    if (!lines.length) return null;
+    if (latest) {
+      // Walk from the end and pick the first parseable line
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+          const snap = JSON.parse(lines[i]);
+          if (snap && Array.isArray(snap.strikes) && snap.strikes.length) return snap;
+        } catch (_) {}
+      }
+      return null;
+    }
+    return lines.map(l => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
+  } catch (err) {
+    logger.warn({ err: err.message, date }, '[liveFeedDataProvider] Failed to read option-chain file');
+    return null;
+  }
+}
+
+/**
+ * Get the latest option chain with the standard API response shape.
+ *
+ * Strategy:
+ *   1. Try the production API first (gives full strikes + max-pain + PCR).
+ *   2. If API fails OR returns empty, fall back to the recorded
+ *      `option-chain.jsonl` snapshot (ATM ± 6 strikes).
+ *
+ * Both paths return the same response shape consumed by the aggregator
+ * and the hybrid engine. Source is recorded in `meta.source` for logging.
+ *
+ * @param {string} authKey
+ * @param {Object} params - { securityId = 13, expiry, segment }
+ */
+async function getOptionChain(authKey, params = {}) {
+  // Try production API first
+  let apiResult = null;
+  try {
+    const dhanProd = require('./dhanProd.service');
+    apiResult = await dhanProd.getOptionChainProd(authKey, params);
+    if (apiResult?.ok && apiResult.data?.strikes?.length) {
+      return apiResult;
+    }
+  } catch (e) {
+    apiResult = { ok: false, error: e.message };
+  }
+
+  // Fallback to recorded JSONL
+  const today = getTodayIST();
+  const snap = readOptionChainFromFile(today, { latest: true });
+  if (snap && Array.isArray(snap.strikes) && snap.strikes.length) {
+    const strikes = snap.strikes.map(_apiShapeFromRecorded);
+    logger.info({
+      source: 'live-feed-folder',
+      strikeCount: strikes.length,
+      atm: snap.atm,
+      apiError: apiResult?.error || 'no api result',
+    }, '[liveFeedDataProvider] Option chain served from live-feed folder fallback');
+    return {
+      ok: true,
+      data: {
+        strikes,
+        spotLtp: snap.spot,
+        meta: {
+          source: 'live-feed-folder',
+          expiry: snap.expiry,
+          strikeCount: strikes.length,
+          atm: snap.atm,
+          ts: snap.t,
+          apiError: apiResult?.error || null,
+        },
+      },
+    };
+  }
+
+  // Both failed
+  logger.warn({
+    apiError: apiResult?.error || 'unknown',
+    folder: today,
+  }, '[liveFeedDataProvider] Option chain UNAVAILABLE — both API and folder failed');
+  return apiResult || { ok: false, error: 'option chain unavailable' };
+}
+
+/**
+ * Get the expiry list. Falls back to the latest recorded snapshot's expiry
+ * when the API is unavailable.
+ */
+async function getExpiryList(authKey, params = {}) {
+  let apiResult = null;
+  try {
+    const dhanProd = require('./dhanProd.service');
+    apiResult = await dhanProd.getExpiryListProd
+      ? await dhanProd.getExpiryListProd(authKey, params)
+      : await dhanProd.getExpiryListBypass(authKey, params);
+    if (apiResult?.ok && Array.isArray(apiResult.data?.expiries) && apiResult.data.expiries.length) {
+      return apiResult;
+    }
+  } catch (e) {
+    apiResult = { ok: false, error: e.message };
+  }
+
+  // Fallback — use the recorded chain's expiry
+  const today = getTodayIST();
+  const snap = readOptionChainFromFile(today, { latest: true });
+  if (snap?.expiry) {
+    // The expiry on the recorded file may be a unix-ts (number) OR a
+    // YYYY-MM-DD string. Normalise to the API shape `{ exp, expiryDate }`.
+    let exp = snap.expiry;
+    let expiryDate = null;
+    if (typeof exp === 'string' && /^\d{4}-\d{2}-\d{2}/.test(exp)) {
+      expiryDate = exp;
+      exp = Math.floor(new Date(`${exp}T15:30:00+05:30`).getTime() / 1000);
+    } else if (typeof exp === 'number') {
+      const d = new Date(exp * 1000);
+      expiryDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    }
+    logger.info({ source: 'live-feed-folder', exp, expiryDate },
+      '[liveFeedDataProvider] Expiry list served from live-feed folder fallback');
+    return {
+      ok: true,
+      data: {
+        expiries: [{ exp, expiryDate, _raw: expiryDate }],
+        meta: { source: 'live-feed-folder', apiError: apiResult?.error || null },
+      },
+    };
+  }
+  return apiResult || { ok: false, error: 'expiry list unavailable' };
 }
 
 /**
@@ -243,13 +457,57 @@ function getCurrentSpotPrice() {
 }
 
 /**
- * Get current NIFTY futures price from WebSocket
- * @returns {object|null} Futures tick or null
+ * Get current NIFTY futures price from WebSocket.
+ * Resolves the near-month futures security id (cached by
+ * niftyFuturesProd.service) and reads the most recent tick from the live
+ * feed snapshot map. If the tick is too old we fall back to the latest
+ * close from the recorded futures candles file.
+ *
+ * @returns {object|null} { ltp, oi, securityId, source, ts } or null
  */
 function getCurrentFuturesPrice() {
-  // Futures are on NSE_FNO segment
-  // Security ID varies by expiry - we'd need to track the current month contract
-  // For now, return null and let caller use API
+  try {
+    const niftyFutures = require('./niftyFuturesProd.service');
+    // getSecurityId is sync-ish — it consults the cached scrip master.
+    // If not cached yet, returns null. We don't await here to keep this
+    // function non-async (callers expect synchronous behaviour).
+    const sid = (typeof niftyFutures.getSecurityId === 'function')
+      ? (niftyFutures.getSecurityId.length === 0 ? niftyFutures.getSecurityId() : null)
+      : null;
+    let secIdResolved = null;
+    if (sid && typeof sid.then === 'function') {
+      // It's a promise (cold cache). Skip.
+      secIdResolved = null;
+    } else if (Number.isFinite(sid)) {
+      secIdResolved = sid;
+    }
+    // Try the live feed if we have a security id
+    if (Number.isFinite(secIdResolved)) {
+      const t = liveFeed.getTick('NSE_FNO', secIdResolved);
+      if (t?.ltp && t.updatedAt && Date.now() - t.updatedAt < LIVE_TICK_FRESHNESS_MS * 6) {
+        return {
+          ltp: Number(t.ltp),
+          oi: Number(t.oi || 0),
+          securityId: secIdResolved,
+          source: 'websocket',
+          ts: t.updatedAt,
+        };
+      }
+    }
+    // Fall back to the most recent recorded futures-1m candle
+    const today = getTodayIST();
+    const candles = readCandlesFromFile(today, '1m', 'futures');
+    if (candles.length) {
+      const last = candles[candles.length - 1];
+      return {
+        ltp: Number(last.close),
+        oi: Number(last.oi || 0),
+        securityId: secIdResolved || null,
+        source: 'live-feed-folder',
+        ts: (last.time || 0) * 1000,
+      };
+    }
+  } catch (_) {}
   return null;
 }
 
@@ -297,9 +555,12 @@ function getStats() {
 module.exports = {
   getCandles,
   getFuturesCandles,
+  getOptionChain,                    // API + folder fallback (NEW 2026-05-18)
+  getExpiryList,                     // API + folder fallback (NEW 2026-05-18)
   getCurrentSpotPrice,
   getCurrentFuturesPrice,
   getStats,
   readCandlesFromFile,
+  readOptionChainFromFile,           // raw access for analytics
   getTodayIST,
 };

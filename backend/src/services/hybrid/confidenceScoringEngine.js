@@ -41,22 +41,31 @@
 //   - Structure 10 → 8 (much of it duplicates volume pillar)
 //   - Breadth 5 → 4 (NIFTY-internal correlation only)
 //   - Futures 5 → 4 (subset of OI/derivatives signal)
+//
+// Phase 6 (2026-05-18) institutional pillars added:
+//   - Microstructure (bid/ask imbalance, absorption, iceberg) → 8
+//   - Futures leadership (lead-lag, basis, fut delta velocity) → 6
+//   - Delta velocity (acceleration, flip, exhaustion) → 5
 //                                           ─────
-//                                        Total: 110 → normalises against itself
+//                                        Total: 129 → normalises against itself
 //
 // Institutional rationale:
 //   "The real edge is Price + Delta + OI Velocity + Futures Direction.
-//    UT Bot only confirms — never drives."
+//    UT Bot only confirms — never drives. Microstructure is the entry
+//    timing layer; futures leadership is the directional anchor."
 const WEIGHTS = {
-  oi:        30,
-  orderflow: 30,
-  vwap:      15,
-  volume:    12,
-  structure:  8,
-  liquidity:  6,
-  breadth:    4,
-  futures:    4,
-  utBot:      1,
+  oi:             30,
+  orderflow:      30,
+  vwap:           15,
+  volume:         12,
+  microstructure:  8,
+  structure:       8,
+  liquidity:       6,
+  futuresLead:     6,
+  deltaVelocity:   5,
+  breadth:         4,
+  futures:         4,
+  utBot:           1,
 };
 
 function _clamp(s) { return Math.max(0, Math.min(100, Number(s) || 0)); }
@@ -192,6 +201,47 @@ function _scoreUtBot(utBot) {
   return { score: _clamp(utBot.score), reasons: [utBot.reasoning] };
 }
 
+// Phase 6 institutional pillars (2026-05-18)
+function _scoreMicrostructure(microstructure, direction) {
+  if (!microstructure?.available) return { score: 50, reasons: ['no microstructure'] };
+  // microstructureEngine already produces a directional score 0..100 when
+  // direction is passed. Here we re-derive against the resolved direction.
+  const m = microstructure;
+  const matches = (direction === 'bullish' && m.bias === 'bullish')
+               || (direction === 'bearish' && m.bias === 'bearish');
+  const opposes = (direction === 'bullish' && m.bias === 'bearish')
+               || (direction === 'bearish' && m.bias === 'bullish');
+  let s = 50;
+  const reasons = [m.state];
+  if (matches) {
+    const mag = Math.abs(m.imbalance || 0);
+    s = 55 + Math.min(35, Math.round(mag * 100 * 0.5));
+    if (m.state === 'absorption_long' || m.state === 'absorption_short') s += 8;
+    if (m.state === 'iceberg_support' || m.state === 'iceberg_resistance') s += 6;
+    if (m.state === 'liquidity_pull_up' || m.state === 'liquidity_pull_down') s += 6;
+    reasons.push(`imb ${(m.imbalance * 100).toFixed(0)}% vel ${m.imbalanceVelocity}`);
+  } else if (opposes) {
+    const mag = Math.abs(m.imbalance || 0);
+    s = 45 - Math.min(35, Math.round(mag * 100 * 0.5));
+    reasons.push(`book against direction`);
+  }
+  if (m.spoofRisk) { s -= 10; reasons.push('spoof risk'); }
+  if (m.spread?.status === 'wide')    { s -= 4; reasons.push('spread wide'); }
+  if (m.spread?.status === 'extreme') { s -= 8; reasons.push('spread extreme'); }
+  return { score: _clamp(s), reasons };
+}
+
+function _scoreFuturesLead(futuresLead, direction) {
+  if (!futuresLead?.available) return { score: 50, reasons: ['no fut lead'] };
+  // futuresLeadershipEngine already produces a directional score
+  return { score: _clamp(futuresLead.score), reasons: [futuresLead.reasoning] };
+}
+
+function _scoreDeltaVelocity(dv, direction) {
+  if (!dv?.available) return { score: 50, reasons: ['no delta velocity'] };
+  return { score: _clamp(dv.velocityScore), reasons: [dv.reasoning] };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Public API
 // ─────────────────────────────────────────────────────────────────────────────
@@ -227,15 +277,19 @@ function score(ctx = {}) {
   }
 
   const parts = {
-    oi:        _scoreOi(ctx.oiAnalytics),
-    orderflow: _scoreOrderflow(ctx.volumeAnalysis, direction),
-    vwap:      _scoreVwap(ctx.vwap, direction),
-    structure: _scoreStructure(ctx.volumeAnalysis, ctx.smc, direction),
-    volume:    _scoreVolume(ctx.volumeAnalysis, direction),
-    liquidity: _scoreLiquidity(ctx.liquidity),
-    breadth:   _scoreBreadth(ctx.marketInternals, direction),
-    futures:   _scoreFutures(ctx.derivatives, direction),
-    utBot:     _scoreUtBot(ctx.utBot),
+    oi:             _scoreOi(ctx.oiAnalytics),
+    orderflow:      _scoreOrderflow(ctx.volumeAnalysis, direction),
+    vwap:           _scoreVwap(ctx.vwap, direction),
+    structure:      _scoreStructure(ctx.volumeAnalysis, ctx.smc, direction),
+    volume:         _scoreVolume(ctx.volumeAnalysis, direction),
+    liquidity:      _scoreLiquidity(ctx.liquidity),
+    breadth:        _scoreBreadth(ctx.marketInternals, direction),
+    futures:        _scoreFutures(ctx.derivatives, direction),
+    utBot:          _scoreUtBot(ctx.utBot),
+    // Phase 6 (2026-05-18) institutional pillars
+    microstructure: _scoreMicrostructure(ctx.microstructure, direction),
+    futuresLead:    _scoreFuturesLead(ctx.futuresLead, direction),
+    deltaVelocity:  _scoreDeltaVelocity(ctx.deltaVelocity, direction),
   };
 
   // ── Hierarchical scoring (institutional fix for score compression) ─────

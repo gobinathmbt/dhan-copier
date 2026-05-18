@@ -78,6 +78,16 @@ const ScalpingTradeSchema = new mongoose.Schema(
         rationale: String,
       },
     ],
+    // Adaptive exit state — tracks partial bookings + breakeven progression
+    // (used by adaptiveExitEngine to avoid re-firing the +1R partial on
+    // subsequent cycles, and to know when to lock breakeven).
+    partialBooked: { type: Boolean, default: false },
+    partialBookedAt: { type: Date },
+    partialBookedPrice: { type: Number },
+    partialBookedPct: { type: Number },                       // e.g. 0.4 for 40%
+    breakevenSet: { type: Boolean, default: false },
+    breakevenSetAt: { type: Date },
+    rRunnerHigh: { type: Number, default: 0 },                // best R-multiple seen (trail diagnostics)
   },
   { timestamps: true }
 );
