@@ -3522,6 +3522,17 @@ function _pdhPdlSweepReversal(ctx) {
   // Hard exclusions
   if ((ctx.trap?.trapScore || 0) >= 70) required.push(`trap ${ctx.trap.trapScore}`);
 
+  // CALIBRATED 2026-05-19 cycle 34: Loss case 2026-04-02 14:15 expiry day —
+  // PDH/PDL sweep reversal does NOT work on expiry afternoons. Theta + dealer
+  // hedging dominate; price often sweeps and continues rather than reverts.
+  if (ctx.sessionPhase?.isExpiryDay && ctx.sessionPhase?.hhmm >= 1330) {
+    required.push('expiry afternoon — sweep reversion fails on dealer flow');
+  }
+  // Also block expiry_expansion meta — same dynamic, dealer-driven thrust.
+  if (ctx.metaRegime?.state === 'expiry_expansion') {
+    required.push('expiry_expansion meta');
+  }
+
   const valid = required.length === 0;
   if (!valid) {
     return { name: 'PDH_PDL_SWEEP_REVERSAL', family: 'reversal',
