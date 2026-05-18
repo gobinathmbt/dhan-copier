@@ -161,7 +161,7 @@ function synthesizeForType(dateStr, type) {
   const candles1m = readJsonl(src1m);
   if (candles1m.length < 2) return; // need at least 2 bars to form any higher-TF bar
 
-  for (const intervalMin of [5, 15]) {
+  for (const intervalMin of [5, 15, 30]) {
     const destFile = path.join(folder, `${type}-${intervalMin}m.jsonl`);
     const written  = getWritten(dateStr, type, String(intervalMin));
 

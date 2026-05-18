@@ -115,7 +115,10 @@ async function getCandles(authKey, params) {
   
   // Strategy 1: Use live-feed folder for today's NIFTY data
   if (isNiftySpot && isToday) {
-    const intervalMap = { '1': '1m', '5': '5m', '15': '15m', '25': '30m' };
+    // Map Dhan API interval string → live-feed folder filename suffix.
+    // Both '25' and '30' map to '30m' (different parts of the codebase use
+    // different conventions; we accept both).
+    const intervalMap = { '1': '1m', '5': '5m', '15': '15m', '25': '30m', '30': '30m' };
     const intervalStr = intervalMap[interval] || `${interval}m`;
     
     const candles = readCandlesFromFile(today, intervalStr, 'candles');
@@ -185,7 +188,7 @@ async function getCandles(authKey, params) {
  */
 async function getFuturesCandles(authKey, interval, minutesBack = 60) {
   const today = getTodayIST();
-  const intervalMap = { '1': '1m', '5': '5m', '15': '15m' };
+  const intervalMap = { '1': '1m', '5': '5m', '15': '15m', '25': '30m', '30': '30m' };
   const intervalStr = intervalMap[interval] || `${interval}m`;
   
   const candles = readCandlesFromFile(today, intervalStr, 'futures');

@@ -15,26 +15,34 @@ const logger = require('../utils/logger');
 const LIVE_FEED_DIR = path.join(__dirname, '../../live-feed');
 
 /**
- * Aggregate ticks into candles for a specific interval
- * @param {Array} ticks - Array of tick objects with {t, ltp, open, high, low, close, volume, oi, premium}
+ * Aggregate ticks into candles for a specific interval.
+ *
+ * IMPORTANT: futures-ticks.jsonl stores `tick.t` in MILLISECONDS (Date.now()),
+ * but the rest of the system (spot candles, hybrid engine, candle synthesizer)
+ * uses SECONDS. This function bucketises by ms internally for precision but
+ * emits candle `time` values in SECONDS to stay compatible with the spot
+ * pipeline. CALIBRATED 2026-05-18 — was emitting ms which made the candle
+ * synthesizer treat them as year ~56347.
+ *
+ * @param {Array} ticks - tick objects { t (ms), ltp, volume, oi, premium }
  * @param {number} intervalMinutes - 1, 5, or 15
- * @returns {Array} Array of candle objects
+ * @returns {Array} candle objects with { time (sec), open, high, low, close, volume, oi, premium }
  */
 function aggregateTicks(ticks, intervalMinutes) {
   if (!ticks || ticks.length === 0) return [];
 
   const intervalMs = intervalMinutes * 60 * 1000;
-  const candles = new Map(); // key: candle start time, value: candle object
+  const candles = new Map(); // key: candle start time (ms), value: candle object
 
   for (const tick of ticks) {
     if (!tick || typeof tick.ltp !== 'number') continue;
 
-    // Round down to interval start
-    const candleStart = Math.floor(tick.t / intervalMs) * intervalMs;
+    // tick.t is in milliseconds — round down to interval start (also ms)
+    const candleStartMs = Math.floor(tick.t / intervalMs) * intervalMs;
 
-    if (!candles.has(candleStart)) {
-      candles.set(candleStart, {
-        time: candleStart,
+    if (!candles.has(candleStartMs)) {
+      candles.set(candleStartMs, {
+        time: Math.floor(candleStartMs / 1000), // emit in SECONDS
         open: tick.ltp,
         high: tick.ltp,
         low: tick.ltp,
@@ -45,7 +53,7 @@ function aggregateTicks(ticks, intervalMinutes) {
         tickCount: 1,
       });
     } else {
-      const candle = candles.get(candleStart);
+      const candle = candles.get(candleStartMs);
       candle.high = Math.max(candle.high, tick.ltp);
       candle.low = Math.min(candle.low, tick.ltp);
       candle.close = tick.ltp;
@@ -71,7 +79,7 @@ async function aggregateFuturesCandles(date) {
     
     if (!fs.existsSync(ticksFile)) {
       logger.warn({ date, file: ticksFile }, '[futuresCandleAggregator] Ticks file not found');
-      return { '1': [], '5': [], '15': [] };
+      return { '1': [], '5': [], '15': [], '30': [] };
     }
 
     // Read all ticks
@@ -87,13 +95,14 @@ async function aggregateFuturesCandles(date) {
 
     if (ticks.length === 0) {
       logger.warn({ date }, '[futuresCandleAggregator] No valid ticks found');
-      return { '1': [], '5': [], '15': [] };
+      return { '1': [], '5': [], '15': [], '30': [] };
     }
 
     // Aggregate into different timeframes
     const candles1m = aggregateTicks(ticks, 1);
     const candles5m = aggregateTicks(ticks, 5);
     const candles15m = aggregateTicks(ticks, 15);
+    const candles30m = aggregateTicks(ticks, 30);
 
     logger.info({
       date,
@@ -101,22 +110,30 @@ async function aggregateFuturesCandles(date) {
       candles1m: candles1m.length,
       candles5m: candles5m.length,
       candles15m: candles15m.length,
+      candles30m: candles30m.length,
     }, '[futuresCandleAggregator] Aggregated futures candles from ticks');
 
     return {
       '1': candles1m,
       '5': candles5m,
       '15': candles15m,
+      '30': candles30m,
     };
 
   } catch (err) {
     logger.error({ err: err.message, date }, '[futuresCandleAggregator] Failed to aggregate candles');
-    return { '1': [], '5': [], '15': [] };
+    return { '1': [], '5': [], '15': [], '30': [] };
   }
 }
 
 /**
- * Write aggregated candles to the timeframe files
+ * Write aggregated candles to the timeframe files.
+ *
+ * DEFENSIVE: This function converts ms→sec timestamps before writing,
+ * so even if the in-memory aggregateTicks function is the OLD cached
+ * version (which emitted ms), the on-disk format stays consistent
+ * (seconds, matching spot candles).
+ *
  * @param {string} date - YYYY-MM-DD
  * @param {Object} candles - { '1': candles[], '5': candles[], '15': candles[] }
  */
@@ -132,7 +149,7 @@ async function writeCandlesToFiles(date, candles) {
     for (const [interval, candleArray] of Object.entries(candles)) {
       const file = path.join(folder, `futures-${interval}m.jsonl`);
       
-      // Read existing candles to avoid duplicates
+      // Read existing candles to avoid duplicates (already in seconds on disk)
       const existing = new Set();
       if (fs.existsSync(file)) {
         const content = fs.readFileSync(file, 'utf8');
@@ -150,10 +167,16 @@ async function writeCandlesToFiles(date, candles) {
       let written = 0;
       
       for (const candle of candleArray) {
-        if (existing.has(candle.time)) continue;
+        // Defensive: normalize candle.time to SECONDS regardless of input unit.
+        // 13+ digits = milliseconds (Date.now()), 10 digits = seconds.
+        let timeSec = candle.time;
+        if (String(timeSec).length >= 13) {
+          timeSec = Math.floor(timeSec / 1000);
+        }
+        if (existing.has(timeSec)) continue;
         
         stream.write(JSON.stringify({
-          t: candle.time,
+          t: timeSec,
           o: candle.open,
           h: candle.high,
           l: candle.low,
@@ -162,7 +185,7 @@ async function writeCandlesToFiles(date, candles) {
           oi: candle.oi || 0,
           premium: candle.premium || 0,
         }) + '\n');
-        
+        existing.add(timeSec);
         written++;
       }
       

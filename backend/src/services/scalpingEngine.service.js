@@ -1502,96 +1502,67 @@ async function runPredictionCycle() {
     }
 
     // ============================================================
-    // STEP 3.5: NIFTY FUTURES AI CONFIRMATION (if enabled)
-    // Skip if futures API has been returning 401 (auth expired)
+    // STEP 3.5: NIFTY FUTURES — read from live-feed folder (no API)
     // ============================================================
+    // CALIBRATED 2026-05-18: futures API auth keeps returning 401 in
+    // production. We have a futuresCandleAggregator that builds
+    // futures-1m/5m/15m candles from the WebSocket tick stream
+    // (futures-ticks.jsonl) into the live-feed folder. Read from there
+    // instead of hitting the API.
     let futuresConfirmation = null;
     let futuresAIDecision = null;
-    
-    if (settings.enableFuturesConfirmation && !state.futuresAuthFailed) {
-      logger.info('[engine] Fetching NIFTY Futures data and sending to AI');
-      
-      // Fetch futures data
-      const futuresResult = await niftyFutures.fetchFuturesData('5', 50);
-      
-      if (!futuresResult.ok) {
-        // Check if it's a 401 — if so, disable futures for this session
-        if (futuresResult.error && (futuresResult.error.includes('401') || futuresResult.error.includes('Unauthorized'))) {
-          state.futuresAuthFailed = true;
-          logger.warn('[engine] Futures API returned 401 — disabling futures confirmation for this session');
-        } else {
-          logger.warn('[engine] Futures data unavailable, proceeding without futures confirmation');
-        }
-      }
-      
-      if (futuresResult.ok) {
-        // Send ALL futures data to AI for decision
-        aiAnalysis.setNextCallPurpose('nifty_futures_confirmation');
-        futuresAIDecision = await aiAnalysis.analyzeFuturesWithAI(
-          futuresResult.data,
-          { spotPrice, direction },
-          direction,
-          state.session.aiModel
-        );
-        
-        if (futuresAIDecision) {
-          logger.info({
-            futuresDirection: futuresAIDecision.futures_direction,
-            confirmsSpot: futuresAIDecision.confirms_spot,
-            confidence: futuresAIDecision.confidence,
-            shouldTakeTrade: futuresAIDecision.should_take_trade
-          }, '[engine] Futures AI analysis completed');
-          
-          await engineLogger.logEvent({
-            sessionId: state.session._id,
-            eventType: 'futures_ai_confirmation',
-            level: 'info',
-            message: `Futures AI: ${futuresAIDecision.should_take_trade ? '✅ Take Trade' : '❌ Skip Trade'} - ${futuresAIDecision.reasoning}`,
-            data: futuresAIDecision,
-          });
-          
-          // Store futures data for monitor cycle to use
-          state.lastFuturesData = futuresAIDecision;
-          
-          // AI DECIDES - Exit if AI says don't take trade
-          if (!futuresAIDecision.should_take_trade) {
-            if (ultraScalping) {
-              logger.warn({
-                futuresDirection: futuresAIDecision.futures_direction,
-                spotDirection: direction,
-              }, '[engine] Futures AI skip — ultra-scalping: reducing size by 33%, continuing');
-              settings.lotSize = Math.max(1, Math.floor((settings.lotSize || 1) * 0.67));
-              await engineLogger.logEvent({
-                sessionId: state.session._id,
-                eventType: 'futures_softened',
-                level: 'warn',
-                message: `Ultra-scalping: futures AI skip, proceeding with reduced size`,
-                data: { lotSize: settings.lotSize, futuresAIDecision },
-              });
-            } else {
-              logger.warn({
-                futuresDirection: futuresAIDecision.futures_direction,
-                spotDirection: direction,
-                reasoning: futuresAIDecision.reasoning,
-                warnings: futuresAIDecision.warning_signs
-              }, '[engine] Futures AI says skip trade');
-              return;
-            }
-          }
-          
-          // Store for trade record
-          futuresConfirmation = {
-            confirmed: futuresAIDecision.confirms_spot,
-            futuresDirection: futuresAIDecision.futures_direction,
-            premium: futuresAIDecision.premium_discount,
-            confidence: futuresAIDecision.confidence,
-            reason: futuresAIDecision.reasoning
+    let futuresDataForHybrid = null;
+
+    if (settings.enableFuturesConfirmation) {
+      try {
+        const liveFeedProvider = require('./liveFeedDataProvider.service');
+        const futRes = await liveFeedProvider.getFuturesCandles(state.authKey, '5', 60);
+        const futCandles = futRes.ok ? (futRes.data.candles || []) : [];
+
+        if (futCandles.length >= 3) {
+          // Compute basic futures direction/momentum from local candles
+          const last = futCandles[futCandles.length - 1];
+          const prev = futCandles[futCandles.length - 2];
+          const first = futCandles[0];
+          const change1m = prev?.close ? ((last.close - prev.close) / prev.close) * 100 : 0;
+          const changeWindow = first?.close ? ((last.close - first.close) / first.close) * 100 : 0;
+          const direction = changeWindow > 0.05 ? 'bullish' : changeWindow < -0.05 ? 'bearish' : 'neutral';
+          const trend = changeWindow > 0.15 ? 'bullish' : changeWindow < -0.15 ? 'bearish' : 'neutral';
+          const momentum = Math.abs(change1m) > 0.1 ? (change1m > 0 ? 'bullish' : 'bearish') : 'neutral';
+
+          futuresDataForHybrid = {
+            direction, trend, momentum,
+            change_1m: Number(change1m.toFixed(3)),
+            change_5m: Number(changeWindow.toFixed(3)),
+            premium: last?.premium || null,
+            spread: last?.premium || null,
+            spreadPct: spotPrice && last?.premium ? Number((last.premium / spotPrice * 100).toFixed(3)) : null,
+            divergence: null,
+            candles_1m: [],
+            candles_5m: futCandles.slice(-12),
+            source: 'live_feed_folder',
+            candleCount: futCandles.length,
           };
+
+          state.lastFuturesData = futuresDataForHybrid;
+
+          logger.info({
+            source: 'live_feed_folder',
+            candles: futCandles.length,
+            direction, trend, momentum,
+            change1m: change1m.toFixed(3),
+            changeWindow: changeWindow.toFixed(3),
+          }, '[engine] Futures data from live-feed folder (no API)');
+        } else {
+          logger.warn({ candles: futCandles.length }, '[engine] Insufficient futures candles in live-feed folder');
         }
-      } else {
-        logger.warn('[engine] Futures data unavailable, proceeding without futures confirmation');
+      } catch (e) {
+        logger.warn({ err: e.message }, '[engine] Futures live-feed read failed');
       }
     }
+    // (Legacy futures-AI confirmation block removed — futures data now
+    // comes from live-feed folder above and flows directly to the hybrid
+    // engine via state.lastFuturesData.)
 
     // ============================================================
     // OPTIMIZATION 1: PARALLEL AI EXECUTION (Save 6-10 seconds)
@@ -1919,7 +1890,7 @@ async function runPredictionCycle() {
         settings,
         session: state.session,
         openTradesCount: currentOpenTrades.length,
-        futuresData: futuresAIDecision,
+        futuresData: futuresDataForHybrid || futuresAIDecision,
         // Calibrated daily caps — pass today's count + loss streak so the
         // entry engine can enforce the 8-trade/3-loss daily limits.
         tradesToday: await _countTodayTrades(state.session?._id),
@@ -1978,137 +1949,28 @@ async function runPredictionCycle() {
       data: institutionalEntryDecision,
     });
 
-    // HARD GATE: AI must confirm min target is achievable
-    // EXCEPTION: Global bias override — STRICT CONDITIONS to prevent forcing trades against trend
+    // ============================================================
+    // HYBRID ENGINE IS AUTHORITATIVE — no override allowed
+    // ============================================================
+    // CALIBRATED 2026-05-18: removed the legacy LOCAL+GLOBAL OVERRIDE block.
+    // The hybrid engine performs full institutional analysis (regime, OI,
+    // gamma, MTF, trap detection, playbook routing). When it returns
+    // NO_TRADE, that decision is final. The legacy override was forcing
+    // trades against hybrid's NO_TRADE verdict based on simple "30m+15m+5m
+    // bullish + above VWAP" rules — exactly the kind of naive logic the
+    // hybrid engine was designed to replace.
+    //
+    // Live evidence (2026-05-18, session 6a0aaf37): hybrid said
+    // "mean-revert bullish same direction as auction bullish trend —
+    // failed fade risk" → override forced BUY_CE → trade lost ₹124.
     if (!institutionalEntryDecision.should_enter || !institutionalEntryDecision.min_target_achievable) {
-      const globalBiasNow   = algorithmOutputs.globalMarkets?.global_bias || 'neutral';
-      const aggMtfNow       = payload.multi_timeframe;
-      const higherTfBias    = aggMtfNow?.higher_tf_bias || 'neutral';
-      const vwapPos         = payload.vwap_analysis?.price_vs_vwap || 'unknown';
-      const mtf5m           = aggMtfNow?.timeframes?.['5m']?.trend || 'neutral';
-      const mtf15m          = aggMtfNow?.timeframes?.['15m']?.trend || 'neutral';
-      const mtf30m          = aggMtfNow?.timeframes?.['30m']?.trend || 'neutral';
-
-      // ── DETERMINE ACTUAL LOCAL DIRECTION ──────────────────────────────────
-      // Local direction = what the price action says RIGHT NOW
-      // Use 15m + 5m + VWAP to determine local direction
-      const localBullish = (mtf15m === 'bullish' || mtf5m === 'bullish') && vwapPos === 'above';
-      const localBearish = (mtf15m === 'bearish' || mtf5m === 'bearish') && vwapPos === 'below';
-      const localNeutral = !localBullish && !localBearish;
-
-      // ── GLOBAL OVERRIDE RULES ─────────────────────────────────────────────
-      // DISABLED: This override logic was causing wrong direction trades
-      // The AI's decision should be trusted when it says NO_TRADE
-      // Only override if there's VERY strong confirmation from multiple timeframes
-      
-      const bothHigherTfBearish = mtf30m === 'bearish' && mtf15m === 'bearish' && mtf5m === 'bearish';
-      const bothHigherTfBullish = mtf30m === 'bullish' && mtf15m === 'bullish' && mtf5m === 'bullish';
-
-      // Determine override signal based on LOCAL price action, not global
-      let overrideSignal = null;
-      let overrideDirection = null;
-      let overrideReason = '';
-
-      // STRICT OVERRIDE: Require ALL timeframes (30m, 15m, 5m) to agree + VWAP confirmation
-      if (bothHigherTfBearish && vwapPos === 'below' && masterDecision.master_score >= 70) {
-        // ALL timeframes bearish + below VWAP + high master score → BUY_PE
-        overrideSignal    = 'BUY_PE';
-        overrideDirection = 'bearish';
-        overrideReason    = `STRONG bearish: 30m=${mtf30m} 15m=${mtf15m} 5m=${mtf5m} VWAP=${vwapPos} master=${masterDecision.master_score}`;
-      } else if (bothHigherTfBullish && vwapPos === 'above' && masterDecision.master_score >= 70) {
-        // ALL timeframes bullish + above VWAP + high master score → BUY_CE
-        overrideSignal    = 'BUY_CE';
-        overrideDirection = 'bullish';
-        overrideReason    = `STRONG bullish: 30m=${mtf30m} 15m=${mtf15m} 5m=${mtf5m} VWAP=${vwapPos} master=${masterDecision.master_score}`;
-      }
-      // REMOVED: Weak override conditions that were causing wrong trades
-
-      // ── CONSECUTIVE LOSS PROTECTION ───────────────────────────────────────
-      // If we've had 2+ consecutive losses at the same strike, skip that strike
-      const recentClosed = await require('../models/ScalpingTrade').find({
-        sessionId: state.session._id,
-        status: 'closed',
-        result: 'LOSS',
-      }).sort({ closedAt: -1 }).limit(3).lean();
-
-      const overrideAtm = payload.actual_atm_strike || Math.round(spotPrice / 50) * 50;
-      let overrideStrike = overrideAtm;
-
-      if (recentClosed.length >= 2) {
-        const lastTwoSameStrike = recentClosed[0]?.strike === recentClosed[1]?.strike;
-        const lastStrike = recentClosed[0]?.strike;
-        if (lastTwoSameStrike && lastStrike === overrideAtm) {
-          // 2 consecutive losses at ATM — try support/resistance strike instead
-          const mtfConfluence = aggMtfNow?.confluence_zones || [];
-          const supportLevel  = payload.market_structure?.key_levels?.support?.[0];
-          const resistLevel   = payload.market_structure?.key_levels?.resistance?.[0];
-
-          if (overrideDirection === 'bearish' && supportLevel) {
-            // For PE, use the strike nearest to support
-            overrideStrike = Math.round(supportLevel / 50) * 50;
-          } else if (overrideDirection === 'bullish' && resistLevel) {
-            // For CE, use the strike nearest to resistance
-            overrideStrike = Math.round(resistLevel / 50) * 50;
-          } else {
-            // Fallback: shift one strike in the direction
-            overrideStrike = overrideDirection === 'bullish'
-              ? overrideAtm - 50  // ITM CE for bullish
-              : overrideAtm + 50; // ITM PE for bearish
-          }
-          logger.warn({
-            lastStrike, overrideAtm, overrideStrike, overrideDirection,
-          }, '[engine] Consecutive losses at ATM — shifting to support/resistance strike');
-        }
-      }
-
-      const canOverride = overrideSignal !== null && masterDecision.master_score >= 55;
-
-      if (canOverride) {
-        logger.warn({
-          overrideSignal, overrideDirection, overrideStrike,
-          globalBias: globalBiasNow, masterScore: masterDecision.master_score,
-          mtf30m, mtf15m, mtf5m, vwapPos, overrideReason,
-          aiReasoning: institutionalEntryDecision.reasoning,
-        }, '[engine] LOCAL+GLOBAL OVERRIDE: entering based on price action alignment');
-
-        await engineLogger.logEvent({
-          sessionId: state.session._id,
-          eventType: 'global_bias_override',
-          level: 'warn',
-          message: `Override: ${overrideSignal} @ ${overrideStrike} | ${overrideReason}`,
-          data: { overrideSignal, overrideDirection, overrideStrike, globalBias: globalBiasNow, masterScore: masterDecision.master_score, overrideReason },
-        });
-
-        institutionalEntryDecision = {
-          should_enter: true,
-          signal: overrideSignal,
-          strike: overrideStrike,
-          option_type: overrideStrike === overrideAtm ? 'ATM' : 'ITM',
-          strike_selection_reason: 'local_global_override',
-          trade_type: 'SCALP',
-          hold_duration_seconds: 90,
-          confidence: 7,
-          min_target_achievable: true,
-          expected_points: Number(settings.targetPoints) || 8,
-          breakout_probability: 60,
-          direction: overrideDirection,
-          reasoning: `Override: ${overrideReason}. AI said: ${institutionalEntryDecision.reasoning?.slice(0,80)}`,
-          suggested_sl_points: Number(settings.slPoints) || 10,
-          suggested_target_points: Number(settings.targetPoints) || 8,
-        };
-      } else {
-        logger.warn({
-          shouldEnter:         institutionalEntryDecision.should_enter,
-          minTargetAchievable: institutionalEntryDecision.min_target_achievable,
-          confidence:          institutionalEntryDecision.confidence,
-          reasoning:           institutionalEntryDecision.reasoning,
-          globalBias:          globalBiasNow,
-          localBullish, localBearish, bothHigherTfBearish, bothHigherTfBullish,
-          mtf30m, mtf15m, mtf5m, vwapPos,
-          masterScore:         masterDecision.master_score,
-        }, '[engine] NO override available — local and global signals conflict or master too low');
-        return;
-      }
+      logger.info({
+        shouldEnter:         institutionalEntryDecision.should_enter,
+        minTargetAchievable: institutionalEntryDecision.min_target_achievable,
+        confidence:          institutionalEntryDecision.confidence,
+        reasoning:           institutionalEntryDecision.reasoning,
+      }, '[engine] Hybrid engine returned NO_TRADE — respecting decision (no override)');
+      return;
     }
 
     if (institutionalEntryDecision.confidence < (settings.minConfidence || 6)) {
