@@ -202,6 +202,8 @@ function familyOf(entryType) {
   if (entryType === 'OPENING_DRIVE_FAILURE')          return 'reversal';
   if (entryType === 'MICRO_DELTA_FLIP')               return 'momentum_continuation';
   if (entryType === 'OI_MIGRATION_TREND')             return 'momentum_continuation';
+  // Phase 2 institutional fallback (cycle 31)
+  if (entryType === 'LIGHT_TREND_DRIFT_SCALP')         return 'momentum_continuation';
   return null;
 }
 

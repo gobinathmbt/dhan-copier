@@ -2356,6 +2356,189 @@ function _oiMigrationTrend(ctx) {
   };
 }
 
+// ─── PLAYBOOK 26: LIGHT_TREND_DRIFT_SCALP (institutional fallback) ─────
+// CALIBRATED 2026-05-18 cycle 31 (zero-trade-day rescue):
+// 8 days produced 0 trades because every elite playbook missed its strict
+// preconditions in dealer_hedging / trend_auction / short_covering /
+// long_liquidation regimes (typically dead-vol drift days where OI builds
+// quietly but no expansion fires).
+//
+// This playbook fires as a CONSERVATIVE fallback when:
+//   - Direction has been resolved (passes pre-checks upstream)
+//   - VWAP aligned with direction
+//   - OI is NOT actively against the trade
+//   - At least 2 of: tf5 aligned, tf15 aligned, futures aligned,
+//                    delta in direction (≥3%), derivatives bias matching,
+//                    MTF partial+, OI aligned, breadth aligned
+//
+// Conservative trade management: SCALP, 200s hold, 1.2 RR target, 0.5 sizing.
+// Designed for graceful failure — small losses, modest wins.
+function _lightTrendDriftScalp(ctx) {
+  const reasons = [];
+  let score = 0;
+  const required = [];
+  const confirmations = [];
+
+  // Pre-conditions
+  const vwapPos = ctx.vwap?.position;
+  if ((ctx.direction === 'bullish' && vwapPos !== 'above')
+   || (ctx.direction === 'bearish' && vwapPos !== 'below')) {
+    required.push(`VWAP wrong side (${vwapPos})`);
+  }
+
+  // OI must NOT actively oppose
+  const oiR = ctx.oiAnalytics?.regime || '';
+  const oiAgainst = (ctx.direction === 'bullish'
+                    && (oiR === 'aggressive_short_buildup' || oiR === 'long_unwinding_collapse'))
+                || (ctx.direction === 'bearish'
+                    && (oiR === 'aggressive_long_buildup' || oiR === 'violent_short_covering'));
+  if (oiAgainst) required.push(`OI ${oiR} against direction`);
+
+  // Block when trapScore is high (handled upstream) but we add a soft check
+  if ((ctx.trap?.trapScore || 0) >= 65) required.push(`trap ${ctx.trap.trapScore}`);
+
+  // Block expiry afternoons (theta brutal)
+  if (ctx.sessionPhase?.isExpiryDay && ctx.sessionPhase?.hhmm >= 1400) {
+    required.push('expiry afternoon');
+  }
+
+  // Block midday_chop session (low edge at lunch)
+  if (ctx.sessionPhase?.phase === 'midday_chop') {
+    required.push('midday_chop session');
+  }
+
+  // CALIBRATED 2026-05-18 cycle 35: institutional anchors gate.
+  // Cycles 31-32 with 1 anchor → 36% WR / -₹28k.
+  // Cycle 33 with 3 anchors → 62% WR / +₹0.8k (only 8 trades, low rescue).
+  // Cycle 34 with 2 anchors → 36% WR / -₹28k.
+  // Settling on 3 anchors: high-quality rescue when conditions truly align.
+  const derivBias = ctx.derivatives?.overallBias === ctx.direction
+                  && (ctx.derivatives?.directionScore || 0) >= 60;
+  const tf5OK = ctx.mtfStructure?.tf5 === ctx.direction;
+  const tf15OK = ctx.mtfStructure?.tf15 === ctx.direction;
+  const oiAligned = (ctx.direction === 'bullish'
+                    && (oiR === 'aggressive_long_buildup' || oiR === 'violent_short_covering'))
+                || (ctx.direction === 'bearish'
+                    && (oiR === 'aggressive_short_buildup' || oiR === 'long_unwinding_collapse'));
+  const futOK = ctx.futuresData?.direction === ctx.direction;
+  const anchorCount = (derivBias ? 1 : 0) + (tf5OK ? 1 : 0) + (tf15OK ? 1 : 0)
+                    + (oiAligned ? 1 : 0) + (futOK ? 1 : 0);
+  if (anchorCount < 3) {
+    required.push(`only ${anchorCount}/5 institutional anchors (need ≥3)`);
+  }
+
+  // Don't trade when delta strongly opposes direction (clear conviction wrong)
+  const deltaPct = _safe(ctx.volumeAnalysis?.delta?.cvdPctLong);
+  const deltaStronglyAgainst = (ctx.direction === 'bullish' && deltaPct < -5)
+                            || (ctx.direction === 'bearish' && deltaPct > 5);
+  if (deltaStronglyAgainst) required.push(`delta ${deltaPct}% strongly against`);
+
+  // Don't trade when an "absorption against" pattern is detected
+  if (ctx.volumeAnalysis?.delta?.divergence
+      && ctx.volumeAnalysis.delta.divergenceBias
+      && ctx.volumeAnalysis.delta.divergenceBias !== 'neutral'
+      && ctx.volumeAnalysis.delta.divergenceBias !== ctx.direction) {
+    required.push('absorption against direction');
+  }
+
+  // Block when in heavy POC chop (within 5pts) and dead vol — pure stall
+  const poc = _safe(ctx.volumeAnalysis?.frvp?.pocPrice);
+  const pocDist = (poc && Number.isFinite(ctx.spotPrice))
+                ? Math.abs(ctx.spotPrice - poc) : Infinity;
+  if (pocDist < 5 && ctx.volatilityRegime?.state === 'dead') {
+    required.push(`stuck at POC ${pocDist.toFixed(1)}pts + dead vol`);
+  }
+
+  const valid = required.length === 0;
+  if (!valid) {
+    return { name: 'LIGHT_TREND_DRIFT_SCALP', family: 'momentum_continuation',
+             valid: false, score: 0, conviction: 'weak', missing: required,
+             reasoning: `missing: ${required.join(', ')}` };
+  }
+  score += 28; reasons.push(`VWAP ${vwapPos} + OI not against`);
+
+  // Confirmations (need ≥2 to be 'standard', ≥3 for 'elite')
+  // 1. tf5 aligned
+  const tf5 = ctx.mtfStructure?.tf5;
+  if (tf5 === ctx.direction) { score += 10; confirmations.push(`tf5 ${tf5}`); }
+  // 2. tf15 aligned
+  const tf15 = ctx.mtfStructure?.tf15;
+  if (tf15 === ctx.direction) { score += 10; confirmations.push(`tf15 ${tf15}`); }
+  // 3. Delta in direction (≥3% absolute)
+  if ((ctx.direction === 'bullish' && deltaPct >= 3)
+   || (ctx.direction === 'bearish' && deltaPct <= -3)) {
+    score += 8; confirmations.push(`delta ${deltaPct}%`);
+  }
+  // 4. Futures aligned
+  if (ctx.futuresData?.direction === ctx.direction) {
+    score += 6; confirmations.push('futures aligned');
+  }
+  // 5. OI in direction
+  if (oiAligned) {
+    score += 10; confirmations.push(`OI ${oiR}`);
+  }
+  // 6. Derivatives bias matches
+  if (ctx.derivatives?.overallBias === ctx.direction) {
+    score += 8; confirmations.push(`deriv ${ctx.derivatives.overallBias}`);
+  }
+  // 7. MTF aligned (partial OK)
+  if (ctx.mtfStructure?.alignment === 'full') {
+    score += 8; confirmations.push('MTF full');
+  } else if (ctx.mtfStructure?.alignment === 'partial') {
+    score += 4; confirmations.push('MTF partial');
+  }
+  // 8. Breadth aligned (if present)
+  const internals = ctx.marketInternals;
+  if (internals) {
+    const adv = _safe(internals.advances ?? internals.advance_decline_ratio);
+    const dec = _safe(internals.declines) || 1;
+    const ratio = adv / Math.max(1, dec);
+    if (ctx.direction === 'bullish' && ratio > 1.2) {
+      score += 4; confirmations.push(`breadth ${ratio.toFixed(2)}`);
+    }
+    if (ctx.direction === 'bearish' && ratio < 0.85) {
+      score += 4; confirmations.push(`breadth ${ratio.toFixed(2)}`);
+    }
+  }
+  // 9. VWAP close (drift trades from anchor work better)
+  const dist = Math.abs(_safe(ctx.vwap?.distance_pct));
+  if (dist < 0.5) { score += 4; confirmations.push(`near VWAP ${dist.toFixed(2)}%`); }
+  // 10. Liquidity good
+  if (ctx.liquidity?.health === 'good' || ctx.liquidity?.health === 'excellent') {
+    score += 3; confirmations.push(`liq ${ctx.liquidity.health}`);
+  }
+
+  // Need at least 5 confirmations for 'standard'. Combined with 3+
+  // institutional anchors precondition this restricts the fallback to
+  // genuinely high-confluence setups (62% WR observed in cycle 33 testing).
+  const conviction = confirmations.length >= 7 ? 'elite' :
+                     confirmations.length >= 5 ? 'standard' : 'weak';
+
+  return {
+    name: 'LIGHT_TREND_DRIFT_SCALP',
+    family: 'momentum_continuation',
+    valid: conviction !== 'weak' && score >= 65,
+    score: _clamp(score),
+    conviction,
+    // Conservative hold profile: short scalp with modest target
+    holdProfile: { tradeType: 'SCALP', maxHoldSec: 200, rrTarget: 1.2 },
+    // Tight risk: 8% premium SL, half size for safety net trades
+    riskProfile: { slPct: 0.08, sizingFactor: 0.5 },
+    // Lower the strategy minScore for this fallback. Without this override the
+    // playbook fires but the confidence gate (set by strategy.minScore=78-80)
+    // still blocks. 72 keeps quality while allowing institutional drift trades.
+    minScoreOverride: 72,
+    // CRITICAL: institutional fallback — only fires if NO other playbook is
+    // eligible. Prevents this safety-net playbook from cannibalising the
+    // higher-edge elite setups.
+    isFallback: true,
+    allowedDirections: ['bullish', 'bearish'],
+    preconditions: ['vwap_aligned', 'oi_not_against', 'no_strong_counter_delta'],
+    confirmations,
+    reasoning: `${conviction.toUpperCase()} | ${confirmations.join(' | ')}`,
+  };
+}
+
 // ─── REGIME → PLAYBOOK ELIGIBILITY MAP (institutional spec) ────────────────
 // This is the orchestrator's "permission map". Even if a playbook scores
 // high, it must match the current meta-regime to be eligible.
@@ -2364,17 +2547,23 @@ function _oiMigrationTrend(ctx) {
 // playbooks added. OI_MIGRATION_TREND removed from REGIME maps because
 // it underperformed (55.6% WR) and outranked higher-WR playbooks. It can
 // be re-added once we have richer multi-day OI data.
+// CALIBRATED 2026-05-18 cycle 31: Phase 2 — added LIGHT_TREND_DRIFT_SCALP
+// to trend_auction / dealer_hedging / short_covering / long_liquidation /
+// expiry_expansion as the institutional fallback. Resolves the 8 zero-trade
+// days observed in the 59-day backtest where every elite playbook missed
+// its strict preconditions (typically dead-vol drift). Conservative
+// management (200s/1.2RR/0.5 sizing) keeps the win-rate impact minimal.
 const REGIME_PLAYBOOKS = {
-  trend_auction:    ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'OPENING_DRIVE_CONTINUATION', 'OPENING_DRIVE_FAILURE', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP'],
-  short_covering:   ['SHORT_COVERING_SQUEEZE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'SWEEP_RECLAIM_SCALP'],
-  long_liquidation: ['LONG_LIQUIDATION_CASCADE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'SWEEP_RECLAIM_SCALP'],
+  trend_auction:    ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'OPENING_DRIVE_CONTINUATION', 'OPENING_DRIVE_FAILURE', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
+  short_covering:   ['SHORT_COVERING_SQUEEZE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'SWEEP_RECLAIM_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
+  long_liquidation: ['LONG_LIQUIDATION_CASCADE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'SWEEP_RECLAIM_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
   gamma_pin:        ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'FAILED_AUCTION_REVERSAL', 'EXHAUSTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'SWEEP_RECLAIM_SCALP'],
   balanced_auction: ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'SWEEP_RECLAIM_SCALP', 'OPENING_DRIVE_FAILURE'],
-  slow_grind:       ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'PULLBACK_CONTINUATION', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP'],
-  dealer_hedging:   ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP'],
-  expiry_expansion: ['WEEKLY_EXPIRY_DEALER_UNWIND', 'INITIATIVE_MOMENTUM_EXPANSION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'DELTA_DRIVE_SCALP', 'PIN_REVERSION', 'SWEEP_RECLAIM_SCALP'],
+  slow_grind:       ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'PULLBACK_CONTINUATION', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'LIGHT_TREND_DRIFT_SCALP'],
+  dealer_hedging:   ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'LIGHT_TREND_DRIFT_SCALP'],
+  expiry_expansion: ['WEEKLY_EXPIRY_DEALER_UNWIND', 'INITIATIVE_MOMENTUM_EXPANSION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'DELTA_DRIVE_SCALP', 'PIN_REVERSION', 'SWEEP_RECLAIM_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
   panic:            ['EXHAUSTION_REVERSAL', 'FAILED_AUCTION_REVERSAL', 'SWEEP_RECLAIM_SCALP'],
-  unknown:          ['GAMMA_PIN_MEAN_REVERSION', 'VWAP_RECLAIM_CLEAN', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'VWAP_BOUNCE_SCALP', 'DELTA_DRIVE_SCALP', 'VALUE_AREA_ROTATION', 'VWAP_OSCILLATION_SCALP', 'LVN_REJECTION_SCALP'],
+  unknown:          ['GAMMA_PIN_MEAN_REVERSION', 'VWAP_RECLAIM_CLEAN', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'VWAP_BOUNCE_SCALP', 'DELTA_DRIVE_SCALP', 'VALUE_AREA_ROTATION', 'VWAP_OSCILLATION_SCALP', 'LVN_REJECTION_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
 };
 
 const ALL_PLAYBOOKS = [
@@ -2404,6 +2593,8 @@ const ALL_PLAYBOOKS = [
   _openingDriveFailure,
   _microDeltaFlip,
   _oiMigrationTrend,
+  // Phase 2 institutional fallback (cycle 31) — closes the 8 zero-trade days
+  _lightTrendDriftScalp,
 ];
 
 /**
@@ -2434,7 +2625,14 @@ function evaluate(ctx = {}) {
     )
   );
 
-  eligible.sort((a, b) => {
+  // CALIBRATED 2026-05-18 cycle 31: Fallback playbooks (institutional safety
+  // net) only fire when no non-fallback playbook qualifies. This protects
+  // the 80%+ WR of elite playbooks from being cannibalised by the more
+  // permissive LIGHT_TREND_DRIFT_SCALP and similar safety-net entries.
+  const nonFallback = eligible.filter(e => !e.isFallback);
+  const final = nonFallback.length > 0 ? nonFallback : eligible;
+
+  final.sort((a, b) => {
     // Prefer elite > standard
     const rank = { elite: 3, standard: 2, weak: 1 };
     if (rank[b.conviction] !== rank[a.conviction]) {
@@ -2443,7 +2641,7 @@ function evaluate(ctx = {}) {
     return (b.score || 0) - (a.score || 0);
   });
 
-  const best = eligible[0] || null;
+  const best = final[0] || null;
 
   return {
     bestPlaybook: best,

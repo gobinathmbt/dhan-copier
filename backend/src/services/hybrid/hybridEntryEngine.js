@@ -968,6 +968,15 @@ async function decide({
       strategy.tradeType  = playbook.bestProfile.tradeType  || strategy.tradeType;
       strategy.maxHoldSec = playbook.bestProfile.maxHoldSec || strategy.maxHoldSec;
     }
+    // CALIBRATED 2026-05-18 cycle 31: institutional fallback playbooks
+    // (LIGHT_TREND_DRIFT_SCALP) can lower the strategy minScore via
+    // playbook.minScoreOverride. Used to rescue zero-trade days where elite
+    // setups don't qualify but a lighter, well-confirmed drift scalp can
+    // still produce edge. Cap at the lower of strategy.minScore and override
+    // so we never *increase* threshold accidentally.
+    if (Number.isFinite(playbook.bestPlaybook.minScoreOverride)) {
+      strategy.minScore = Math.min(strategy.minScore, playbook.bestPlaybook.minScoreOverride);
+    }
   } else if (!entryType.bestType || entryType.bestType === 'GENERIC_SCALP') {
     // CALIBRATED: no playbook AND no legacy entry-type → don't trade.
     // (Generic scalp fallback was the lowest-edge bucket in the backtest.)
@@ -1022,7 +1031,8 @@ async function decide({
   })();
   if (pocDist < 10 && volatilityRegime?.state !== 'expansion'
       && entryType.bestType !== 'MEAN_REVERSION'
-      && entryType.bestType !== 'VWAP_RECLAIM') {
+      && entryType.bestType !== 'VWAP_RECLAIM'
+      && entryType.bestType !== 'LIGHT_TREND_DRIFT_SCALP') {
     noTradeReasons.push(`POC distance ${pocDist.toFixed(1)}pts (<10) with no expansion`);
   }
   // (c) Gamma-pin within 8pts of pinning level + no expansion → pure pin zone
@@ -1049,11 +1059,14 @@ async function decide({
   }
   // (f) Dealer-hedging (negative gamma) but ATR percentile < 30 = stall zone
   //     before the next big move. Skip until volatility expands.
+  //     EXCEPT: LIGHT_TREND_DRIFT_SCALP is institutionally designed for
+  //     this exact dead-vol drift profile (calibrated 2026-05-18 cycle 31).
   if (metaRegime?.state === 'dealer_hedging'
       && Number.isFinite(volatilityRegime?.atrPercentile)
       && volatilityRegime.atrPercentile < 30
       && entryType.bestType !== 'MEAN_REVERSION'
-      && entryType.bestType !== 'VWAP_RECLAIM') {
+      && entryType.bestType !== 'VWAP_RECLAIM'
+      && entryType.bestType !== 'LIGHT_TREND_DRIFT_SCALP') {
     noTradeReasons.push(`dealer_hedging + ATR pct ${volatilityRegime.atrPercentile} (<30) — stall zone`);
   }
   // (g) Momentum/breakout types REQUIRE active volatility. Dead-vol momentum
