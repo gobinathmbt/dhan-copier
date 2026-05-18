@@ -161,12 +161,20 @@ function _noTrade(reason, extras = {}) {
 }
 
 function _computeFreshness(aggregator) {
-  // We don't strictly know the tick age here, so reuse aggregator timestamp.
-  // If the aggregator has a `meta.timestamp` we treat any age <= 10s as fresh.
+  // The aggregator timestamp represents when the cycle began fetching data.
+  // Between then and the score check, the engine runs ~8 algorithms (gamma,
+  // OI, multiTimeframe, etc.) which can take 8-20 seconds. The freshness
+  // window must accommodate this — otherwise every cycle fails the
+  // stale_data gate.
+  //
+  // CALIBRATED 2026-05-18: was 10s (too strict — blocked 6/8 cycles in live
+  // session). Now 90s = one full cycle + buffer. The actual tick-age is
+  // checked separately by the live-feed provider; this gate just ensures the
+  // payload itself isn't from a previous session.
   const ts = aggregator?.payload?.meta?.timestamp || aggregator?.payload?.timestamp;
   if (!ts) return true;
   const age = Date.now() - new Date(ts).getTime();
-  return Number.isFinite(age) && age >= 0 && age <= 10_000;
+  return Number.isFinite(age) && age >= 0 && age <= 90_000;
 }
 
 // ────────────────────────────────────────────────────────────────────────────

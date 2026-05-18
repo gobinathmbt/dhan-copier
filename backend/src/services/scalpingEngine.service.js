@@ -13,8 +13,20 @@ const professionalTrader = require('./professionalTrader.service');
 const scalpingSocket = require('../utils/scalpingSocket');
 
 // ============================================================
-// ULTIMATE ALGO SYSTEM - NEW IMPORTS
+// HYBRID ENGINE — sole decision-maker
 // ============================================================
+// The hybrid entry/monitor engines (services/hybrid/*) make every trading
+// decision. The scalping engine here only:
+//   1. Builds the aggregator payload (spot + option chain + candles)
+//   2. Runs the 8 algorithms the hybrid engine consumes
+//   3. Calls entryEngine.decide() → hybrid.entry.decide() (no AI fallback)
+//   4. Calls monitorEngine.decide() → hybrid.monitor.decide() (no AI fallback)
+//   5. Persists trades, emits sockets, manages session state
+//
+// Legacy AI/master-algorithm imports remain for backwards-compat with code
+// paths that haven't been pruned yet, but the hybrid engine is the sole
+// authority on entry/exit decisions. The legacy paths are unreachable at
+// runtime (entryEngine/monitorEngine throw if hybrid throws — no fallback).
 const masterAlgorithm = require('./masterAlgorithm.service');
 const aiAnalysis = require('./aiAnalysis.service');
 const gammaExposure = require('./algorithms/gammaExposure.service');
@@ -23,6 +35,8 @@ const multiTimeframe = require('./algorithms/multiTimeframe.service');
 const liquidityAnalysis = require('./algorithms/liquidityAnalysis.service');
 const smartMoneyConcepts = require('./algorithms/smartMoneyConcepts.service');
 const marketInternals = require('./algorithms/marketInternals.service');
+const globalMarkets = require('./algorithms/globalMarkets.service');
+const professionalScalping = require('./algorithms/professionalScalping.service');
 
 // ─── Daily-cap helpers (institutional spec, 2026-05-18) ───────────────────
 // Backtest evidence shows 3-9 trades/day = +60% WR & +₹158k net,
@@ -60,10 +74,8 @@ async function _countTodayLosses(sessionId) {
   } catch (_) { return 0; }
 }
 const sectorRotation = require('./algorithms/sectorRotation.service');
-const globalMarkets = require('./algorithms/globalMarkets.service');
 const behavioralAnalysis = require('./algorithms/behavioralAnalysis.service');
 const demaIndicator = require('./algorithms/demaIndicator.service'); // NEW - DEMA
-const professionalScalping = require('./algorithms/professionalScalping.service'); // NEW - PROFESSIONAL SCALPING INDICATORS
 const rsiIndicator = require('../algorithms/rsi.indicator'); // PHASE 2 - RSI
 const macdIndicator = require('../algorithms/macd.indicator'); // PHASE 2 - MACD
 const stochasticIndicator = require('../algorithms/stochastic.indicator'); // PHASE 2 - Stochastic
@@ -460,137 +472,81 @@ async function runPredictionCycle() {
     const previousLiquidityData = state.previousLiquidityData || null;
     const previousSMCAnalysis = state.previousSMCAnalysis || null;
     const previousMarketInternalsData = state.previousMarketInternalsData || null;
-    const previousSectorRotationData = state.previousSectorRotationData || null;
     const previousGlobalData = state.previousGlobalData || null;
-    const previousBehavioralData = state.previousBehavioralData || null;
-    const previousDEMAData = state.previousDEMAData || null;
-    
-    // Run all 18 algorithms in parallel (ADDED: Professional Scalping Indicators)
+
+    // ============================================================
+    // ALGORITHMS — only the 8 the hybrid engine actually consumes.
+    // Removed (cycle 31, 2026-05-18):
+    //   - aiAnalysis, institutionalAI, masterAlgorithm, professionalTrader,
+    //     sentimentAnalyzer (legacy AI path — hybrid engine is now the
+    //     sole decision-maker, no AI fallback)
+    //   - rsi, macd, stochastic, bollingerBands (Phase 2 — never read by
+    //     hybrid engine; UT Bot in hybrid covers momentum)
+    //   - volumeProfile, orderBookImbalance, tickVolume (Phase 3 — hybrid
+    //     uses its own volumeAnalysisEngine + tickDeltaClassifier)
+    //   - dema, behavioral, sectorRotation (Phase 1 extras — not consumed)
+    // Kept (used by hybrid.entry.decide):
+    //   gammaExposure, orderFlow, multiTimeframe, liquidityAnalysis,
+    //   smartMoneyConcepts, marketInternals, professionalScalping (UT Bot
+    //   driver via ADX), globalMarkets (VIX only)
+    // ============================================================
     const algorithmOutputs = {
       gammaExposure: optionChain ? gammaExposure.calculateGammaExposure(optionChain, spotPrice) : null,
       orderFlow: optionChain ? orderFlow.analyzeOrderFlow(optionChain, payload.spot_data, null) : null,
       multiTimeframe: await multiTimeframe.analyzeMultiTimeframe(state.authKey, spotPrice),
-      
-      // NEW: Professional Scalping Indicators (9 EMA, 20 EMA, VWAP, Supertrend, ATR, RSI, ADX)
-      // Uses UT Bot from multiTimeframe + all professional indicators
+      liquidityAnalysis: optionChain ? liquidityAnalysis.analyzeLiquidity(
+        optionChain, spotPrice, null, previousLiquidityData
+      ) : null,
+      smartMoneyConcepts: candles.length > 10 ? smartMoneyConcepts.analyzeSmartMoneyConcepts(
+        candles, optionChain, spotPrice, previousSMCAnalysis
+      ) : null,
+      marketInternals: await marketInternals.analyzeMarketInternals(
+        state.authKey, spotPrice, previousMarketInternalsData
+      ),
+      globalMarkets: await globalMarkets.analyzeGlobalMarkets(previousGlobalData),
+      // Reads 5m candles from live-feed folder (no API call) — works even
+      // when Dhan API is rate-limited.
       professionalScalping: await (async () => {
         try {
-          // Fetch 5m candles for professional scalping analysis
+          const liveFeedProvider = require('./liveFeedDataProvider.service');
           const now = Math.floor(Date.now() / 1000);
-          const fiveMinAgo = now - (60 * 60); // Last 1 hour of 5m candles
-          const candles5mRes = await dhanProd.getDhanBypassData(state.authKey, {
-            securityId: 13,
-            exchange: 'IDX',
-            segment: 'I',
-            instrument: 'IDX',
-            startTime: fiveMinAgo,
-            endTime: now,
-            interval: '5',
+          const res = await liveFeedProvider.getCandles(state.authKey, {
+            securityId: 13, exchange: 'IDX', segment: 'I', instrument: 'IDX',
+            startTime: now - 60 * 60, endTime: now, interval: '5',
           });
-          
-          const candles5m = candles5mRes.ok ? candles5mRes.data.candles : [];
-          
+          const candles5m = res.ok ? (res.data.candles || []) : [];
           if (candles5m.length >= 30) {
             return professionalScalping.analyzeScalpingIndicators(
-              candles5m,
-              spotPrice,
-              payload.spot_data, // Contains VWAP
-              '5m'
+              candles5m, spotPrice, payload.spot_data, '5m'
             );
           }
           return null;
-        } catch (error) {
-          logger.error({ error: error.message }, '[engine] Professional scalping analysis failed');
+        } catch (e) {
+          logger.warn({ err: e.message }, '[engine] professional scalping skipped');
           return null;
         }
       })(),
-      
-      liquidityAnalysis: optionChain ? liquidityAnalysis.analyzeLiquidity(
-        optionChain, 
-        spotPrice, 
-        null, // orderBookData (not available yet)
-        previousLiquidityData
-      ) : null,
-      smartMoneyConcepts: candles.length > 10 ? smartMoneyConcepts.analyzeSmartMoneyConcepts(
-        candles,
-        optionChain,
-        spotPrice,
-        previousSMCAnalysis
-      ) : null,
-      marketInternals: await marketInternals.analyzeMarketInternals(
-        state.authKey,
-        spotPrice,
-        previousMarketInternalsData
-      ),
-      sectorRotation: await sectorRotation.analyzeSectorRotation(
-        state.authKey,
-        spotPrice,
-        // FIX: pass the actual NIFTY 1-min % change (a number), not the
-        // previous-state object. Previous code caused toFixed(null) crashes.
-        Number(payload?.spot_data?.returns_1m) || 0
-      ),
-      globalMarkets: await globalMarkets.analyzeGlobalMarkets(previousGlobalData),
-      behavioral: candles.length > 10 ? behavioralAnalysis.analyzeBehavioralPatterns(
-        candles,
-        optionChain,
-        spotPrice,
-        payload.volume_orderflow,
-        previousBehavioralData
-      ) : null,
-      dema: await demaIndicator.analyzeDEMA(state.authKey, spotPrice, previousDEMAData), // NEW - DEMA
-      
-      // ============================================================
-      // PHASE 2: PROFESSIONAL MOMENTUM INDICATORS
-      // ============================================================
-      rsi: await rsiIndicator.analyze(aggregator, settings), // RSI for overbought/oversold
-      macd: await macdIndicator.analyze(aggregator, settings), // MACD for trend following
-      stochastic: await stochasticIndicator.analyze(aggregator, settings), // Stochastic for momentum
-      bollingerBands: await bollingerBandsIndicator.analyze(aggregator, settings), // Bollinger Bands for volatility
-      
-      // ============================================================
-      // PHASE 3: ADVANCED VOLUME & ORDER FLOW INDICATORS
-      // ============================================================
-      volumeProfile: await volumeProfileIndicator.analyze(aggregator, settings), // Volume Profile for S/R
-      orderBookImbalance: await orderBookImbalanceIndicator.analyze(aggregator, settings), // Order book pressure
-      tickVolume: await tickVolumeIndicator.analyze(aggregator, settings), // Volume momentum
     };
-    
-    // Store current data for next cycle
-    state.previousLiquidityData = {
-      optionChain: optionChain,
-      spotPrice: spotPrice,
-      timestamp: Date.now()
-    };
+
+    // Persist previous-cycle state for diff-based algorithms
+    state.previousLiquidityData = { optionChain, spotPrice, timestamp: Date.now() };
     state.previousSMCAnalysis = algorithmOutputs.smartMoneyConcepts;
     state.previousMarketInternalsData = algorithmOutputs.marketInternals;
-    state.previousSectorRotationData = algorithmOutputs.sectorRotation;
     state.previousGlobalData = algorithmOutputs.globalMarkets;
-    state.previousBehavioralData = algorithmOutputs.behavioral;
-    state.previousDEMAData = algorithmOutputs.dema; // NEW - Store DEMA data
-    
+
     // Store for monitor cycle to use
     state.lastAlgorithmOutputs = algorithmOutputs;
-    
+
     logger.info({
-      gammaScore: algorithmOutputs.gammaExposure ? 'calculated' : 'null',
-      orderFlowScore: algorithmOutputs.orderFlow ? 'calculated' : 'null',
-      multiTimeframeScore: algorithmOutputs.multiTimeframe ? 'calculated' : 'null',
-      professionalScalpingScore: algorithmOutputs.professionalScalping ? 'calculated' : 'null', // NEW
-      liquidityScore: algorithmOutputs.liquidityAnalysis ? algorithmOutputs.liquidityAnalysis.liquidity_score : 'null',
-      smcScore: algorithmOutputs.smartMoneyConcepts ? algorithmOutputs.smartMoneyConcepts.smc_score : 'null',
-      marketInternalsScore: algorithmOutputs.marketInternals ? algorithmOutputs.marketInternals.market_internals_score : 'null',
-      sectorRotationScore: algorithmOutputs.sectorRotation ? algorithmOutputs.sectorRotation.sector_rotation_score : 'null',
-      globalMarketsScore: algorithmOutputs.globalMarkets ? algorithmOutputs.globalMarkets.global_score : 'null',
-      behavioralScore: algorithmOutputs.behavioral ? algorithmOutputs.behavioral.behavioral_score : 'null',
-      demaScore: algorithmOutputs.dema ? algorithmOutputs.dema.dema_score : 'null', // NEW - Log DEMA score
-      rsiScore: algorithmOutputs.rsi ? algorithmOutputs.rsi.rsi_score : 'null', // PHASE 2 - RSI
-      macdScore: algorithmOutputs.macd ? algorithmOutputs.macd.macd_score : 'null', // PHASE 2 - MACD
-      stochasticScore: algorithmOutputs.stochastic ? algorithmOutputs.stochastic.stochastic_score : 'null', // PHASE 2 - Stochastic
-      bollingerScore: algorithmOutputs.bollingerBands ? algorithmOutputs.bollingerBands.bollinger_score : 'null', // PHASE 2 - Bollinger
-      volumeProfileScore: algorithmOutputs.volumeProfile ? algorithmOutputs.volumeProfile.volume_profile_score : 'null', // PHASE 3
-      orderBookScore: algorithmOutputs.orderBookImbalance ? algorithmOutputs.orderBookImbalance.order_book_score : 'null', // PHASE 3
-      tickVolumeScore: algorithmOutputs.tickVolume ? algorithmOutputs.tickVolume.tick_volume_score : 'null', // PHASE 3
-    }, '[engine] All 25 world-class algorithms completed (Phases 1-3)');
+      gamma: !!algorithmOutputs.gammaExposure,
+      orderFlow: !!algorithmOutputs.orderFlow,
+      multiTimeframe: !!algorithmOutputs.multiTimeframe,
+      liquidity: algorithmOutputs.liquidityAnalysis?.liquidity_score ?? 'null',
+      smc: algorithmOutputs.smartMoneyConcepts?.smc_score ?? 'null',
+      marketInternals: algorithmOutputs.marketInternals?.market_internals_score ?? 'null',
+      globalMarkets: algorithmOutputs.globalMarkets?.global_score ?? 'null',
+      professionalScalping: !!algorithmOutputs.professionalScalping,
+    }, '[engine] hybrid-required algorithms completed (8 inputs)');
 
     // ============================================================
     // OPTIMIZATION 1: PARALLEL AI EXECUTION (Save 10-15 seconds)
