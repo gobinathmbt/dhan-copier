@@ -3925,9 +3925,13 @@ function _overnightOiShiftFollow(ctx) {
   return {
     name: 'OVERNIGHT_OI_SHIFT_FOLLOW',
     family: 'momentum_continuation',
-    valid: conviction !== 'weak',
-    score: _clamp(score),
-    conviction,
+    // CALIBRATED 2026-05-19 cycle 38: 0W/1L net -Rs.174 across cycles
+    // 28-37. The overnight-OI signal is interesting but the 600s SWING
+    // hold + early-morning entry combination has not shown edge in our
+    // backtest data. Disable until we have richer multi-day OI history.
+    valid: false,
+    score: 0,
+    conviction: 'weak',
     holdProfile: { tradeType: 'SWING', maxHoldSec: 600, rrTarget: 2.5 },
     riskProfile: { slPct: 0.12, sizingFactor: conviction === 'elite' ? 0.9 : 0.65 },
     minScoreOverride: 65,
