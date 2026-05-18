@@ -1,4 +1,4 @@
-// Deeper analyzer — looks at trade outcomes by score bucket, regime, session
+// Deeper analyzer -- looks at trade outcomes by score bucket, regime, session
 const fs = require('fs');
 const path = require('path');
 

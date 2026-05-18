@@ -18,13 +18,13 @@
  *      - If NO_TRADE, advance to next cycle
  *      - If trade fires, lock the option strike + entry LTP and simulate
  *   2. Trade simulation walks forward 1 option-chain snapshot at a time:
- *      - Hard SL hit → EXIT (LOSS)
- *      - Hard target hit → EXIT (WIN)
- *      - Max hold reached → EXIT at current LTP
+ *      - Hard SL hit -> EXIT (LOSS)
+ *      - Hard target hit -> EXIT (WIN)
+ *      - Max hold reached -> EXIT at current LTP
  *   3. After exit, cooldown for `cooldownSec`, then resume.
  *
  * Position sizing: 1 lot = 65 qty (NIFTY contract spec at the time of recording).
- * Brokerage: ₹40 flat per round-trip (Dhan).
+ * Brokerage: Rs.40 flat per round-trip (Dhan).
  *
  * Usage:
  *   node scripts/backtest-hybrid.js                  # all available days
@@ -35,7 +35,7 @@
 const fs = require('fs');
 const path = require('path');
 
-// ─── Log capture: every hybrid log entry + cycle/decision/trade events go
+// --- Log capture: every hybrid log entry + cycle/decision/trade events go
 // to a structured file under backend/logs/ for post-run debugging.
 const LOG_DIR  = path.resolve(__dirname, '../logs');
 if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
@@ -63,7 +63,7 @@ function _writeLog(level, source, message, data) {
 process.on('exit',   () => { try { _logStream.end(); } catch (_) {} });
 process.on('SIGINT', () => { try { _logStream.end(); } catch (_) {} process.exit(130); });
 
-// ─── Module-level stubs (must run BEFORE requiring hybrid) ────────────────
+// --- Module-level stubs (must run BEFORE requiring hybrid) ----------------
 const Module = require('module');
 const origRequire = Module.prototype.require;
 
@@ -154,11 +154,11 @@ const hybrid = require('../src/services/hybrid');
   hl.error = async (e = {}) => { _writeLog('error', `hybrid:${e.event || 'log'}`, e.message || '', e.data); };
 }
 
-// ─── IO helpers ────────────────────────────────────────────────────────────
+// --- IO helpers ------------------------------------------------------------
 const ROOT = path.resolve(__dirname, '../live-feed');
 const NIFTY_LOT_SIZE = 65;
-const LOTS_PER_TRADE = 5;                          // 5 lots → 325 qty per trade
-const ROUND_TRIP_BROKERAGE = 60;                   // ₹60 flat round-trip
+const LOTS_PER_TRADE = 5;                          // 5 lots -> 325 qty per trade
+const ROUND_TRIP_BROKERAGE = 60;                   // Rs.60 flat round-trip
 
 function readJsonl(file) {
   if (!fs.existsSync(file)) return [];
@@ -203,12 +203,12 @@ function epochSecToIstWeekday(t) {
   return arr[d.getUTCDay()];
 }
 
-// Convert recorded candle row {t,o,h,l,c,v} → standard form used by the engine.
+// Convert recorded candle row {t,o,h,l,c,v} -> standard form used by the engine.
 function normCandle(c) {
   return { o: c.o, h: c.h, l: c.l, c: c.c, v: c.v || 0, t: c.t };
 }
 
-// VWAP from cumulative TP × V / V over a candle stream
+// VWAP from cumulative TP x V / V over a candle stream
 function vwapFromCandles(candles) {
   let pv = 0, vv = 0;
   for (const c of candles) {
@@ -230,7 +230,7 @@ function trendStrength(candles, lookback = 10) {
   return { value, strength: value >= 25 ? 'strong' : value >= 18 ? 'moderate' : 'weak' };
 }
 
-// ─── Build inputs to the hybrid engine for a given cycle time ─────────────
+// --- Build inputs to the hybrid engine for a given cycle time -------------
 function buildCycleInputs(day, cycleEpoch, prev) {
   const meta = day.meta;
 
@@ -334,7 +334,7 @@ function buildCycleInputs(day, cycleEpoch, prev) {
       market_imbalance: tf5Trend === 'bullish' ? 1.4 : tf5Trend === 'bearish' ? 0.7 : 1.0,
       flow_quality: 'institutional',
     },
-    marketInternals: { advances: 1000, declines: 1000, vix: 14 },  // we don't have it — neutral
+    marketInternals: { advances: 1000, declines: 1000, vix: 14 },  // we don't have it -- neutral
     smartMoneyConcepts: { smc_bias: tf15Trend, smc_score: 60 },
     gammaExposure: null,
     globalMarkets: null,
@@ -364,7 +364,7 @@ function buildCycleInputs(day, cycleEpoch, prev) {
     futures_data: { build_up_type: tf5Trend === 'bullish' ? 'long_buildup' : tf5Trend === 'bearish' ? 'short_buildup' : 'unknown' },
   };
 
-  // Futures data — read from futures candles
+  // Futures data -- read from futures candles
   const fc5m  = day.futures5m.filter(c => c.t <= cycleEpoch);
   const lastFut = fc5m[fc5m.length - 1];
   const futChange1m = lastFut ? (fc5m[fc5m.length - 1]?.c - (fc5m[fc5m.length - 2]?.c || lastFut.c)) : 0;
@@ -416,7 +416,7 @@ function getOptionLtpAt(day, strike, side, epochSec) {
   return side === 'CE' ? row.ce.ltp : row.pe.ltp;
 }
 
-// ─── Trade simulator ──────────────────────────────────────────────────────
+// --- Trade simulator ------------------------------------------------------
 function simulateTrade(day, decision, entryEpoch) {
   const side = decision.option_type === 'CE' ? 'CE' : 'PE';
   const strike = decision.strike;
@@ -438,14 +438,14 @@ function simulateTrade(day, decision, entryEpoch) {
       return _closeTrade('TARGET', entryLtp, ltp, t - entryEpoch, decision);
     }
   }
-  // Max hold reached → exit at last available LTP
+  // Max hold reached -> exit at last available LTP
   const finalLtp = getOptionLtpAt(day, strike, side, exitDeadline);
   return _closeTrade('TIMEOUT', entryLtp, finalLtp ?? entryLtp, maxHoldSec, decision);
 }
 
 function _closeTrade(reason, entry, exit, heldSec, decision) {
   const pts = exit - entry;
-  const qty = LOTS_PER_TRADE * NIFTY_LOT_SIZE;     // e.g. 5 × 65 = 325 qty
+  const qty = LOTS_PER_TRADE * NIFTY_LOT_SIZE;     // e.g. 5 x 65 = 325 qty
   const grossPnl = pts * qty;
   const netPnl   = grossPnl - ROUND_TRIP_BROKERAGE;
   const result = netPnl > 0 ? 'WIN' : netPnl < 0 ? 'LOSS' : 'BE';
@@ -475,11 +475,11 @@ function _closeTrade(reason, entry, exit, heldSec, decision) {
   return trade;
 }
 
-// ─── Day backtest loop ────────────────────────────────────────────────────
+// --- Day backtest loop ----------------------------------------------------
 async function backtestDay(dayLabel) {
   const folder = path.join(ROOT, dayLabel + '_NIFTY_50');
   const meta = readJson(path.join(folder, 'metadata.json'));
-  if (!meta) { console.log(`  · ${dayLabel}: missing metadata, skipped`); return null; }
+  if (!meta) { console.log(`  * ${dayLabel}: missing metadata, skipped`); return null; }
 
   const candles1m = readJsonl(path.join(folder, 'candles-1m.jsonl')).map(normCandle);
   const candles5m = readJsonl(path.join(folder, 'candles-5m.jsonl')).map(normCandle);
@@ -487,13 +487,13 @@ async function backtestDay(dayLabel) {
   const futures5m = readJsonl(path.join(folder, 'futures-5m.jsonl')).map(normCandle);
   const optionChain = readJsonl(path.join(folder, 'option-chain.jsonl'));
 
-  if (!candles5m.length || !optionChain.length) { console.log(`  · ${dayLabel}: insufficient data, skipped`); return null; }
+  if (!candles5m.length || !optionChain.length) { console.log(`  * ${dayLabel}: insufficient data, skipped`); return null; }
 
   const day = { dayLabel, meta, candles1m, candles5m, candles15m, futures5m, optionChain };
 
   const settings = {
     targetPoints: 10, slPoints: 15,
-    // CALIBRATED 2026-05-18: institutional spec — fewer lots, longer holds.
+    // CALIBRATED 2026-05-18: institutional spec -- fewer lots, longer holds.
     // Allow engine to scale lots down to 1 on high-premium strikes (saves
     // absolute rupee loss on adverse moves) while still capping at 5.
     minLots: 1, maxLots: LOTS_PER_TRADE,
@@ -580,7 +580,7 @@ async function backtestDay(dayLabel) {
       });
     } catch (e) {
       _writeLog('error', 'backtest', `cycle_error: ${e.message}`, { dayLabel, hhmm: _activeHhmm, stack: e.stack });
-      console.log(`    × cycle ${dayLabel} ${_activeHhmm}: error ${e.message}`);
+      console.log(`    x cycle ${dayLabel} ${_activeHhmm}: error ${e.message}`);
       continue;
     }
 
@@ -643,7 +643,7 @@ async function backtestDay(dayLabel) {
   return { dayLabel, cycles, signalsGenerated, trades, wins, losses, grossPnL, netPnL, avgHold };
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────
+// --- Main -----------------------------------------------------------------
 (async () => {
   const filter = process.argv[2] || null;
   const days = listDays(filter);
@@ -651,7 +651,7 @@ async function backtestDay(dayLabel) {
 
   console.log(`\nBacktesting ${days.length} day(s) from ${days[0]} to ${days[days.length - 1]}`);
   console.log(`Settings: ${LOTS_PER_TRADE} lots (${LOTS_PER_TRADE * NIFTY_LOT_SIZE} qty), SL 15pts, Target 10pts, Max-hold 180s, Cooldown 5min, Strategy SCALPING`);
-  console.log(`Brokerage: ₹${ROUND_TRIP_BROKERAGE} flat per round-trip\n`);
+  console.log(`Brokerage: Rs.${ROUND_TRIP_BROKERAGE} flat per round-trip\n`);
   console.log(`Logging to: ${LOG_FILE}\n`);
 
   _writeLog('info', 'backtest', 'run_start', {
@@ -668,11 +668,11 @@ async function backtestDay(dayLabel) {
     process.stdout.write(`  ${d}: `);
     const r = await backtestDay(d);
     if (!r) { console.log('skipped'); continue; }
-    console.log(`${r.trades.length} trades, ${r.wins}W/${r.losses}L, P&L ₹${r.netPnL.toFixed(0)}`);
+    console.log(`${r.trades.length} trades, ${r.wins}W/${r.losses}L, P&L Rs.${r.netPnL.toFixed(0)}`);
     all.push(r);
   }
 
-  // ─── Aggregate ────────────────────────────────────────────────────────
+  // --- Aggregate --------------------------------------------------------
   const totalTrades = all.reduce((a, d) => a + d.trades.length, 0);
   const totalWins   = all.reduce((a, d) => a + d.wins, 0);
   const totalLoss   = all.reduce((a, d) => a + d.losses, 0);
@@ -693,24 +693,24 @@ async function backtestDay(dayLabel) {
   const expectancy = totalTrades ? netPnL / totalTrades : 0;
   const winRate    = totalTrades ? (totalWins / totalTrades) * 100 : 0;
 
-  console.log('\n' + '═'.repeat(78));
-  console.log('BACKTEST RESULTS — HYBRID ENTRY ENGINE');
-  console.log('═'.repeat(78));
+  console.log('\n' + '='.repeat(78));
+  console.log('BACKTEST RESULTS -- HYBRID ENTRY ENGINE');
+  console.log('='.repeat(78));
 
   console.log('\nPER-DAY BREAKDOWN');
-  console.log('─'.repeat(78));
+  console.log('-'.repeat(78));
   console.log('Date         Cycles  Signals  Trades   W   L   WinRate    Net P&L');
-  console.log('─'.repeat(78));
+  console.log('-'.repeat(78));
   for (const d of all) {
     const wr = d.trades.length ? ((d.wins / d.trades.length) * 100).toFixed(1) : '  - ';
     console.log(
-      `${d.dayLabel}  ${String(d.cycles).padStart(5)}  ${String(d.signalsGenerated).padStart(7)}  ${String(d.trades.length).padStart(6)}  ${String(d.wins).padStart(2)}  ${String(d.losses).padStart(2)}  ${String(wr).padStart(5)}%   ₹${d.netPnL.toFixed(0).padStart(7)}`
+      `${d.dayLabel}  ${String(d.cycles).padStart(5)}  ${String(d.signalsGenerated).padStart(7)}  ${String(d.trades.length).padStart(6)}  ${String(d.wins).padStart(2)}  ${String(d.losses).padStart(2)}  ${String(wr).padStart(5)}%   Rs.${d.netPnL.toFixed(0).padStart(7)}`
     );
   }
-  console.log('─'.repeat(78));
+  console.log('-'.repeat(78));
 
   console.log('\nAGGREGATE');
-  console.log('─'.repeat(78));
+  console.log('-'.repeat(78));
   const fmt = (k, v) => `  ${k.padEnd(28)} ${v}`;
   console.log(fmt('Days backtested',          all.length));
   console.log(fmt('Profitable days',          `${profitableDays}/${all.length} (${(profitableDays/Math.max(1,all.length)*100).toFixed(1)}%)`));
@@ -720,11 +720,11 @@ async function backtestDay(dayLabel) {
   console.log(fmt('Wins',                     totalWins));
   console.log(fmt('Losses',                   totalLoss));
   console.log(fmt('Win rate',                 `${winRate.toFixed(2)}%`));
-  console.log(fmt('Gross P&L (₹)',            `${grossPnL.toFixed(2)}`));
-  console.log(fmt('Net P&L (₹, after charges)', `${netPnL.toFixed(2)}`));
-  console.log(fmt('Average win (₹)',          avgWin.toFixed(2)));
-  console.log(fmt('Average loss (₹)',         avgLoss.toFixed(2)));
-  console.log(fmt('Expectancy / trade (₹)',   expectancy.toFixed(2)));
+  console.log(fmt('Gross P&L (Rs.)',            `${grossPnL.toFixed(2)}`));
+  console.log(fmt('Net P&L (Rs., after charges)', `${netPnL.toFixed(2)}`));
+  console.log(fmt('Average win (Rs.)',          avgWin.toFixed(2)));
+  console.log(fmt('Average loss (Rs.)',         avgLoss.toFixed(2)));
+  console.log(fmt('Expectancy / trade (Rs.)',   expectancy.toFixed(2)));
   console.log(fmt('Avg hold time (sec)',      avgHold.toFixed(0)));
   console.log(fmt('Profit factor',            (winners.reduce((a,t)=>a+t.netPnl,0) / Math.max(1, Math.abs(losers.reduce((a,t)=>a+t.netPnl,0)))).toFixed(2)));
 
@@ -739,12 +739,12 @@ async function backtestDay(dayLabel) {
     byStrat[s].pnl += t.netPnl;
   }
   console.log('\nSTRATEGY BREAKDOWN');
-  console.log('─'.repeat(78));
+  console.log('-'.repeat(78));
   console.log('Strategy            Trades   W    L    WinRate    Net P&L');
-  console.log('─'.repeat(78));
+  console.log('-'.repeat(78));
   for (const [name, s] of Object.entries(byStrat)) {
     const wr = ((s.w / Math.max(1, s.n)) * 100).toFixed(1);
-    console.log(`${name.padEnd(20)} ${String(s.n).padStart(5)}  ${String(s.w).padStart(3)}  ${String(s.l).padStart(3)}  ${wr.padStart(5)}%   ₹${s.pnl.toFixed(0).padStart(7)}`);
+    console.log(`${name.padEnd(20)} ${String(s.n).padStart(5)}  ${String(s.w).padStart(3)}  ${String(s.l).padStart(3)}  ${wr.padStart(5)}%   Rs.${s.pnl.toFixed(0).padStart(7)}`);
   }
 
   // Entry-type breakdown
@@ -758,12 +758,12 @@ async function backtestDay(dayLabel) {
     byEntryType[k].pnl += t.netPnl;
   }
   console.log('\nENTRY TYPE BREAKDOWN');
-  console.log('─'.repeat(78));
+  console.log('-'.repeat(78));
   console.log('Entry Type             Trades   W    L    WinRate    Net P&L');
-  console.log('─'.repeat(78));
+  console.log('-'.repeat(78));
   for (const [name, s] of Object.entries(byEntryType).sort((a,b) => b[1].n - a[1].n)) {
     const wr = ((s.w / Math.max(1, s.n)) * 100).toFixed(1);
-    console.log(`${name.padEnd(22)} ${String(s.n).padStart(5)}  ${String(s.w).padStart(3)}  ${String(s.l).padStart(3)}  ${wr.padStart(5)}%   ₹${s.pnl.toFixed(0).padStart(7)}`);
+    console.log(`${name.padEnd(22)} ${String(s.n).padStart(5)}  ${String(s.w).padStart(3)}  ${String(s.l).padStart(3)}  ${wr.padStart(5)}%   Rs.${s.pnl.toFixed(0).padStart(7)}`);
   }
 
   // Direction breakdown
@@ -777,17 +777,17 @@ async function backtestDay(dayLabel) {
     byDir[k].pnl += t.netPnl;
   }
   console.log('\nDIRECTION BREAKDOWN');
-  console.log('─'.repeat(78));
+  console.log('-'.repeat(78));
   console.log('Side    Trades   W    L    WinRate    Net P&L');
-  console.log('─'.repeat(78));
+  console.log('-'.repeat(78));
   for (const [name, s] of Object.entries(byDir)) {
     const wr = ((s.w / Math.max(1, s.n)) * 100).toFixed(1);
-    console.log(`${name.padEnd(7)} ${String(s.n).padStart(5)}  ${String(s.w).padStart(3)}  ${String(s.l).padStart(3)}  ${wr.padStart(5)}%   ₹${s.pnl.toFixed(0).padStart(7)}`);
+    console.log(`${name.padEnd(7)} ${String(s.n).padStart(5)}  ${String(s.w).padStart(3)}  ${String(s.l).padStart(3)}  ${wr.padStart(5)}%   Rs.${s.pnl.toFixed(0).padStart(7)}`);
   }
 
-  console.log('\n' + '═'.repeat(78));
-  console.log(`FINAL: ${totalWins}/${totalTrades} wins (${winRate.toFixed(2)}%) — Net ₹${netPnL.toFixed(2)} over ${all.length} days`);
-  console.log('═'.repeat(78) + '\n');
+  console.log('\n' + '='.repeat(78));
+  console.log(`FINAL: ${totalWins}/${totalTrades} wins (${winRate.toFixed(2)}%) -- Net Rs.${netPnL.toFixed(2)} over ${all.length} days`);
+  console.log('='.repeat(78) + '\n');
   console.log(`Full debug log: ${LOG_FILE}\n`);
 
   _writeLog('info', 'backtest', 'run_complete', {

@@ -62,5 +62,5 @@ for (const c of cycles) {
     `vol=${(c.vol||'-').slice(0,30).padEnd(30)} `
   );
   console.log(`     score: ${c.score ? `${c.score.score}/${c.score.weighted}` : '-'}  strat=${c.strategy || '-'}  agg=${c.aggression?.minScore || '-'}  pb=${(c.playbook||'-').slice(0,60)}  et=${(c.entryType||'-').slice(0,60)}`);
-  console.log(`     → ${c.decision} | ${(c.reason||'-').slice(0, 200)}`);
+  console.log(`     -> ${c.decision} | ${(c.reason||'-').slice(0, 200)}`);
 }

@@ -8,7 +8,7 @@ if (!logFile) { console.error('Usage: node analyze-session.js <logfile>'); proce
 
 const raw = fs.readFileSync(logFile, 'utf8');
 
-// The file may be duplicate-appended (two copies) — deduplicate by timestamp+msg
+// The file may be duplicate-appended (two copies) -- deduplicate by timestamp+msg
 const seen = new Set();
 const lines = raw.split(/\r?\n/).filter(Boolean);
 const entries = [];
@@ -22,7 +22,7 @@ for (const line of lines) {
 
 console.log(`Total unique log entries: ${entries.length}`);
 
-// ── Categorise ──────────────────────────────────────────────────────────────
+// -- Categorise --------------------------------------------------------------
 const errors   = entries.filter(e => e.level === 50 || e.level === 'error' || (e.msg && e.msg.includes('error') && !e.msg.includes('errorType')));
 const warnings = entries.filter(e => e.level === 40 || e.level === 'warn');
 const hybrid   = entries.filter(e => e.msg && e.msg.includes('[hybrid]'));

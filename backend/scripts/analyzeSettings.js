@@ -228,8 +228,8 @@ function analyzeAndOptimize(date = null) {
   console.log(`Win Rate: ${metrics.winRate}%`);
   console.log(`Avg Win: ${metrics.avgWinPoints} pts`);
   console.log(`Avg Loss: ${metrics.avgLossPoints} pts`);
-  console.log(`Avg P&L: ₹${metrics.avgPnL}`);
-  console.log(`Total P&L: ₹${metrics.totalPnL}`);
+  console.log(`Avg P&L: Rs.${metrics.avgPnL}`);
+  console.log(`Total P&L: Rs.${metrics.totalPnL}`);
   console.log();
   
   // Generate suggestions

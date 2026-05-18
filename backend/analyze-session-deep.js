@@ -1,4 +1,4 @@
-// Deep analysis of a live session log — focus on data quality issues
+// Deep analysis of a live session log -- focus on data quality issues
 const fs = require('fs');
 const logFile = process.argv[2];
 if (!logFile) { console.error('Usage: node analyze-session-deep.js <logfile>'); process.exit(1); }
@@ -14,7 +14,7 @@ for (const line of raw.split(/\r?\n/).filter(Boolean)) {
   entries.push(obj);
 }
 
-// ── 1. Candle data quality ──────────────────────────────────────────────────
+// -- 1. Candle data quality --------------------------------------------------
 console.log('\n=== CANDLE DATA QUALITY ===');
 const candleEvents = entries.filter(e => e.msg && e.msg.includes('liveFeedDataProvider'));
 const candleCounts = {};
@@ -34,7 +34,7 @@ Object.entries(candleCounts).forEach(([k, v]) => {
   console.log(`  ${k.padEnd(35)} calls=${v.count} avg=${avg} min=${v.minCandles} max=${v.maxCandles}`);
 });
 
-// ── 2. ATR null issue ───────────────────────────────────────────────────────
+// -- 2. ATR null issue -------------------------------------------------------
 console.log('\n=== ATR NULL ISSUE ===');
 const atrNull = entries.filter(e => e.msg && e.msg.includes('atr5m=null'));
 const atrOk   = entries.filter(e => e.msg && e.msg.includes('atr5m=') && !e.msg.includes('atr5m=null'));
@@ -49,7 +49,7 @@ if (atrOk.length > 0) {
   console.log('  ', atrOk[0].msg);
 }
 
-// ── 3. Volume profile issue ─────────────────────────────────────────────────
+// -- 3. Volume profile issue -------------------------------------------------
 console.log('\n=== VOLUME PROFILE ISSUE ===');
 const volNull = entries.filter(e => e.msg && e.msg.includes('no_volume_profile'));
 const volOk   = entries.filter(e => e.msg && e.msg.includes('acceptance=') && !e.msg.includes('no_volume_profile'));
@@ -61,7 +61,7 @@ if (volNull.length > 0) {
   if (sample.data?.snapshotsHeld !== undefined) console.log('  snapshotsHeld:', sample.data.snapshotsHeld);
 }
 
-// ── 4. Direction resolution ─────────────────────────────────────────────────
+// -- 4. Direction resolution -------------------------------------------------
 console.log('\n=== DIRECTION RESOLUTION ===');
 const dirEvents = entries.filter(e => e.msg && e.msg.includes('direction_resolved'));
 const dirCounts = {};
@@ -76,7 +76,7 @@ Object.entries(dirCounts).sort((a,b) => b[1]-a[1]).forEach(([k,v]) => console.lo
 const noBias = entries.filter(e => e.msg && e.msg.includes('No clear directional bias'));
 console.log(`  No directional bias (no direction resolved): ${noBias.length}x`);
 
-// ── 5. Meta-regime distribution ─────────────────────────────────────────────
+// -- 5. Meta-regime distribution ---------------------------------------------
 console.log('\n=== META-REGIME DISTRIBUTION ===');
 const metaEvents = entries.filter(e => e.msg && e.msg.includes('[hybrid] ') && 
   (e.msg.includes('gamma_pin') || e.msg.includes('slow_grind') || e.msg.includes('trend_auction') || 
@@ -89,7 +89,7 @@ metaEvents.forEach(e => {
 });
 Object.entries(metaCounts).sort((a,b) => b[1]-a[1]).forEach(([k,v]) => console.log(`  ${k.padEnd(25)} ${v}x`));
 
-// ── 6. Score distribution ───────────────────────────────────────────────────
+// -- 6. Score distribution ---------------------------------------------------
 console.log('\n=== SCORE DISTRIBUTION (when direction resolved) ===');
 const scoreEvents = entries.filter(e => e.msg && e.msg.includes('score=') && e.msg.includes('need ≥'));
 const scores = scoreEvents.map(e => {
@@ -113,7 +113,7 @@ if (scores.length) {
   Object.entries(buckets).forEach(([k,v]) => console.log(`  ${k.padEnd(10)} ${v}x`));
 }
 
-// ── 7. Option chain data quality ────────────────────────────────────────────
+// -- 7. Option chain data quality --------------------------------------------
 console.log('\n=== OPTION CHAIN DATA ===');
 const ocEvents = entries.filter(e => e.msg && e.msg.includes('option') && e.msg.includes('chain'));
 console.log(`  Option chain related events: ${ocEvents.length}`);
@@ -123,7 +123,7 @@ if (ocSnaps.length) {
   console.log(`  OC snapshots: min=${Math.min(...snaps)} max=${Math.max(...snaps)} avg=${(snaps.reduce((a,b)=>a+b,0)/snaps.length).toFixed(1)}`);
 }
 
-// ── 8. Futures data ─────────────────────────────────────────────────────────
+// -- 8. Futures data ---------------------------------------------------------
 console.log('\n=== FUTURES DATA ===');
 const futEvents = entries.filter(e => e.msg && e.msg.includes('futures'));
 const futOk = entries.filter(e => e.msg && e.msg.includes('futures') && e.msg.includes('direction'));
@@ -132,12 +132,12 @@ console.log(`  Futures events: ${futEvents.length}`);
 console.log(`  Futures with direction: ${futOk.length}`);
 console.log(`  Futures failures: ${futFail.length}`);
 
-// ── 9. Key issues summary ───────────────────────────────────────────────────
+// -- 9. Key issues summary ---------------------------------------------------
 console.log('\n=== ROOT CAUSE ANALYSIS ===');
 const issues = [];
-if (atrNull.length > atrOk.length) issues.push(`❌ ATR is null in ${atrNull.length}/${atrNull.length+atrOk.length} cycles — candles too few for ATR calculation`);
-if (volNull.length > volOk.length) issues.push(`❌ Volume profile missing in ${volNull.length}/${volNull.length+volOk.length} cycles — insufficient candle history`);
-if (noBias.length > 5) issues.push(`⚠️  No directional bias in ${noBias.length} cycles — derivatives/OI data may be sparse at session start`);
-if (scores.length && Math.max(...scores) < 55) issues.push(`⚠️  All scores below threshold (max=${Math.max(...scores).toFixed(1)}) — market conditions not meeting entry criteria`);
+if (atrNull.length > atrOk.length) issues.push(`❌ ATR is null in ${atrNull.length}/${atrNull.length+atrOk.length} cycles -- candles too few for ATR calculation`);
+if (volNull.length > volOk.length) issues.push(`❌ Volume profile missing in ${volNull.length}/${volNull.length+volOk.length} cycles -- insufficient candle history`);
+if (noBias.length > 5) issues.push(`⚠️  No directional bias in ${noBias.length} cycles -- derivatives/OI data may be sparse at session start`);
+if (scores.length && Math.max(...scores) < 55) issues.push(`⚠️  All scores below threshold (max=${Math.max(...scores).toFixed(1)}) -- market conditions not meeting entry criteria`);
 if (issues.length === 0) issues.push('✅ No critical data issues found');
 issues.forEach(i => console.log(' ', i));

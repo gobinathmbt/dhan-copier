@@ -1,4 +1,4 @@
-// Deep dive on a single trade — find entry, monitor cycles, exit
+// Deep dive on a single trade -- find entry, monitor cycles, exit
 const fs = require('fs');
 const sessionId = process.argv[2] || '6a0aaf37cb6d22a525137056';
 

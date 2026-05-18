@@ -68,7 +68,7 @@ function report(label, b) {
     return [k, total, v.w, v.l, wr, v.pnl];
   }).sort((a, b) => b[1] - a[1]);
   for (const [k, total, w, l, wr, pnl] of rows) {
-    console.log(`  ${String(k).padEnd(30)} : trades=${String(total).padEnd(3)} ${w}W/${l}L  wr=${wr.toFixed(1).padStart(5)}%  net=₹${pnl.toFixed(0)}`);
+    console.log(`  ${String(k).padEnd(30)} : trades=${String(total).padEnd(3)} ${w}W/${l}L  wr=${wr.toFixed(1).padStart(5)}%  net=Rs.${pnl.toFixed(0)}`);
   }
 }
 
@@ -107,12 +107,12 @@ const losingDayLossSums = Object.entries(lossesByDay)
   .sort((a,b)=>a[2]-b[2]);
 console.log('Worst loss days:');
 for (const [day, n, total] of losingDayLossSums.slice(0, 8)) {
-  console.log(`  ${day}: ${n} losses, net loss ₹${total.toFixed(0)}`);
+  console.log(`  ${day}: ${n} losses, net loss Rs.${total.toFixed(0)}`);
 }
 
 // Largest individual losses
 console.log('\nTop 10 individual losing trades:');
 losses.sort((a, b) => (a.netPnl || 0) - (b.netPnl || 0));
 for (const l of losses.slice(0, 10)) {
-  console.log(`  ${l.dayLabel} ${l.entryHhmm} ${l.signal} ${l.strike}${l.optionType} entry=${l.entry} exit=${l.exit} pts=${l.pts} held=${l.heldSec}s | conf=${l.confidenceScore} | strat=${l.strategy} | type=${l.entryType} | meta=${l.meta} | net=₹${l.netPnl} | reason=${l.reason}`);
+  console.log(`  ${l.dayLabel} ${l.entryHhmm} ${l.signal} ${l.strike}${l.optionType} entry=${l.entry} exit=${l.exit} pts=${l.pts} held=${l.heldSec}s | conf=${l.confidenceScore} | strat=${l.strategy} | type=${l.entryType} | meta=${l.meta} | net=Rs.${l.netPnl} | reason=${l.reason}`);
 }

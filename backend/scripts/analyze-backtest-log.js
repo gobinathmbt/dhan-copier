@@ -31,7 +31,7 @@ if (!file || !fs.existsSync(file)) {
 }
 console.log(`Analyzing: ${path.basename(file)}\n`);
 
-// ─── Counters ─────────────────────────────────────────────────────────────
+// --- Counters -------------------------------------------------------------
 const counters = {
   totalLines: 0,
   byMessage: {},                    // top-level message frequency
@@ -40,7 +40,7 @@ const counters = {
   cyclesTrade: 0,
   cyclesError: 0,
   cyclesSkippedNoInputs: 0,
-  noTradeReasons: {},               // grouped reason → count
+  noTradeReasons: {},               // grouped reason -> count
   decisionByEntryType: {},
   decisionBySignal: { BUY_CE: 0, BUY_PE: 0, NO_TRADE: 0 },
   decisionByStrategy: {},
@@ -103,7 +103,7 @@ function classifyNoTradeReason(reason) {
   return 'other:' + reason.slice(0, 80);
 }
 
-// ─── Stream and parse ──────────────────────────────────────────────────────
+// --- Stream and parse ------------------------------------------------------
 (async () => {
   const stream = fs.createReadStream(file, { encoding: 'utf8' });
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
@@ -202,7 +202,7 @@ function classifyNoTradeReason(reason) {
     }
   }
 
-  // ─── Analytics ────────────────────────────────────────────────────────
+  // --- Analytics --------------------------------------------------------
   const trades = counters.trades;
   const wins   = trades.filter(t => t.result === 'WIN');
   const losses = trades.filter(t => t.result === 'LOSS');
@@ -258,7 +258,7 @@ function classifyNoTradeReason(reason) {
   for (const t of wins)  bumpHist(scoreBucketsW, t.confidenceScore, 5);
   for (const t of losses) bumpHist(scoreBucketsL, t.confidenceScore, 5);
 
-  // ─── Print ─────────────────────────────────────────────────────────────
+  // --- Print -------------------------------------------------------------
   function printObj(o, top = 25, sortByValue = true) {
     const entries = Object.entries(o);
     if (sortByValue) entries.sort((a, b) => b[1] - a[1]);
@@ -274,60 +274,60 @@ function classifyNoTradeReason(reason) {
   console.log(`Cycles errored:                  ${counters.cyclesError}`);
   console.log(`Cycles skipped (no inputs):      ${counters.cyclesSkippedNoInputs}`);
 
-  console.log('\n═══ NO-TRADE REASON DISTRIBUTION ═══');
+  console.log('\n=== NO-TRADE REASON DISTRIBUTION ===');
   printObj(counters.noTradeReasons);
 
-  console.log('\n═══ HARD GATE FAILURES ═══');
+  console.log('\n=== HARD GATE FAILURES ===');
   if (Object.keys(counters.hardGateFails).length === 0) {
-    console.log('  (none — all cycles passed tier-1 gates)');
+    console.log('  (none -- all cycles passed tier-1 gates)');
   } else {
     printObj(counters.hardGateFails);
   }
 
-  console.log('\n═══ META REGIME STATE DISTRIBUTION ═══');
+  console.log('\n=== META REGIME STATE DISTRIBUTION ===');
   printObj(counters.metaRegimeStates);
 
-  console.log('\n═══ MARKET REGIME DISTRIBUTION ═══');
+  console.log('\n=== MARKET REGIME DISTRIBUTION ===');
   printObj(counters.marketRegimes);
 
-  console.log('\n═══ VOLATILITY STATE DISTRIBUTION ═══');
+  console.log('\n=== VOLATILITY STATE DISTRIBUTION ===');
   printObj(counters.volatilityStates);
 
-  console.log('\n═══ GAMMA REGIME DISTRIBUTION ═══');
+  console.log('\n=== GAMMA REGIME DISTRIBUTION ===');
   printObj(counters.gammaRegimes);
 
-  console.log('\n═══ AUCTION DAY TYPE DISTRIBUTION ═══');
+  console.log('\n=== AUCTION DAY TYPE DISTRIBUTION ===');
   printObj(counters.auctionDayTypes);
 
-  console.log('\n═══ TREND PHASE DISTRIBUTION ═══');
+  console.log('\n=== TREND PHASE DISTRIBUTION ===');
   printObj(counters.trendPhases);
 
-  console.log('\n═══ TRAP SCORE BUCKETS ═══');
+  console.log('\n=== TRAP SCORE BUCKETS ===');
   for (const k of ['0-29','30-49','50-69','70-89','90+']) {
     console.log(`  ${k.padEnd(40)} ${counters.trapScoreDistribution[k] || 0}`);
   }
 
-  console.log('\n═══ CONFIDENCE SCORE DISTRIBUTION (5-pt buckets) ═══');
+  console.log('\n=== CONFIDENCE SCORE DISTRIBUTION (5-pt buckets) ===');
   const scoreKeys = Object.keys(counters.scoreDistribution).map(Number).sort((a, b) => a - b);
   for (const k of scoreKeys) {
     console.log(`  ${(k + '-' + (k + 4)).padEnd(40)} ${counters.scoreDistribution[k]}`);
   }
 
-  console.log('\n═══ TRADES BY ENTRY TYPE ═══');
+  console.log('\n=== TRADES BY ENTRY TYPE ===');
   console.log('  Type                                      n     W     L   WR%   AvgScore  AvgHold  NetP&L');
   for (const [k, s] of Object.entries(byTypeStats).sort((a, b) => b[1].pnl - a[1].pnl)) {
-    console.log(`  ${k.padEnd(38)}    ${String(s.n).padStart(3)}  ${String(s.w).padStart(3)}  ${String(s.l).padStart(3)}  ${String(s.winRate).padStart(5)}     ${String(s.avgScore).padStart(4)}    ${String(s.avgHeld).padStart(4)}s   ₹${s.pnl.toFixed(0).padStart(7)}`);
+    console.log(`  ${k.padEnd(38)}    ${String(s.n).padStart(3)}  ${String(s.w).padStart(3)}  ${String(s.l).padStart(3)}  ${String(s.winRate).padStart(5)}     ${String(s.avgScore).padStart(4)}    ${String(s.avgHeld).padStart(4)}s   Rs.${s.pnl.toFixed(0).padStart(7)}`);
   }
 
-  console.log('\n═══ TRADES BY ENTRY HOUR (IST) ═══');
+  console.log('\n=== TRADES BY ENTRY HOUR (IST) ===');
   const todKeys = Object.keys(tod).sort();
   for (const k of todKeys) {
     const s = tod[k];
     const wr = ((s.w / Math.max(1, s.n)) * 100).toFixed(1);
-    console.log(`  ${k.padEnd(40)} n=${s.n}  WR=${wr}%  P&L=₹${s.pnl.toFixed(0)}`);
+    console.log(`  ${k.padEnd(40)} n=${s.n}  WR=${wr}%  P&L=Rs.${s.pnl.toFixed(0)}`);
   }
 
-  console.log('\n═══ SCORE BUCKETS — WINNERS vs LOSERS ═══');
+  console.log('\n=== SCORE BUCKETS -- WINNERS vs LOSERS ===');
   const allScoreKeys = Array.from(new Set([
     ...Object.keys(scoreBucketsW), ...Object.keys(scoreBucketsL),
   ])).map(Number).sort((a, b) => a - b);
@@ -336,7 +336,7 @@ function classifyNoTradeReason(reason) {
     console.log(`  ${(k + '-' + (k + 4)).padEnd(20)}    ${String(scoreBucketsW[k] || 0).padStart(4)}    ${String(scoreBucketsL[k] || 0).padStart(4)}`);
   }
 
-  console.log('\n═══ DATA QUALITY — OI DELTAS ═══');
+  console.log('\n=== DATA QUALITY -- OI DELTAS ===');
   const oi = counters.oiSamples;
   function describe(arr, label) {
     if (!arr.length) { console.log(`  ${label.padEnd(30)} no samples`); return; }
@@ -350,31 +350,31 @@ function classifyNoTradeReason(reason) {
   describe(oi.ceAdd, 'CE OI added (last bar)');
   describe(oi.peAdd, 'PE OI added (last bar)');
 
-  console.log('\n═══ DATA QUALITY — VSA / TIME-VOLUME ═══');
+  console.log('\n=== DATA QUALITY -- VSA / TIME-VOLUME ===');
   console.log('  VSA pattern distribution:');
   printObj(counters.volumeSamples.vsa);
   console.log('  Time-volume state distribution:');
   printObj(counters.volumeSamples.timeVolume);
 
-  console.log('\n═══ TRADE-LEVEL SUMMARY ═══');
+  console.log('\n=== TRADE-LEVEL SUMMARY ===');
   console.log(`  Total trades:             ${trades.length}`);
   console.log(`  Wins:                     ${wins.length} (${((wins.length / Math.max(1, trades.length)) * 100).toFixed(1)}%)`);
   console.log(`  Losses:                   ${losses.length}`);
   console.log(`  Avg confidence (winners): ${avg(wins, 'confidenceScore').toFixed(1)}`);
   console.log(`  Avg confidence (losers):  ${avg(losses, 'confidenceScore').toFixed(1)}`);
-  console.log(`  Avg P&L (winners):        ₹${avg(wins, 'netPnl').toFixed(0)}`);
-  console.log(`  Avg P&L (losers):         ₹${avg(losses, 'netPnl').toFixed(0)}`);
+  console.log(`  Avg P&L (winners):        Rs.${avg(wins, 'netPnl').toFixed(0)}`);
+  console.log(`  Avg P&L (losers):         Rs.${avg(losses, 'netPnl').toFixed(0)}`);
   console.log(`  Avg hold (winners):       ${avg(wins, 'heldSec').toFixed(0)}s`);
   console.log(`  Avg hold (losers):        ${avg(losses, 'heldSec').toFixed(0)}s`);
 
-  // Top losing entry types — drill-in
+  // Top losing entry types -- drill-in
   const losingTypes = Object.entries(byTypeStats)
     .filter(([, s]) => s.pnl < 0)
     .sort((a, b) => a[1].pnl - b[1].pnl);
   if (losingTypes.length) {
-    console.log('\n═══ DRILL-IN: LOSING ENTRY TYPES ═══');
+    console.log('\n=== DRILL-IN: LOSING ENTRY TYPES ===');
     for (const [k, s] of losingTypes) {
-      console.log(`\n  ${k} — n=${s.n}, WR=${s.winRate}%, P&L ₹${s.pnl.toFixed(0)}`);
+      console.log(`\n  ${k} -- n=${s.n}, WR=${s.winRate}%, P&L Rs.${s.pnl.toFixed(0)}`);
       console.log('    by regime:'); printObj(s.regimes, 8);
       console.log('    by phase:');  printObj(s.phases,  8);
       console.log('    by signal:'); printObj(s.signals, 8);

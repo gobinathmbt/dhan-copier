@@ -71,15 +71,15 @@ for (const ln of lines) {
 const wins   = trades.filter(t => t.result === 'WIN');
 const losses = trades.filter(t => t.result === 'LOSS');
 
-console.log('\n══════════════════════════════════════════════════════');
+console.log('\n======================================================');
 console.log('CALIBRATION CYCLE REPORT');
-console.log('══════════════════════════════════════════════════════');
+console.log('======================================================');
 console.log(JSON.stringify(runComplete, null, 2));
 
 console.log('\n--- DAYS WITH < ' + MIN_TRADES_PER_DAY + ' ENTRIES ---');
 const lowVolume = dailySummaries.filter(d => (d.trades || 0) < MIN_TRADES_PER_DAY);
 for (const d of lowVolume) {
-  console.log(`  ${d.dayLabel}: trades=${d.trades||0} wins=${d.wins||0} losses=${d.losses||0} net=₹${(d.netPnL||0).toFixed(0)}`);
+  console.log(`  ${d.dayLabel}: trades=${d.trades||0} wins=${d.wins||0} losses=${d.losses||0} net=Rs.${(d.netPnL||0).toFixed(0)}`);
 }
 console.log(`  Total low-volume days: ${lowVolume.length}/${dailySummaries.length}`);
 
@@ -90,7 +90,7 @@ for (const l of losses) {
     `ent=${l.entry} ex=${l.exit} pts=${l.pts} hold=${l.heldSec}s | ` +
     `pb=${l.playbook||l.entryType} (${l.playbookConviction||'?'}) score=${l.confidenceScore} | ` +
     `meta=${l.meta} vol=${l.vol} gamma=${l.gamma} reg=${l.regime} of=${l.orderflow} oi=${l.oiRegime} | ` +
-    `reason=${l.reason} | net=₹${l.netPnl}`);
+    `reason=${l.reason} | net=Rs.${l.netPnl}`);
 }
 
 console.log('\n--- LOSSES BY PLAYBOOK ---');
@@ -103,7 +103,7 @@ for (const l of losses) {
 }
 Object.entries(lossByPb)
   .sort((a, b) => a[1].sum - b[1].sum)
-  .forEach(([k, v]) => console.log(`  ${k.padEnd(35)} : ${v.count} losses, total ₹${v.sum.toFixed(0)}`));
+  .forEach(([k, v]) => console.log(`  ${k.padEnd(35)} : ${v.count} losses, total Rs.${v.sum.toFixed(0)}`));
 
 console.log('\n--- LOSSES BY META REGIME ---');
 const lossByMeta = {};
@@ -115,7 +115,7 @@ for (const l of losses) {
 }
 Object.entries(lossByMeta)
   .sort((a, b) => a[1].sum - b[1].sum)
-  .forEach(([k, v]) => console.log(`  ${k.padEnd(35)} : ${v.count} losses, total ₹${v.sum.toFixed(0)}`));
+  .forEach(([k, v]) => console.log(`  ${k.padEnd(35)} : ${v.count} losses, total Rs.${v.sum.toFixed(0)}`));
 
 console.log('\n--- LOSSES BY EXIT REASON ---');
 const lossByReason = {};
@@ -127,7 +127,7 @@ for (const l of losses) {
 }
 Object.entries(lossByReason)
   .sort((a, b) => a[1].sum - b[1].sum)
-  .forEach(([k, v]) => console.log(`  ${k.padEnd(15)} : ${v.count} losses, total ₹${v.sum.toFixed(0)}`));
+  .forEach(([k, v]) => console.log(`  ${k.padEnd(15)} : ${v.count} losses, total Rs.${v.sum.toFixed(0)}`));
 
 console.log('\n--- WIN RATE BY PLAYBOOK ---');
 const wrByPb = {};
@@ -141,7 +141,7 @@ Object.entries(wrByPb)
   .sort((a, b) => (b[1].w + b[1].l) - (a[1].w + a[1].l))
   .forEach(([k, v]) => {
     const total = v.w + v.l;
-    console.log(`  ${k.padEnd(35)} : ${total.toString().padStart(3)} trades, ${v.w}W/${v.l}L, WR=${(v.w/total*100).toFixed(1).padStart(5)}%, net=₹${v.sum.toFixed(0)}`);
+    console.log(`  ${k.padEnd(35)} : ${total.toString().padStart(3)} trades, ${v.w}W/${v.l}L, WR=${(v.w/total*100).toFixed(1).padStart(5)}%, net=Rs.${v.sum.toFixed(0)}`);
   });
 
 console.log('\n--- AGGREGATE ---');
@@ -150,5 +150,5 @@ const wr = trades.length ? (wins.length / trades.length) * 100 : 0;
 const net = trades.reduce((a, t) => a + (t.netPnl || 0), 0);
 const grossWin = wins.reduce((a, t) => a + (t.netPnl || 0), 0);
 const grossLoss = Math.abs(losses.reduce((a, t) => a + (t.netPnl || 0), 0));
-console.log(`  Win rate: ${wr.toFixed(2)}%, Net: ₹${net.toFixed(0)}, PF: ${(grossWin/Math.max(1,grossLoss)).toFixed(2)}`);
+console.log(`  Win rate: ${wr.toFixed(2)}%, Net: Rs.${net.toFixed(0)}, PF: ${(grossWin/Math.max(1,grossLoss)).toFixed(2)}`);
 console.log(`  Avg trades/day: ${(trades.length/dailySummaries.length).toFixed(2)}`);

@@ -63,5 +63,5 @@ console.log('\nPER-DAY BLOCK SUMMARY (zero-trade days only):');
 for (const d of zeroDays) {
   const total = Object.values(dayBlocks[d] || {}).reduce((a, b) => a + b, 0);
   const top = Object.entries(dayBlocks[d] || {}).sort((a, b) => b[1] - a[1])[0];
-  console.log(`  ${d}: ${total} blocks | top: ${top?.[1]}× ${top?.[0]?.slice(0, 80)}`);
+  console.log(`  ${d}: ${total} blocks | top: ${top?.[1]}x ${top?.[0]?.slice(0, 80)}`);
 }

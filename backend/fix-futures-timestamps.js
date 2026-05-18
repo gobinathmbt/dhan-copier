@@ -1,5 +1,5 @@
-// One-time fix: convert futures candle timestamps from ms → seconds.
-// Safe to run repeatedly — it only converts 13-digit entries to 10-digit.
+// One-time fix: convert futures candle timestamps from ms -> seconds.
+// Safe to run repeatedly -- it only converts 13-digit entries to 10-digit.
 //
 // Why this exists:
 //   futures-ticks.jsonl uses Date.now() (milliseconds) for `t`.
@@ -45,7 +45,7 @@ for (const interval of ['1m', '5m', '15m']) {
 
   fixed.sort((a, b) => JSON.parse(a).t - JSON.parse(b).t);
   fs.writeFileSync(file, fixed.join('\n') + '\n');
-  console.log(`futures-${interval}: ${lines.length} → ${fixed.length} lines (converted ${convertedCount}, deduped ${lines.length - fixed.length - convertedCount})`);
+  console.log(`futures-${interval}: ${lines.length} -> ${fixed.length} lines (converted ${convertedCount}, deduped ${lines.length - fixed.length - convertedCount})`);
   totalFixed += convertedCount;
 }
 console.log(`Total fixed: ${totalFixed} entries`);

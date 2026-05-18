@@ -80,7 +80,7 @@ for (const ln of lines) {
         if (/Trap detection blocked/i.test(reason)) trapBlocks.push({ trap: lastTrapDetection?.trapScore, reason });
         if (/filter:/i.test(reason)) filterFails.push(reason);
       } else {
-        // Trade entered — capture context
+        // Trade entered -- capture context
         trades.push({
           day: data.dayLabel,
           hhmm: data.hhmm,

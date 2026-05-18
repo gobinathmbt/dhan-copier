@@ -6,9 +6,9 @@
  * data. No DB. No live feed. No AI calls.
  *
  * Scenarios:
- *   1. STRONG BULLISH  — should fire BUY_CE
- *   2. STRONG BEARISH  — should fire BUY_PE
- *   3. CHOPPY MARKET   — should refuse (NO_TRADE)
+ *   1. STRONG BULLISH  -- should fire BUY_CE
+ *   2. STRONG BEARISH  -- should fire BUY_PE
+ *   3. CHOPPY MARKET   -- should refuse (NO_TRADE)
  *
  * The market session is mocked to "morning" so volatility / regime checks
  * pass. NIFTY-realistic candle noise (≈25pts/5m bar) is used so the FRVP
@@ -18,7 +18,7 @@
  *   node scripts/test-hybrid-pipeline.js
  */
 
-// ─── Module-level stubs (must run before any hybrid require) ───────────────
+// --- Module-level stubs (must run before any hybrid require) ---------------
 const Module = require('module');
 const origRequire = Module.prototype.require;
 
@@ -80,7 +80,7 @@ Module.prototype.require = function (id) {
   return origRequire.call(this, id);
 };
 
-// ─── Realistic candle generator — NIFTY scale ─────────────────────────────
+// --- Realistic candle generator -- NIFTY scale -----------------------------
 // Use a deterministic LCG for repeatability so the test is stable.
 let _rngState = 0xC0FFEE;
 function rng() {
@@ -125,7 +125,7 @@ function buildScenario(kind, cycle = 1) {
   const lastSpot  = candles5m[candles5m.length - 1].c;
   const atmStrike = Math.round(lastSpot / 50) * 50;
 
-  // Option chain (ATM ± 6) — supply both absolute OI AND oiChange so
+  // Option chain (ATM ± 6) -- supply both absolute OI AND oiChange so
   // derivatives engine sees a clear bias. Bullish = aggressive PE writing,
   // bearish = aggressive CE writing.
   //
@@ -167,7 +167,7 @@ function buildScenario(kind, cycle = 1) {
     });
   }
 
-  // VWAP — keep it 8-12 pts away in the right direction so vwap pillar fires
+  // VWAP -- keep it 8-12 pts away in the right direction so vwap pillar fires
   const vwap = lastSpot - (kind === 'bullish' ? 10 : kind === 'bearish' ? -10 : 0);
 
   const dir = kind === 'bullish' ? 'bullish' : kind === 'bearish' ? 'bearish' : 'neutral';
@@ -255,10 +255,10 @@ function buildScenario(kind, cycle = 1) {
   };
 }
 
-// ─── Now require the hybrid entry engine ──────────────────────────────────
+// --- Now require the hybrid entry engine ----------------------------------
 const hybrid = require('../src/services/hybrid');
 
-// ─── Run scenarios ────────────────────────────────────────────────────────
+// --- Run scenarios --------------------------------------------------------
 function fmtDecision(d) {
   return {
     signal:        d.signal,
@@ -280,9 +280,9 @@ function fmtDecision(d) {
 }
 
 async function runScenario(name, expected) {
-  console.log('\n' + '═'.repeat(78));
+  console.log('\n' + '='.repeat(78));
   console.log(`SCENARIO: ${name.toUpperCase()}`);
-  console.log('═'.repeat(78));
+  console.log('='.repeat(78));
 
   // Seed deterministic RNG so each scenario gets a reproducible candle stream.
   seedRng(name === 'bullish' ? 7777 : name === 'bearish' ? 2002 : 3003);
@@ -302,7 +302,7 @@ async function runScenario(name, expected) {
     hybridMinGrade: 'C',
     executionMinScore: 50,
     enableHybridAIAdvisory: false,
-    // Force SCALPING so threshold is 60 — keeps the test deterministic.
+    // Force SCALPING so threshold is 60 -- keeps the test deterministic.
     // Without this, trending+expansion would auto-pick INTRADAY_MOMENTUM
     // (threshold 75) and synthetic data may not always clear that bar.
     forceStrategy: name === 'choppy' ? undefined : 'SCALPING',
@@ -348,8 +348,8 @@ async function runScenario(name, expected) {
 
   const ok = expected.signals.includes(decision.signal);
   console.log(ok
-    ? `\n✓ PASS — got ${decision.signal}, expected one of ${expected.signals.join(', ')}`
-    : `\n✗ FAIL — got ${decision.signal}, expected ${expected.signals.join(', ')}`);
+    ? `\n✓ PASS -- got ${decision.signal}, expected one of ${expected.signals.join(', ')}`
+    : `\n✗ FAIL -- got ${decision.signal}, expected ${expected.signals.join(', ')}`);
   if (!ok && decision.reasoning) console.log(`  reason: ${decision.reasoning}`);
 
   return { name, ok, decision };
@@ -361,11 +361,11 @@ async function runScenario(name, expected) {
   results.push(await runScenario('bearish', { signals: ['BUY_PE'] }));
   results.push(await runScenario('choppy',  { signals: ['NO_TRADE'] }));
 
-  console.log('\n' + '═'.repeat(78));
+  console.log('\n' + '='.repeat(78));
   console.log('SUMMARY');
-  console.log('═'.repeat(78));
+  console.log('='.repeat(78));
   for (const r of results) {
-    console.log(`  ${r.ok ? '✓' : '✗'}  ${r.name.padEnd(10)} → ${r.decision.signal} ${r.decision.strategy ? '(' + r.decision.strategy + ')' : ''}`);
+    console.log(`  ${r.ok ? '✓' : '✗'}  ${r.name.padEnd(10)} -> ${r.decision.signal} ${r.decision.strategy ? '(' + r.decision.strategy + ')' : ''}`);
   }
   const allOk = results.every(r => r.ok);
   console.log(allOk ? '\nALL PASS\n' : '\nSOME FAILED\n');

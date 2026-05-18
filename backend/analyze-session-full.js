@@ -1,4 +1,4 @@
-// Full session health check — 58 cycles deep dive
+// Full session health check -- 58 cycles deep dive
 const fs = require('fs');
 const logFile = process.argv[2];
 if (!logFile) { console.error('Usage: node analyze-session-full.js <logfile>'); process.exit(1); }
@@ -19,7 +19,7 @@ function extract(msg, pattern) {
   return m ? m[1] : null;
 }
 
-// ── Build per-cycle snapshots ────────────────────────────────────────────────
+// -- Build per-cycle snapshots ------------------------------------------------
 const cycles = [];
 let cur = null;
 
@@ -88,8 +88,8 @@ for (const e of entries) {
   if (msg.includes('best=') && msg.includes('entry_type')) {
     cur.entryType = extract(msg, /best=(\w+)/);
   }
-  if (msg.includes('[hybrid] ') && msg.includes('→ tgt=') && msg.includes('sl=')) {
-    cur.strategy = extract(msg, /\[hybrid\] (\w+) →/);
+  if (msg.includes('[hybrid] ') && msg.includes('-> tgt=') && msg.includes('sl=')) {
+    cur.strategy = extract(msg, /\[hybrid\] (\w+) ->/);
   }
   if (msg.includes('No-trade zone:')) {
     cur.noTradeZone = (msg.split('No-trade zone:')[1] || '').trim().slice(0, 100);
@@ -109,10 +109,10 @@ for (const e of entries) {
 if (cur) cycles.push(cur);
 
 console.log(`\n${'='.repeat(70)}`);
-console.log(`SESSION HEALTH CHECK — ${cycles.length} cycles`);
+console.log(`SESSION HEALTH CHECK -- ${cycles.length} cycles`);
 console.log('='.repeat(70));
 
-// ── 1. Overall signal distribution ──────────────────────────────────────────
+// -- 1. Overall signal distribution ------------------------------------------
 console.log('\n📊 SIGNAL DISTRIBUTION');
 const sigCounts = {};
 cycles.forEach(c => { sigCounts[c.signal || 'unknown'] = (sigCounts[c.signal || 'unknown'] || 0) + 1; });
@@ -121,7 +121,7 @@ Object.entries(sigCounts).sort((a,b) => b[1]-a[1]).forEach(([k,v]) => {
   console.log(`  ${k.padEnd(12)} ${String(v).padStart(3)}  ${bar}`);
 });
 
-// ── 2. Sub-engine firing rates ───────────────────────────────────────────────
+// -- 2. Sub-engine firing rates -----------------------------------------------
 console.log('\n⚙️  SUB-ENGINE FIRING RATES (out of ' + cycles.length + ' cycles)');
 const checks = [
   ['Volatility regime', c => c.volState !== null],
@@ -141,7 +141,7 @@ checks.forEach(([name, fn]) => {
   console.log(`  ${status} ${name.padEnd(22)} ${String(count).padStart(3)}/${cycles.length}  (${pct}%)`);
 });
 
-// ── 3. Meta-regime distribution ──────────────────────────────────────────────
+// -- 3. Meta-regime distribution ----------------------------------------------
 console.log('\n🏛️  META-REGIME DISTRIBUTION');
 const metaCounts = {};
 cycles.forEach(c => { if (c.metaRegime) metaCounts[c.metaRegime] = (metaCounts[c.metaRegime] || 0) + 1; });
@@ -149,7 +149,7 @@ Object.entries(metaCounts).sort((a,b) => b[1]-a[1]).forEach(([k,v]) => {
   console.log(`  ${k.padEnd(20)} ${v}x`);
 });
 
-// ── 4. Direction resolution breakdown ───────────────────────────────────────
+// -- 4. Direction resolution breakdown ---------------------------------------
 console.log('\n🧭 DIRECTION RESOLUTION');
 const dirCounts = {};
 cycles.forEach(c => {
@@ -158,7 +158,7 @@ cycles.forEach(c => {
 });
 Object.entries(dirCounts).sort((a,b) => b[1]-a[1]).forEach(([k,v]) => console.log(`  ${k.padEnd(35)} ${v}x`));
 
-// ── 5. Score distribution (when direction resolved) ──────────────────────────
+// -- 5. Score distribution (when direction resolved) --------------------------
 const scoredCycles = cycles.filter(c => c.score !== null && c.score !== undefined);
 if (scoredCycles.length) {
   console.log(`\n📈 SCORE DISTRIBUTION (${scoredCycles.length} cycles with scores)`);
@@ -188,7 +188,7 @@ if (scoredCycles.length) {
   }
 }
 
-// ── 6. No-trade reason breakdown ─────────────────────────────────────────────
+// -- 6. No-trade reason breakdown ---------------------------------------------
 console.log('\n🚫 NO-TRADE REASONS');
 const noTradeCycles = cycles.filter(c => c.signal === 'NO_TRADE');
 const reasonGroups = {};
@@ -202,13 +202,13 @@ Object.entries(reasonGroups).sort((a,b) => b[1]-a[1]).slice(0, 15).forEach(([k,v
   console.log(`  ${String(v).padStart(3)}x  ${k}`);
 });
 
-// ── 7. Strategy selection ────────────────────────────────────────────────────
+// -- 7. Strategy selection ----------------------------------------------------
 console.log('\n🎯 STRATEGY SELECTION (when strategy was chosen)');
 const stratCounts = {};
 cycles.forEach(c => { if (c.strategy) stratCounts[c.strategy] = (stratCounts[c.strategy] || 0) + 1; });
 Object.entries(stratCounts).sort((a,b) => b[1]-a[1]).forEach(([k,v]) => console.log(`  ${k.padEnd(25)} ${v}x`));
 
-// ── 8. Data quality over time ────────────────────────────────────────────────
+// -- 8. Data quality over time ------------------------------------------------
 console.log('\n📡 DATA QUALITY OVER TIME');
 const withCandles = cycles.filter(c => c.candles1m !== null);
 if (withCandles.length) {
@@ -225,7 +225,7 @@ if (withOC.length) {
   console.log(`  Option chain snapshots avg: ${avgOC}  (need ≥5 for OI analytics)`);
 }
 
-// ── 9. Trap detection ────────────────────────────────────────────────────────
+// -- 9. Trap detection --------------------------------------------------------
 const withTrap = cycles.filter(c => c.trapScore !== null);
 if (withTrap.length) {
   const trapScores = withTrap.map(c => Number(c.trapScore));
@@ -235,7 +235,7 @@ if (withTrap.length) {
   console.log(`  avg trap score: ${avg}  blocked (≥80): ${blocked}x`);
 }
 
-// ── 10. Cycle-by-cycle table ─────────────────────────────────────────────────
+// -- 10. Cycle-by-cycle table -------------------------------------------------
 console.log('\n📋 CYCLE-BY-CYCLE TABLE');
 console.log('  #   Time     Signal     Score  Grade  Meta-Regime          Direction    Strategy');
 console.log('  ' + '-'.repeat(95));
@@ -251,7 +251,7 @@ cycles.forEach((c, i) => {
   console.log(`  ${String(i+1).padStart(2)}  ${time}  ${sig} ${score}  ${grade}  ${meta} ${dir} ${strat}${flag}`);
 });
 
-// ── 11. Final verdict ────────────────────────────────────────────────────────
+// -- 11. Final verdict --------------------------------------------------------
 console.log('\n' + '='.repeat(70));
 console.log('🏁 FINAL VERDICT');
 console.log('='.repeat(70));
@@ -263,10 +263,10 @@ const trades = cycles.filter(c => c.signal !== 'NO_TRADE').length;
 
 console.log(`  Total cycles:          ${cycles.length}`);
 console.log(`  Trades generated:      ${trades}`);
-console.log(`  ATR computed:          ${atrOk}/${cycles.length} ${atrOk === cycles.length ? '✅' : '⚠️  (early session — resolves after 10:10 IST)'}`);
+console.log(`  ATR computed:          ${atrOk}/${cycles.length} ${atrOk === cycles.length ? '✅' : '⚠️  (early session -- resolves after 10:10 IST)'}`);
 console.log(`  Direction resolved:    ${dirOk}/${cycles.length} ${dirOk >= cycles.length * 0.8 ? '✅' : '⚠️'}`);
 console.log(`  Meta-regime computed:  ${metaOk}/${cycles.length} ${metaOk === cycles.length ? '✅' : '⚠️'}`);
 console.log(`  Strategy selected:     ${stratOk}/${cycles.length} (only when direction resolved)`);
-console.log(`\n  Hybrid engine:         ✅ WORKING — all sub-engines firing`);
+console.log(`\n  Hybrid engine:         ✅ WORKING -- all sub-engines firing`);
 console.log(`  Legacy AI path:        ✅ NOT USED`);
 console.log(`  Session logs:          ✅ Captured with sessionId`);

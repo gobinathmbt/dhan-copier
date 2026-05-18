@@ -16,5 +16,5 @@ proc.stdout.on('data', d => stream.write(d));
 proc.stderr.on('data', d => stream.write(d));
 proc.on('close', code => {
   stream.end();
-  console.log('Exit code:', code, '— output saved to', outFile);
+  console.log('Exit code:', code, '-- output saved to', outFile);
 });
