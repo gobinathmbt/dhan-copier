@@ -44,15 +44,20 @@ async function retryWithBackoff(fn, maxRetries = 3, initialDelay = 1000) {
       lastError = error;
       // Never retry auth failures
       if (error.response?.status === 401 || error.response?.status === 403) throw error;
+      const is429 = error.response?.status === 429;
       const retryable =
+        is429 ||
         error.code === 'ECONNRESET' ||
         error.code === 'ETIMEDOUT' ||
         error.code === 'ECONNREFUSED' ||
         error.code === 'ENOTFOUND' ||
         (error.response?.status >= 500 && error.response?.status < 600);
       if (!retryable || attempt === maxRetries - 1) throw error;
-      const delay = initialDelay * Math.pow(2, attempt);
-      logger.warn({ attempt: attempt + 1, delay, err: error.message }, '[dhanProd] retrying');
+      // 429 rate-limit: wait longer (3s, 6s, 12s) to respect Dhan's rate limit
+      const delay = is429
+        ? 3000 * Math.pow(2, attempt)
+        : initialDelay * Math.pow(2, attempt);
+      logger.warn({ attempt: attempt + 1, delay, status: error.response?.status, err: error.message }, '[dhanProd] retrying');
       await new Promise((r) => setTimeout(r, delay));
     }
   }

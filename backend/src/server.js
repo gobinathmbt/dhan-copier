@@ -335,7 +335,12 @@ async function start() {
     const { instance: feedRecorder } = require('./services/feedRecorder.service');
     const { instance: tickDelta } = require('./services/hybrid/tickDeltaClassifier');
     const niftyFuturesProd = require('./services/niftyFuturesProd.service');
+    const candleSynthesizer = require('./services/candleSynthesizer.service');
     feedRecorder.init(); // start day-rollover + prune old folders
+    // Start the candle synthesizer — reads 1m candles from live-feed folder
+    // every 3 seconds and synthesizes missing 5m/15m candles so the hybrid
+    // engine always has full ATR/volume-profile history from session start.
+    candleSynthesizer.start();
     // Start the tick-level UP/DOWN classifier BEFORE we connect, so it sees
     // every tick from the very first packet. Listening is event-driven and
     // adds zero latency to the feed parser.
@@ -373,6 +378,7 @@ process.on('uncaughtException', (err) => {
 process.on('SIGTERM', () => {
   logger.info('SIGTERM received, closing server gracefully');
   hybridLiveFeedService.disconnect();
+  try { require('./services/candleSynthesizer.service').stop(); } catch (_) {}
   try { require('./services/hybrid/tickDeltaClassifier').instance.stop(); } catch (_) {}
   try { require('./services/dhanLiveFeedProd.service').instance.disconnect(); } catch (_) {}
   try { require('./services/feedRecorder.service').instance.shutdown(); } catch (_) {}
@@ -385,6 +391,7 @@ process.on('SIGTERM', () => {
 process.on('SIGINT', () => {
   logger.info('SIGINT received, closing server gracefully');
   hybridLiveFeedService.disconnect();
+  try { require('./services/candleSynthesizer.service').stop(); } catch (_) {}
   try { require('./services/hybrid/tickDeltaClassifier').instance.stop(); } catch (_) {}
   try { require('./services/dhanLiveFeedProd.service').instance.disconnect(); } catch (_) {}
   try { require('./services/feedRecorder.service').instance.shutdown(); } catch (_) {}

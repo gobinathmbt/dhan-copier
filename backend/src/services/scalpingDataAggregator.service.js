@@ -440,6 +440,13 @@ async function buildPayload(authKey) {
       returns_1m: prev.close ? ((last.close - prev.close) / prev.close) * 100 : 0,
       candle_count: spotCandles.length,
     },
+    // Candles keyed by timeframe — used by RSI/MACD/Bollinger/Stochastic/VolumeProfile indicators
+    candles: {
+      '1m':  spotCandles,
+      '5m':  candles5m,
+      '15m': candles15m,
+      '30m': candles30m,
+    },
     // Actual ATM strike computed from real spot price
     actual_atm_strike: computedAtmStrike,
     actual_spot_price: actualSpot,
@@ -453,7 +460,10 @@ async function buildPayload(authKey) {
     vwap_analysis: {
       vwap,
       price_vs_vwap: vwap && last.close ? (last.close > vwap ? 'above' : 'below') : 'unknown',
+      // 'position' is the canonical field name used by the hybrid engine playbooks
+      position: vwap && last.close ? (last.close > vwap ? 'above' : 'below') : 'unknown',
       distance_from_vwap: vwap && last.close ? Number((last.close - vwap).toFixed(2)) : null,
+      distance_pct: vwap && last.close ? Number(((last.close - vwap) / vwap * 100).toFixed(3)) : null,
     },
     moving_averages: {
       ema_9: ema9,

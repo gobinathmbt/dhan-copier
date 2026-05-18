@@ -462,22 +462,24 @@ Remember: Quality over quantity. Only trade high-probability setups.`;
       }, '[professionalTrader] AI selected invalid strike, forcing to opening strike');
       decision.selected_strike = marketSession.openingStrike;
     }
+
+    // Ensure option_type is not null (default to CE if missing)
+    if (!decision.option_type) {
+      decision.option_type = decision.dominant_direction === 'bearish' ? 'PE' : 'CE';
+    }
     
-    console.log('\n' + '='.repeat(80));
-    console.log('✅ PROFESSIONAL DECISION');
-    console.log('='.repeat(80));
-    console.log('Market Character:', decision.market_character);
-    console.log('Direction:', decision.dominant_direction);
-    console.log('Decision:', decision.trade_decision);
-    console.log('Strike:', decision.selected_strike, decision.option_type);
-    console.log('Stop Loss:', decision.stop_loss_level);
-    console.log('Target:', decision.target_level);
-    console.log('Risk:Reward:', `1:${decision.risk_reward_ratio}`);
-    console.log('Max Hold:', decision.max_hold_time_seconds, 'seconds');
-    console.log('Confidence:', decision.confidence);
-    console.log('Rationale:', decision.entry_rationale);
-    console.log('Exit Conditions:', decision.exit_conditions.join(', '));
-    console.log('='.repeat(80) + '\n');
+    logger.info({
+      marketCharacter: decision.market_character,
+      direction: decision.dominant_direction,
+      tradeDecision: decision.trade_decision,
+      strike: decision.selected_strike,
+      optionType: decision.option_type,
+      stopLoss: decision.stop_loss_level,
+      target: decision.target_level,
+      riskReward: decision.risk_reward_ratio,
+      maxHold: decision.max_hold_time_seconds,
+      confidence: decision.confidence,
+    }, '[professionalTrader] Professional decision made');
     
     return decision;
   } catch (error) {

@@ -127,7 +127,7 @@ async function fetchUSFutures() {
 async function fetchDXY() {
   try {
     const data = await fetchYahooData(SYMBOLS.DXY);
-    
+    if (!data) return null;  // fetchYahooData returned null (API failed)
     return {
       ...data,
       impact_on_india: data.changePct > 0 ? 'negative' : 'positive', // Strong dollar = negative for India
@@ -145,7 +145,7 @@ async function fetchDXY() {
 async function fetchCrudeOil() {
   try {
     const data = await fetchYahooData(SYMBOLS.CRUDE_OIL);
-    
+    if (!data) return null;  // fetchYahooData returned null (API failed)
     return {
       ...data,
       impact_on_india: data.changePct > 0 ? 'negative' : 'positive', // Higher crude = negative for India (imports 85%)
@@ -163,7 +163,7 @@ async function fetchCrudeOil() {
 async function fetchGold() {
   try {
     const data = await fetchYahooData(SYMBOLS.GOLD);
-    
+    if (!data) return null;  // fetchYahooData returned null (API failed)
     return {
       ...data,
       risk_sentiment: data.changePct > 0 ? 'risk_off' : 'risk_on', // Gold up = risk-off
