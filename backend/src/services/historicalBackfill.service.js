@@ -35,6 +35,45 @@ const STRIKE_WINDOW = 6; // ATM ± 6  (13 strikes total)
 
 function ensureDir(p) { try { fs.mkdirSync(p, { recursive: true }); } catch (_) {} }
 
+// IST offset in seconds — used by the 30m aggregator to align bars to IST
+// boundaries (matches candleSynthesizer.service.js exactly).
+const IST_OFFSET_SEC = 5 * 3600 + 30 * 60;
+
+/**
+ * Aggregate 1m candles into N-minute bars.
+ * Same logic as candleSynthesizer.service.js so live and backfilled files
+ * are byte-for-byte equivalent.
+ *
+ * @param {Array<{t,o,h,l,c,v}>} candles1m - 1m candles in unix seconds
+ * @param {number} intervalMin - 5, 15, or 30
+ * @returns {Array} aggregated candles
+ */
+function aggregateCandles(candles1m, intervalMin) {
+  if (!candles1m.length) return [];
+  const intervalSec = intervalMin * 60;
+  const groups = new Map();
+  for (const c of candles1m) {
+    const tIst = c.t + IST_OFFSET_SEC;
+    const barStartIst = Math.floor(tIst / intervalSec) * intervalSec;
+    const barStartUtc = barStartIst - IST_OFFSET_SEC;
+    if (!groups.has(barStartUtc)) groups.set(barStartUtc, []);
+    groups.get(barStartUtc).push(c);
+  }
+  const result = [];
+  for (const [barStart, bars] of groups) {
+    if (!bars.length) continue;
+    bars.sort((a, b) => a.t - b.t);
+    const o = bars[0].o;
+    const h = Math.max(...bars.map(b => b.h));
+    const l = Math.min(...bars.map(b => b.l));
+    const c = bars[bars.length - 1].c;
+    const v = bars.reduce((s, b) => s + (b.v || 0), 0);
+    result.push({ t: barStart, o, h, l, c, v });
+  }
+  result.sort((a, b) => a.t - b.t);
+  return result;
+}
+
 function toIST_YYYYMMDD(date) {
   // Format as YYYY-MM-DD in IST regardless of server timezone
   const fmt = new Intl.DateTimeFormat('en-GB', {
@@ -313,11 +352,34 @@ async function backfillDay(dateStr, opts = {}) {
     expiryFlag = 'WEEK',
     expiryCode = 1, // Dhan treats 0 as missing — use 1 for the current expiry
     overwrite = false,
+    skipIfComplete = true, // skip if folder has all required files non-empty
   } = opts;
   const date = dateStr || yesterdayIST();
   const folderName = `${date}_${UNDERLYING}`;
   const folder = path.join(ROOT_DIR, folderName);
   ensureDir(folder);
+
+  // ── Skip-if-complete check ───────────────────────────────────────────
+  if (skipIfComplete) {
+    const required = [
+      'candles-1m.jsonl', 'candles-5m.jsonl', 'candles-15m.jsonl', 'candles-30m.jsonl',
+      'futures-1m.jsonl', 'futures-5m.jsonl', 'futures-15m.jsonl', 'futures-30m.jsonl',
+      'option-chain.jsonl', 'spot.jsonl', 'metadata.json',
+    ];
+    const allPresentAndNonEmpty = required.every(f => {
+      const fp = path.join(folder, f);
+      return fs.existsSync(fp) && fs.statSync(fp).size > 0;
+    });
+    if (allPresentAndNonEmpty) {
+      logger.info({ date }, '[backfill] skipping — all files present and non-empty');
+      return {
+        folder,
+        skipped: true,
+        meta: { date, source: 'cached' },
+        counts: { skipped: true },
+      };
+    }
+  }
 
   const meta = {
     date,
@@ -364,11 +426,20 @@ async function backfillDay(dateStr, opts = {}) {
   writeJsonl('candles-1m.jsonl',  c1.map(c => ({ t: c.time, o: c.open, h: c.high, l: c.low, c: c.close, v: c.volume || 0 })), overwrite);
   writeJsonl('candles-5m.jsonl',  c5.map(c => ({ t: c.time, o: c.open, h: c.high, l: c.low, c: c.close, v: c.volume || 0 })), overwrite);
   writeJsonl('candles-15m.jsonl', c15.map(c => ({ t: c.time, o: c.open, h: c.high, l: c.low, c: c.close, v: c.volume || 0 })), overwrite);
+  // 30m candles — derived locally from 1m via IST-aligned aggregation
+  // (matches candleSynthesizer.service.js so live and backfilled identical)
+  const c1Norm = c1.map(c => ({ t: c.time, o: c.open, h: c.high, l: c.low, c: c.close, v: c.volume || 0 }));
+  const c30 = aggregateCandles(c1Norm, 30);
+  writeJsonl('candles-30m.jsonl', c30, overwrite);
 
   // Futures candles — one file per timeframe
   writeJsonl('futures-1m.jsonl',  f1.candles.map(c => ({ t: c.time, o: c.open, h: c.high, l: c.low, c: c.close, v: c.volume || 0 })), overwrite);
   writeJsonl('futures-5m.jsonl',  f5.candles.map(c => ({ t: c.time, o: c.open, h: c.high, l: c.low, c: c.close, v: c.volume || 0 })), overwrite);
   writeJsonl('futures-15m.jsonl', f15.candles.map(c => ({ t: c.time, o: c.open, h: c.high, l: c.low, c: c.close, v: c.volume || 0 })), overwrite);
+  // Futures 30m — also derived locally
+  const f1Norm = f1.candles.map(c => ({ t: c.time, o: c.open, h: c.high, l: c.low, c: c.close, v: c.volume || 0 }));
+  const f30 = aggregateCandles(f1Norm, 30);
+  writeJsonl('futures-30m.jsonl', f30, overwrite);
 
   // Build synthetic tick stream from 1m candles: emit close at each bar-close timestamp
   const spotTicks = c1.map(c => ({
@@ -423,7 +494,7 @@ async function backfillDay(dateStr, opts = {}) {
 
   fs.writeFileSync(path.join(folder, 'metadata.json'), JSON.stringify(meta, null, 2));
 
-  logger.info({ folder, snapshots: snapshots.length, c1: c1.length, c5: c5.length, c15: c15.length }, '[backfill] done');
+  logger.info({ folder, snapshots: snapshots.length, c1: c1.length, c5: c5.length, c15: c15.length, c30: c30.length }, '[backfill] done');
   return {
     folder,
     meta,
@@ -432,9 +503,11 @@ async function backfillDay(dateStr, opts = {}) {
       candles1m: c1.length,
       candles5m: c5.length,
       candles15m: c15.length,
+      candles30m: c30.length,
       futures1m: f1.candles.length,
       futures5m: f5.candles.length,
       futures15m: f15.candles.length,
+      futures30m: f30.length,
       chain: snapshots.length,
     },
   };
