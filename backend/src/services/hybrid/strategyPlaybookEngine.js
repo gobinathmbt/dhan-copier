@@ -2539,6 +2539,231 @@ function _lightTrendDriftScalp(ctx) {
   };
 }
 
+// ─── PLAYBOOK 27: UT_BOT_FAST_SCALP ───────────────────────────────────
+// 10-15pt momentum capture using the UT Bot ATR trailing stop as the
+// execution trigger (per user spec 2026-05-18). The institutional spec is:
+//
+//   1. UT Bot 5m trend MUST match direction          (primary momentum filter)
+//   2. UT Bot 15m trend MUST match direction         (HARD — per UT guide
+//                                                     "5m + 15m balanced
+//                                                     intraday best" combo)
+//   3. UT Bot 1m trend matches OR price above the 5m trailing stop in dir
+//   4. Trending market regime OR expansion vol       (UT Bot's natural
+//                                                     habitat — fails in
+//                                                     sideways markets per
+//                                                     user's UT guide)
+//   5. VWAP aligned with direction                   (institutional bias)
+//   6. Volume not in dry-up                          (avoid stalled tape)
+//   7. Delta in direction (≥5% absolute)             (real participation)
+//   8. NOT in midday_chop, NOT dead-vol              (whipsaw guard per UT
+//                                                     guide — UT Bot fails
+//                                                     in sideways markets)
+//
+// Hold profile: SCALP, 180s max hold, RR 1.0 → optimised for the 10-15pt
+// move the user described in the screenshot. Sizing 0.7x — UT Bot is
+// reactive (catches moves AFTER they start), so trades are slightly less
+// edge than the elite preconditioned playbooks.
+//
+// CALIBRATED 2026-05-18 cycle 2: Cycle 1 produced 41 trades at 48.8% WR —
+// UT Bot was cannibalising the 77% WR VWAP_BOUNCE_SCALP. Tightened to:
+//   - 15m UT trend match REQUIRED (was confirmation only)
+//   - Trending regime OR expansion vol REQUIRED (was confirmation only)
+//   - Delta ≥5% REQUIRED (was 3%)
+//   - Elite-only firing (was standard+)
+function _utBotFastScalp(ctx) {
+  const reasons = [];
+  let score = 0;
+  const required = [];
+  const confirmations = [];
+
+  const ut = ctx.utBot;
+  if (!ut) required.push('no UT Bot data');
+
+  // Primary: 5m trend must match
+  const tf5 = ut?.perTimeframe?.['5m']?.trend;
+  if (tf5 !== ctx.direction) required.push(`UT Bot 5m=${tf5 || 'na'} not ${ctx.direction}`);
+
+  // HARD: 15m trend must match (per user's UT guide — "5m + 15m balanced
+  // intraday best" combo). This is the single biggest reliability filter.
+  const tf15 = ut?.perTimeframe?.['15m']?.trend;
+  if (tf15 !== ctx.direction) required.push(`UT Bot 15m=${tf15 || 'na'} not ${ctx.direction} (HARD)`);
+
+  // Secondary trigger: 1m trend matches OR price holds above/below 5m stop
+  const tf1 = ut?.perTimeframe?.['1m']?.trend;
+  const ts5 = Number(ut?.perTimeframe?.['5m']?.trailingStop);
+  const spot = Number(ctx.spotPrice);
+  let triggerOK = tf1 === ctx.direction;
+  if (!triggerOK && Number.isFinite(ts5) && Number.isFinite(spot)) {
+    triggerOK = (ctx.direction === 'bullish' && spot > ts5)
+             || (ctx.direction === 'bearish' && spot < ts5);
+  }
+  if (!triggerOK) required.push(`UT Bot 1m=${tf1 || 'na'} and price not past 5m stop`);
+
+  // HARD: Must be in UT Bot's natural habitat — trending market OR
+  // expansion volatility. UT Bot fails in chop/balanced/pin (per user's
+  // guide).
+  const regime = ctx.marketRegime?.regime;
+  const isTrending = regime === 'trending_bullish' || regime === 'trending_bearish';
+  const isExpansion = ctx.volatilityRegime?.state === 'expansion';
+  if (!isTrending && !isExpansion) {
+    required.push(`regime=${regime} vol=${ctx.volatilityRegime?.state} (need trending OR expansion)`);
+  }
+
+  // VWAP must align
+  const vwapPos = ctx.vwap?.position;
+  if ((ctx.direction === 'bullish' && vwapPos !== 'above')
+   || (ctx.direction === 'bearish' && vwapPos !== 'below')) {
+    required.push(`VWAP wrong side (${vwapPos})`);
+  }
+
+  // Volume must NOT be dry-up (UT Bot needs participation)
+  if (ctx.volumeAnalysis?.timeVolume?.state === 'dry_up') {
+    required.push('volume dry-up (UT Bot fails on dead tape)');
+  }
+
+  // Delta supportive — tightened to ≥5% (was 3%)
+  const deltaPct = _safe(ctx.volumeAnalysis?.delta?.cvdPctLong);
+  const deltaOK = (ctx.direction === 'bullish' && deltaPct >= 5)
+              || (ctx.direction === 'bearish' && deltaPct <= -5);
+  if (!deltaOK) required.push(`delta ${deltaPct}% not supportive (need ≥5% in dir)`);
+
+  // Hard exclusion: midday_chop (your guide explicitly warned UT Bot whipsaws)
+  if (ctx.sessionPhase?.phase === 'midday_chop') required.push('midday_chop');
+
+  // Hard exclusion: dead volatility (no real moves to ride)
+  if (ctx.volatilityRegime?.state === 'dead') required.push('dead volatility');
+
+  // Hard exclusion: trap score high
+  if ((ctx.trap?.trapScore || 0) >= 65) required.push(`trap ${ctx.trap.trapScore}`);
+
+  // Hard exclusion: expiry afternoon theta
+  if (ctx.sessionPhase?.isExpiryDay && ctx.sessionPhase?.hhmm >= 1430) {
+    required.push('expiry afternoon');
+  }
+
+  // CALIBRATED 2026-05-18 cycle 3: 20/29 trades exited on TIMEOUT with tiny
+  // losses → UT Bot was firing at exhaustion points. Filter by requiring
+  // the LATEST 5m candle to actually be closing in direction with body
+  // dominance (real momentum on the entry candle, not reactive whip).
+  const c5m = ctx.candles5m || [];
+  const lastC = c5m[c5m.length - 1];
+  if (lastC) {
+    const body = Math.abs(lastC.c - lastC.o);
+    const range = lastC.h - lastC.l;
+    const bodyPct = range > 0 ? body / range : 0;
+    const closingInDir = (ctx.direction === 'bullish' && lastC.c > lastC.o)
+                      || (ctx.direction === 'bearish' && lastC.c < lastC.o);
+    if (!closingInDir) {
+      required.push(`last 5m candle not closing ${ctx.direction}`);
+    } else if (bodyPct < 0.45) {
+      required.push(`last 5m body weak (${(bodyPct*100).toFixed(0)}% of range)`);
+    }
+  } else {
+    required.push('no 5m candle data');
+  }
+
+  const valid = required.length === 0;
+  if (!valid) {
+    return { name: 'UT_BOT_FAST_SCALP', family: 'momentum_continuation',
+             valid: false, score: 0, conviction: 'weak', missing: required,
+             reasoning: `missing: ${required.join(', ')}` };
+  }
+  score += 35;
+  reasons.push(`UT Bot 5m+15m=${ctx.direction} + VWAP ${vwapPos} + delta ${deltaPct}%`);
+
+  // ── Confirmations ──
+  // 1. UT Bot 30m aligned (rare but A-tier conviction)
+  const tf30 = ut?.perTimeframe?.['30m']?.trend;
+  if (tf30 === ctx.direction) {
+    score += 10; confirmations.push(`UT Bot 30m ${tf30}`);
+  }
+  // 2. UT Bot 1m aligned (entry timing precise, beyond just stop break)
+  if (tf1 === ctx.direction) {
+    score += 6; confirmations.push(`UT Bot 1m ${tf1}`);
+  }
+  // 3. Strong delta (≥10% absolute)
+  if (Math.abs(deltaPct) >= 10) {
+    score += 8; confirmations.push(`strong delta ${deltaPct}%`);
+  }
+  // 4. Delta rising/falling in direction (acceleration)
+  const deltaTrend = ctx.volumeAnalysis?.delta?.trend;
+  if ((ctx.direction === 'bullish' && deltaTrend === 'rising')
+   || (ctx.direction === 'bearish' && deltaTrend === 'falling')) {
+    score += 6; confirmations.push(`delta ${deltaTrend}`);
+  }
+  // 5. Futures aligned (institutional confirmation)
+  if (ctx.futuresData?.direction === ctx.direction) {
+    score += 6; confirmations.push('futures aligned');
+  }
+  // 6. OI in direction
+  const oiR = ctx.oiAnalytics?.regime || '';
+  const oiAligned = (ctx.direction === 'bullish'
+                    && (oiR === 'aggressive_long_buildup' || oiR === 'violent_short_covering'))
+                || (ctx.direction === 'bearish'
+                    && (oiR === 'aggressive_short_buildup' || oiR === 'long_unwinding_collapse'));
+  if (oiAligned) {
+    score += 8; confirmations.push(`OI ${oiR}`);
+  }
+  // 7. MTF structure aligned
+  if (ctx.mtfStructure?.alignment === 'full') {
+    score += 8; confirmations.push('MTF full');
+  } else if (ctx.mtfStructure?.alignment === 'partial') {
+    score += 4; confirmations.push('MTF partial');
+  }
+  // 8. Volume spike on the candle (real momentum)
+  const tvState = ctx.volumeAnalysis?.timeVolume?.state;
+  if (tvState === 'spike' || tvState === 'climax') {
+    score += 6; confirmations.push(`volume ${tvState}`);
+  }
+  // 9. Both trending + expansion (best UT Bot habitat)
+  if (isTrending && isExpansion) {
+    score += 8; confirmations.push('trending+expansion (UT prime habitat)');
+  }
+  // 10. Orderflow initiative
+  if (ctx.orderflowState?.state === 'initiative_buying' && ctx.direction === 'bullish') {
+    score += 6; confirmations.push('initiative buying');
+  }
+  if (ctx.orderflowState?.state === 'initiative_selling' && ctx.direction === 'bearish') {
+    score += 6; confirmations.push('initiative selling');
+  }
+  // 11. Above/below VA acceptance (range expansion confirmation)
+  const acc = ctx.volumeAnalysis?.acceptance;
+  if ((ctx.direction === 'bullish' && acc === 'above_va')
+   || (ctx.direction === 'bearish' && acc === 'below_va')) {
+    score += 5; confirmations.push(`accepted ${acc}`);
+  }
+
+  // Need ≥4 confirmations for elite. Combined with the much stricter
+  // preconditions (5m+15m UT BOTH aligned + trending/expansion + delta ≥5%
+  // + VWAP + volume + no chop/dead) this is a genuinely high-quality setup.
+  const conviction = confirmations.length >= 4 ? 'elite' :
+                     confirmations.length >= 2 ? 'standard' : 'weak';
+
+  return {
+    name: 'UT_BOT_FAST_SCALP',
+    family: 'momentum_continuation',
+    // ELITE-ONLY: only fires with 4+ confirmations AND all hard preconditions.
+    valid: conviction === 'elite',
+    score: _clamp(score),
+    conviction,
+    // Hold profile: 180s scalp with 1.0 RR — optimised for the 10-15pt
+    // momentum move the user described. UT Bot reverses on momentum loss
+    // so the monitor's UT-flip-exit will close the trade naturally.
+    holdProfile: { tradeType: 'SCALP', maxHoldSec: 180, rrTarget: 1.0 },
+    // Tight risk: 9% premium SL, 0.7x sizing (slightly conservative because
+    // UT Bot is reactive — catches moves AFTER they start, less edge than
+    // structurally-confirmed playbooks).
+    riskProfile: { slPct: 0.09, sizingFactor: conviction === 'elite' ? 0.85 : 0.6 },
+    // Use a moderate strategy threshold — score of 65 is enough since the
+    // playbook itself has strict preconditions.
+    minScoreOverride: 65,
+    allowedDirections: ['bullish', 'bearish'],
+    preconditions: ['ut_bot_5m_aligned', 'ut_bot_15m_aligned', 'trending_or_expansion', 'vwap_aligned', 'volume_not_dry', 'delta_supportive_5pct', 'no_chop_no_dead_vol'],
+    confirmations,
+    reasoning: `${conviction.toUpperCase()} | ${confirmations.join(' | ')}`,
+  };
+}
+
 // ─── REGIME → PLAYBOOK ELIGIBILITY MAP (institutional spec) ────────────────
 // This is the orchestrator's "permission map". Even if a playbook scores
 // high, it must match the current meta-regime to be eligible.
@@ -2554,16 +2779,16 @@ function _lightTrendDriftScalp(ctx) {
 // its strict preconditions (typically dead-vol drift). Conservative
 // management (200s/1.2RR/0.5 sizing) keeps the win-rate impact minimal.
 const REGIME_PLAYBOOKS = {
-  trend_auction:    ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'OPENING_DRIVE_CONTINUATION', 'OPENING_DRIVE_FAILURE', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
-  short_covering:   ['SHORT_COVERING_SQUEEZE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'SWEEP_RECLAIM_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
-  long_liquidation: ['LONG_LIQUIDATION_CASCADE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'SWEEP_RECLAIM_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
+  trend_auction:    ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'OPENING_DRIVE_CONTINUATION', 'OPENING_DRIVE_FAILURE', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'UT_BOT_FAST_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
+  short_covering:   ['SHORT_COVERING_SQUEEZE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'SWEEP_RECLAIM_SCALP', 'UT_BOT_FAST_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
+  long_liquidation: ['LONG_LIQUIDATION_CASCADE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'SWEEP_RECLAIM_SCALP', 'UT_BOT_FAST_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
   gamma_pin:        ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'FAILED_AUCTION_REVERSAL', 'EXHAUSTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'SWEEP_RECLAIM_SCALP'],
   balanced_auction: ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'SWEEP_RECLAIM_SCALP', 'OPENING_DRIVE_FAILURE'],
   slow_grind:       ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'PULLBACK_CONTINUATION', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'LIGHT_TREND_DRIFT_SCALP'],
-  dealer_hedging:   ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'LIGHT_TREND_DRIFT_SCALP'],
-  expiry_expansion: ['WEEKLY_EXPIRY_DEALER_UNWIND', 'INITIATIVE_MOMENTUM_EXPANSION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'DELTA_DRIVE_SCALP', 'PIN_REVERSION', 'SWEEP_RECLAIM_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
+  dealer_hedging:   ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'UT_BOT_FAST_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
+  expiry_expansion: ['WEEKLY_EXPIRY_DEALER_UNWIND', 'INITIATIVE_MOMENTUM_EXPANSION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'DELTA_DRIVE_SCALP', 'PIN_REVERSION', 'SWEEP_RECLAIM_SCALP', 'UT_BOT_FAST_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
   panic:            ['EXHAUSTION_REVERSAL', 'FAILED_AUCTION_REVERSAL', 'SWEEP_RECLAIM_SCALP'],
-  unknown:          ['GAMMA_PIN_MEAN_REVERSION', 'VWAP_RECLAIM_CLEAN', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'VWAP_BOUNCE_SCALP', 'DELTA_DRIVE_SCALP', 'VALUE_AREA_ROTATION', 'VWAP_OSCILLATION_SCALP', 'LVN_REJECTION_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
+  unknown:          ['GAMMA_PIN_MEAN_REVERSION', 'VWAP_RECLAIM_CLEAN', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'VWAP_BOUNCE_SCALP', 'DELTA_DRIVE_SCALP', 'VALUE_AREA_ROTATION', 'VWAP_OSCILLATION_SCALP', 'LVN_REJECTION_SCALP', 'UT_BOT_FAST_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
 };
 
 const ALL_PLAYBOOKS = [
@@ -2595,6 +2820,9 @@ const ALL_PLAYBOOKS = [
   _oiMigrationTrend,
   // Phase 2 institutional fallback (cycle 31) — closes the 8 zero-trade days
   _lightTrendDriftScalp,
+  // Phase 3 user-spec UT Bot fast scalp (2026-05-18) — 10-15pt momentum
+  // capture using ATR-trailing stop as execution trigger.
+  _utBotFastScalp,
 ];
 
 /**

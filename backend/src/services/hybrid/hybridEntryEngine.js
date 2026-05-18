@@ -940,6 +940,9 @@ async function decide({
     multiDayContext,
     marketInternals: algorithmOutputs?.marketInternals,
     trap,
+    // UT Bot per-timeframe trends (1m/5m/15m/30m + trailing stops) — used
+    // by UT_BOT_FAST_SCALP playbook for ATR-trail-stop entry triggers.
+    utBot,
     // Calibrated 2026-05-18: pass IV velocity stats (intraday tracker) for
     // IV_CRUSH_FADE playbook
     ivStats: ivVelocityTracker.getStats({
@@ -1206,6 +1209,7 @@ async function decide({
     ivPercentile: multiDayContext?.ivPercentile,
     expiryOverrides: expiry?.overrides || null,
     hhmm: sessionPhase?.hhmm,
+    preferOTM: settings?.preferOTMStrikes === true,
   });
   if (!strikeRes.ok) {
     return _noTrade(`Strike selection failed: ${strikeRes.reason}`);

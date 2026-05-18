@@ -147,6 +147,15 @@ const ALGO_SETTINGS = {
   // reduced aggression) so leave OFF if you want backtest-parity live.
   restrictToHighQualityPhases: false,
 
+  // ── Strike moneyness preference (user spec 2026-05-18) ──
+  // Per user: prefer OTM > ATM > ITM for both CE (bullish) and PE (bearish).
+  // OTM has higher gamma per rupee → faster premium move on a 10-15pt scalp,
+  // and smaller absolute rupee loss on SL hits. The strike selector still
+  // honours the delta band, max-pain avoidance, and ±150pt distance cap, so
+  // pure deep-OTM lottery tickets are still rejected. This flag just adds a
+  // moneyness bonus: OTM +12, ATM +5, ITM 0.
+  preferOTMStrikes: true,
+
   // ============================================================
   // STRATEGY & EXECUTION MODE
   // ============================================================

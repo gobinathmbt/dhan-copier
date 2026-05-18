@@ -204,6 +204,8 @@ function familyOf(entryType) {
   if (entryType === 'OI_MIGRATION_TREND')             return 'momentum_continuation';
   // Phase 2 institutional fallback (cycle 31)
   if (entryType === 'LIGHT_TREND_DRIFT_SCALP')         return 'momentum_continuation';
+  // Phase 3 user-spec UT Bot fast scalp (2026-05-18) — momentum continuation
+  if (entryType === 'UT_BOT_FAST_SCALP')               return 'momentum_continuation';
   return null;
 }
 

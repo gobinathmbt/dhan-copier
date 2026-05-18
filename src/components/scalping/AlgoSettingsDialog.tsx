@@ -59,6 +59,7 @@ export interface ScalpingSettings {
   trapBlockThreshold: number;
   enableHybridAIAdvisory: boolean;
   restrictToHighQualityPhases: boolean;
+  preferOTMStrikes: boolean;
   filters: {
     vwap: boolean; oi: boolean; regime: boolean; liquiditySweep: boolean;
     volumeSpike: boolean; bankNifty: boolean; volatility: boolean;
@@ -226,6 +227,7 @@ export function AlgoSettingsDialog({ open, onOpenChange }: Props) {
                 <div>Trap Block Threshold: {s.trapBlockThreshold}</div>
                 <div>AI Advisory: {s.enableHybridAIAdvisory ? '✓' : '✗'}</div>
                 <div>HQ Phases Only: {s.restrictToHighQualityPhases ? '✓ (morning + power_hour)' : '✗ (all phases)'}</div>
+                <div>Strike Preference: {s.preferOTMStrikes ? 'OTM &gt; ATM &gt; ITM' : 'ATM-anchored'}</div>
               </div>
             </div>
           </div>

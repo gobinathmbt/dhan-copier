@@ -66,6 +66,7 @@ function _moneynessFromAtm(strikeVal, atmStrike, direction) {
  * @param {number} [opts.ivPercentile]  - 0..100, rotates ITM vs OTM preference
  * @param {Object} [opts.expiryOverrides] - { preferITM, minDelta, ... }
  * @param {number} [opts.hhmm]          - current IST time, used for theta penalty
+ * @param {boolean}[opts.preferOTM]     - when true, OTM > ATM > ITM scoring bonus
  *
  * Strategy:
  *   - Anchor on `openingStrike` when provided. Restrict candidates to
@@ -92,6 +93,7 @@ function select({
   ivPercentile = null,
   expiryOverrides = null,
   hhmm = null,
+  preferOTM = false,
 } = {}) {
   if (!primaryStrikes.length || !atmStrike) {
     return { ok: false, reason: 'no chain or atm', strike: null };
@@ -183,6 +185,24 @@ function select({
       if (expiryOverrides?.preferITM && moneyness !== 'ITM' && moneyness !== 'ATM') {
         score -= 25;
         reasons.push('expiry override prefers ITM');
+      }
+
+      // ── User-spec OTM preference (2026-05-18) ─────────────────────────
+      // OTM > ATM > ITM ordering for both CE and PE. The earlier safety
+      // guards (max-pain, late-day theta, expiry prefer-ITM, distance cap)
+      // are NOT overridden — those still subtract their penalties. This
+      // bonus only nudges scoring within the allowed candidate set.
+      // Skipped when expiry override forces ITM, or when high-IV regime
+      // already penalised OTM.
+      if (preferOTM && !expiryOverrides?.preferITM
+          && !(ivPercentile != null && ivPercentile > 80)
+          && !lateAfternoon) {
+        if (moneyness === 'OTM') {
+          score += 12; reasons.push('preferOTM: OTM bonus +12');
+        } else if (moneyness === 'ATM') {
+          score += 5; reasons.push('preferOTM: ATM bonus +5');
+        }
+        // ITM gets no bonus, keeping it as the least-preferred option.
       }
 
       return {
