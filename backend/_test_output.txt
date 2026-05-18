@@ -1,11 +1,11 @@
 
-Backtesting 1 day(s) from 2026-05-15 to 2026-05-15
+Backtesting 1 day(s) from 2026-05-18 to 2026-05-18
 Settings: 5 lots (325 qty), SL 15pts, Target 10pts, Max-hold 180s, Cooldown 5min, Strategy SCALPING
 Brokerage: ₹60 flat per round-trip
 
-Logging to: C:\Users\GobiNath\Desktop\Trade_Prod\dhan-copier\backend\logs\backtest-2026-05-18T06-15-42-316Z.log
+Logging to: C:\Users\GobiNath\Desktop\Trade_Prod\dhan-copier\backend\logs\backtest-2026-05-18T07-44-53-253Z.log
 
-  2026-05-15: 4 trades, 4W/0L, P&L ₹8356
+  2026-05-18: 3 trades, 1W/2L, P&L ₹-1188
 
 ══════════════════════════════════════════════════════════════════════════════
 BACKTEST RESULTS — HYBRID ENTRY ENGINE
@@ -15,50 +15,51 @@ PER-DAY BREAKDOWN
 ──────────────────────────────────────────────────────────────────────────────
 Date         Cycles  Signals  Trades   W   L   WinRate    Net P&L
 ──────────────────────────────────────────────────────────────────────────────
-2026-05-15     63        4       4   4   0  100.0%   ₹   8356
+2026-05-18     63        3       3   1   2   33.3%   ₹  -1188
 ──────────────────────────────────────────────────────────────────────────────
 
 AGGREGATE
 ──────────────────────────────────────────────────────────────────────────────
   Days backtested              1
-  Profitable days              1/1 (100.0%)
+  Profitable days              0/1 (0.0%)
   Total cycles run             63
-  Signals generated            4
-  Trades taken                 4
-  Wins                         4
-  Losses                       0
-  Win rate                     100.00%
-  Gross P&L (₹)                8596.25
-  Net P&L (₹, after charges)   8356.25
-  Average win (₹)              2089.06
-  Average loss (₹)             0.00
-  Expectancy / trade (₹)       2089.06
-  Avg hold time (sec)          213
-  Profit factor                8356.25
+  Signals generated            3
+  Trades taken                 3
+  Wins                         1
+  Losses                       2
+  Win rate                     33.33%
+  Gross P&L (₹)                -1007.50
+  Net P&L (₹, after charges)   -1187.50
+  Average win (₹)              1256.25
+  Average loss (₹)             -1221.88
+  Expectancy / trade (₹)       -395.83
+  Avg hold time (sec)          144
+  Profit factor                0.51
 
 STRATEGY BREAKDOWN
 ──────────────────────────────────────────────────────────────────────────────
 Strategy            Trades   W    L    WinRate    Net P&L
 ──────────────────────────────────────────────────────────────────────────────
-INTRADAY_MOMENTUM        4    4    0  100.0%   ₹   8356
+INTRADAY_MOMENTUM        1    1    0  100.0%   ₹   1256
+MEAN_REVERSION           2    0    2    0.0%   ₹  -2444
 
 ENTRY TYPE BREAKDOWN
 ──────────────────────────────────────────────────────────────────────────────
 Entry Type             Trades   W    L    WinRate    Net P&L
 ──────────────────────────────────────────────────────────────────────────────
-COMPOSITE_PROFILE_EDGE_REJECTION     2    2    0  100.0%   ₹   2188
-VWAP_BOUNCE_SCALP          2    2    0  100.0%   ₹   6169
+VWAP_BOUNCE_SCALP          2    0    2    0.0%   ₹  -2444
+HVN_REJECTION_ROTATION     1    1    0  100.0%   ₹   1256
 
 DIRECTION BREAKDOWN
 ──────────────────────────────────────────────────────────────────────────────
 Side    Trades   W    L    WinRate    Net P&L
 ──────────────────────────────────────────────────────────────────────────────
-BUY_CE      1    1    0  100.0%   ₹   4279
-BUY_PE      3    3    0  100.0%   ₹   4078
+BUY_CE      3    1    2   33.3%   ₹  -1188
+BUY_PE      0    0    0    0.0%   ₹      0
 
 ══════════════════════════════════════════════════════════════════════════════
-FINAL: 4/4 wins (100.00%) — Net ₹8356.25 over 1 days
+FINAL: 1/3 wins (33.33%) — Net ₹-1187.50 over 1 days
 ══════════════════════════════════════════════════════════════════════════════
 
-Full debug log: C:\Users\GobiNath\Desktop\Trade_Prod\dhan-copier\backend\logs\backtest-2026-05-18T06-15-42-316Z.log
+Full debug log: C:\Users\GobiNath\Desktop\Trade_Prod\dhan-copier\backend\logs\backtest-2026-05-18T07-44-53-253Z.log
 
