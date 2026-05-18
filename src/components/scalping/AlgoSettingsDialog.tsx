@@ -58,6 +58,7 @@ export interface ScalpingSettings {
   maxLossesPerDay: number;
   trapBlockThreshold: number;
   enableHybridAIAdvisory: boolean;
+  restrictToHighQualityPhases: boolean;
   filters: {
     vwap: boolean; oi: boolean; regime: boolean; liquiditySweep: boolean;
     volumeSpike: boolean; bankNifty: boolean; volatility: boolean;
@@ -224,6 +225,7 @@ export function AlgoSettingsDialog({ open, onOpenChange }: Props) {
                 <div>Max Losses/Day: {s.maxLossesPerDay}</div>
                 <div>Trap Block Threshold: {s.trapBlockThreshold}</div>
                 <div>AI Advisory: {s.enableHybridAIAdvisory ? '✓' : '✗'}</div>
+                <div>HQ Phases Only: {s.restrictToHighQualityPhases ? '✓ (morning + power_hour)' : '✗ (all phases)'}</div>
               </div>
             </div>
           </div>

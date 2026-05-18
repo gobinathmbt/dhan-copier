@@ -138,6 +138,15 @@ const ALGO_SETTINGS = {
   trapBlockThreshold: 80,           // Trap-detection score above which entry is blocked (0-100)
   enableHybridAIAdvisory: false,    // When true, hybrid engine calls AI for advisory confirmation
 
+  // ── Session phase restrictions (high-quality windows only) ──
+  // When true, the hybrid engine refuses entries outside the two best windows:
+  //   • morning      (09:45–11:30 IST)  — full aggression, all strategies
+  //   • power_hour   (14:15–15:15 IST)  — full aggression, trend resolution
+  // Skipped phases: opening_drive, midday_chop, afternoon, closing.
+  // This DEVIATES from backtest behavior (backtest trades midday_chop with
+  // reduced aggression) so leave OFF if you want backtest-parity live.
+  restrictToHighQualityPhases: false,
+
   // ============================================================
   // STRATEGY & EXECUTION MODE
   // ============================================================

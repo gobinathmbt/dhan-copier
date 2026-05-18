@@ -329,11 +329,13 @@ async function decide({
   }
 
   // ── Pipeline step 1: Session ─────────────────────────────────────────
-  const sessionPhase = sessionEngine.classifySession();
+  const sessionPhase = sessionEngine.classifySession(new Date(), {
+    restrictToHighQualityPhases: settings?.restrictToHighQualityPhases === true,
+  });
   hybridLogger.info({
     sessionId,
     event: 'session_phase',
-    message: `phase=${sessionPhase.phase} agg=${sessionPhase.aggressionFactor} expiry=${sessionPhase.isExpiryWindow}`,
+    message: `phase=${sessionPhase.phase} agg=${sessionPhase.aggressionFactor} expiry=${sessionPhase.isExpiryWindow}${sessionPhase.restrictedByPhaseFilter ? ' [HQ-filter blocked]' : ''}`,
     data: sessionPhase,
   });
 
@@ -1177,6 +1179,9 @@ async function decide({
     return _noTrade(`Risk engine blocks: ${risk.reasoning}`);
   }
   if (!sessionPhase.allowEntries) {
+    if (sessionPhase.restrictedByPhaseFilter) {
+      return _noTrade(`Session phase ${sessionPhase.phase} blocked by restrictToHighQualityPhases (only morning/power_hour allowed)`);
+    }
     return _noTrade(`Session phase ${sessionPhase.phase} disallows entries`);
   }
 

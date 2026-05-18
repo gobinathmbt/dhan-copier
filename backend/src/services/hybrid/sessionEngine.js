@@ -45,9 +45,16 @@ function _istParts(now = new Date()) {
  *   14:15–15:15  power_hour      — trend resolution, full aggression
  *   15:15–15:30  closing         — square-off, no new entries
  *   else         pre_market / post_market — no trading
+ *
+ * @param {Date} now
+ * @param {Object} [opts]
+ * @param {boolean} [opts.restrictToHighQualityPhases]
+ *        When true, only `morning` and `power_hour` allow entries. All other
+ *        phases get allowEntries=false. Default false (backtest parity).
  */
-function classifySession(now = new Date()) {
+function classifySession(now = new Date(), opts = {}) {
   const { weekday, hhmm } = _istParts(now);
+  const restrictHQ = opts.restrictToHighQualityPhases === true;
 
   // Default
   let phase = 'pre_market';
@@ -109,6 +116,16 @@ function classifySession(now = new Date()) {
     aggressionFactor = Math.min(aggressionFactor, 0.5);
   }
 
+  // ── High-quality-phase restriction (live-only opt-in) ────────────────
+  // When `restrictToHighQualityPhases=true` the engine only enters during
+  // `morning` and `power_hour`. Everything else becomes a no-entry window
+  // (still classified for telemetry, just blocked).
+  let restrictedByPhaseFilter = false;
+  if (restrictHQ && allowEntries && phase !== 'morning' && phase !== 'power_hour') {
+    allowEntries = false;
+    restrictedByPhaseFilter = true;
+  }
+
   return {
     phase,
     hhmm,
@@ -121,14 +138,15 @@ function classifySession(now = new Date()) {
     isMiddayChop: phase === 'midday_chop',
     isPowerHour: phase === 'power_hour',
     isOpeningDrive: phase === 'opening_drive',
+    restrictedByPhaseFilter,
   };
 }
 
 /**
  * Convenience: should we even attempt a new entry in this session phase?
  */
-function isEntryAllowed(now = new Date()) {
-  return classifySession(now).allowEntries;
+function isEntryAllowed(now = new Date(), opts = {}) {
+  return classifySession(now, opts).allowEntries;
 }
 
 module.exports = {
