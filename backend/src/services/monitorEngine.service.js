@@ -725,29 +725,23 @@ function buildPrimaryStrikesBlock(aggregator, focusStrikes) {
 // ---------------------------------------------------------------------------
 async function decide({ trade, aggregator, algorithmOutputs, masterDecision, settings, allOpenTrades, futuresData }) {
   // ──────────────────────────────────────────────────────────────────────────
-  // HYBRID PATH — deterministic, institutional-style. ON BY DEFAULT.
-  // Returns the SAME shape as the legacy AI path:
-  //   { action, new_sl, add_lots, confidence, reasoning, exit_urgency, source }
-  // To opt out per-session: settings.useHybridEngine = false
+  // HYBRID ENGINE — sole decision-maker. No AI fallback.
+  // Returns: { action, new_sl, add_lots, confidence, reasoning, exit_urgency, source }
+  //
+  // If the hybrid engine throws, the error propagates up to scalpingEngine
+  // which logs it and skips the monitor cycle — no silent fallback to legacy AI.
   // ──────────────────────────────────────────────────────────────────────────
-  const useHybrid = settings?.useHybridEngine !== false;
-  if (useHybrid) {
-    try {
-      const decision = await hybrid.monitor.decide({
-        trade, aggregator, algorithmOutputs, masterDecision, settings, allOpenTrades, futuresData,
-      });
-      logger.info({
-        tradeId: String(trade?._id || ''),
-        action: decision.action,
-        source: decision.source,
-        reasoning: decision.reasoning,
-      }, '[monitorEngine] hybrid decision');
-      return decision;
-    } catch (e) {
-      logger.error({ err: e.message, stack: e.stack, tradeId: String(trade?._id || '') },
-        '[monitorEngine] hybrid path failed — falling back to legacy AI path');
-      // fall through
-    }
+  {
+    const decision = await hybrid.monitor.decide({
+      trade, aggregator, algorithmOutputs, masterDecision, settings, allOpenTrades, futuresData,
+    });
+    logger.info({
+      tradeId: String(trade?._id || ''),
+      action: decision.action,
+      source: decision.source,
+      reasoning: decision.reasoning,
+    }, '[monitorEngine] hybrid decision');
+    return decision;
   }
 
   // ─── LEGACY AI PATH ────────────────────────────────────────────────────────

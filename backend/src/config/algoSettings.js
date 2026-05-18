@@ -124,6 +124,21 @@ const ALGO_SETTINGS = {
   ensembleMinVotes: 3,          // Min AI votes to enter (3 out of 5)
   
   // ============================================================
+  // HYBRID ENGINE SETTINGS
+  // These are read directly by hybridEntryEngine.js. Previously they were
+  // hardcoded inside that file — now they live here so they're visible and
+  // configurable without touching engine internals.
+  // ============================================================
+  useHybridEngine: true,            // true = deterministic hybrid path (default ON); false = legacy AI path
+  hybridMinScore: 55,               // Minimum hybrid composite score to allow entry (0-100)
+  hybridMinGrade: 'C',              // Minimum grade: A/B/C/D/F (C = acceptable quality)
+  executionMinScore: 50,            // Minimum score for actual order execution (vs just signalling)
+  maxTradesPerDay: 8,               // Hard cap on entries per IST calendar day
+  maxLossesPerDay: 2,               // Halt trading after this many losses in a day
+  trapBlockThreshold: 80,           // Trap-detection score above which entry is blocked (0-100)
+  enableHybridAIAdvisory: false,    // When true, hybrid engine calls AI for advisory confirmation
+
+  // ============================================================
   // STRATEGY & EXECUTION MODE
   // ============================================================
   strategyMode: "Ultra Conservative Quality-Focused",

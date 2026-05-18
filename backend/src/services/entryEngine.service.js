@@ -423,32 +423,29 @@ function classifyMoneyness(strike, aggregator) {
  */
 async function decide({ aggregator, algorithmOutputs, masterDecision, settings, session, openTradesCount, futuresData, tradesToday, lossesToday }) {
   // ──────────────────────────────────────────────────────────────────────────
-  // HYBRID PATH — deterministic, institutional-style. ON BY DEFAULT.
-  // The hybrid engine performs its own concurrency / risk / score / strike
-  // checks and returns a decision in the SAME shape this function already
-  // produces. To opt out and use the legacy AI path, set
-  //   session.settings.useHybridEngine = false
+  // HYBRID ENGINE — sole decision-maker. No AI fallback.
+  // The hybrid engine is deterministic, institutional-grade, and fully
+  // self-contained. It handles concurrency, risk, scoring, strike selection,
+  // and playbook routing internally.
+  //
+  // If the hybrid engine throws, the error propagates up to scalpingEngine
+  // which logs it and skips the cycle — no silent fallback to legacy AI.
   // ──────────────────────────────────────────────────────────────────────────
-  const useHybrid = settings?.useHybridEngine !== false;
-  if (useHybrid) {
-    try {
-      const decision = await hybrid.entry.decide({
-        aggregator, algorithmOutputs, masterDecision, settings, session, openTradesCount, futuresData,
-        tradesToday, lossesToday,
-      });
-      logger.info({
-        sessionId: String(session?._id || ''),
-        signal: decision.signal,
-        tradeType: decision.trade_type,
-        score: decision.hybridSnapshot?.score,
-        grade: decision.hybridSnapshot?.grade,
-        confidence: decision.confidence,
-      }, '[entryEngine] hybrid decision');
-      return decision;
-    } catch (e) {
-      logger.error({ err: e.message, stack: e.stack }, '[entryEngine] hybrid path failed — falling back to legacy AI path');
-      // Fall through to legacy AI path
-    }
+  {
+    const decision = await hybrid.entry.decide({
+      aggregator, algorithmOutputs, masterDecision, settings, session, openTradesCount, futuresData,
+      tradesToday, lossesToday,
+    });
+    logger.info({
+      sessionId: String(session?._id || ''),
+      signal: decision.signal,
+      tradeType: decision.trade_type,
+      score: decision.hybridSnapshot?.score,
+      grade: decision.hybridSnapshot?.grade,
+      confidence: decision.confidence,
+      reasoning: decision.reasoning,
+    }, '[entryEngine] hybrid decision');
+    return decision;
   }
 
   // ─── LEGACY AI PATH ────────────────────────────────────────────────────────

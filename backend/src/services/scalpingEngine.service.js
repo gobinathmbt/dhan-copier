@@ -2544,6 +2544,14 @@ async function runPredictionCycle() {
       await state.session.save();
     }
   } finally {
+    // Emit cycle completed so the frontend cycle counter updates in real-time.
+    if (state.session) {
+      scalpingSocket.emitCycleCompleted(
+        String(state.session._id),
+        state.session.cycleCount,
+        'prediction'
+      );
+    }
     state.busy = false;
   }
 }

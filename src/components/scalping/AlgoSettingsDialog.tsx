@@ -49,6 +49,15 @@ export interface ScalpingSettings {
   ensembleMinVotes: number;
   strategyMode: string;
   executionMode: "simulation" | "live";
+  // Hybrid engine settings
+  useHybridEngine: boolean;
+  hybridMinScore: number;
+  hybridMinGrade: string;
+  executionMinScore: number;
+  maxTradesPerDay: number;
+  maxLossesPerDay: number;
+  trapBlockThreshold: number;
+  enableHybridAIAdvisory: boolean;
   filters: {
     vwap: boolean; oi: boolean; regime: boolean; liquiditySweep: boolean;
     volumeSpike: boolean; bankNifty: boolean; volatility: boolean;
@@ -201,6 +210,20 @@ export function AlgoSettingsDialog({ open, onOpenChange }: Props) {
                 <div>Min Confidence: {s.masterMinConfidence}</div>
                 <div>Min Agreement: {s.masterMinAgreement}</div>
                 <div>Min Direction Spread: {s.minDirectionSpread}</div>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <h3 className="font-semibold text-sm">Hybrid Engine</h3>
+              <div className="text-xs space-y-1 bg-muted p-3 rounded">
+                <div>Enabled: {s.useHybridEngine ? '✓' : '✗'}</div>
+                <div>Min Score: {s.hybridMinScore}</div>
+                <div>Min Grade: {s.hybridMinGrade}</div>
+                <div>Execution Min Score: {s.executionMinScore}</div>
+                <div>Max Trades/Day: {s.maxTradesPerDay}</div>
+                <div>Max Losses/Day: {s.maxLossesPerDay}</div>
+                <div>Trap Block Threshold: {s.trapBlockThreshold}</div>
+                <div>AI Advisory: {s.enableHybridAIAdvisory ? '✓' : '✗'}</div>
               </div>
             </div>
           </div>
