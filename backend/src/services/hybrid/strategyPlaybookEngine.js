@@ -3291,19 +3291,22 @@ function _trendRideNoConfirmation(ctx) {
   return {
     name: 'TREND_RIDE_NO_CONFIRMATION',
     family: 'momentum_continuation',
-    // Standard+ allowed — this is the trend-ride fallback for days when
-    // orderflow doesn't match the strict initiative pattern. The 3+5m
-    // candle alignment is a strong alternative signal.
-    valid: conviction !== 'weak',
-    score: _clamp(score),
-    conviction,
+    // CALIBRATED 2026-05-19 cycle 33: this playbook has 1W/2L (33% WR,
+    // -Rs.4064 net) over 3 backtest trades. Most trends already qualify
+    // through a stricter playbook (TREND_VWAP_FOLLOW, INITIATIVE_MOMENTUM,
+    // or DELTA_DRIVE_SCALP); the "no orderflow confirmation" trades are
+    // exactly the ones that don't pan out. Disable until we have a
+    // higher-quality screen.
+    valid: false,
+    score: 0,
+    conviction: 'weak',
     holdProfile: { tradeType: 'SCALP', maxHoldSec: 240, rrTarget: 1.0 },
     riskProfile: { slPct: 0.10, sizingFactor: conviction === 'elite' ? 0.85 : 0.7 },
     minScoreOverride: 65,
     allowedDirections: ['bullish', 'bearish'],
     preconditions: ['multi_tf_alignment', 'net_0.6pct', 'atr_25', 'vwap_aligned', 'delta_4pct', 'no_chop'],
     confirmations,
-    reasoning: `${conviction.toUpperCase()} | ${confirmations.join(' | ')}`,
+    reasoning: `DISABLED cycle 33 (1W/2L net -Rs.4064) | original ${conviction.toUpperCase()} | ${confirmations.join(' | ')}`,
   };
 }
 
