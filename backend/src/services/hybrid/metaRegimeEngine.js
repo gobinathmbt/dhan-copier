@@ -193,6 +193,15 @@ function familyOf(entryType) {
   if (entryType === 'TREND_VWAP_FOLLOW')              return 'pullback';
   if (entryType === 'COUNTER_TREND_REVERSAL')         return 'reversal';
   if (entryType === 'DELTA_DRIVE_SCALP')              return 'momentum_continuation';
+  // Phase 1 rotational playbooks (cycle 28)
+  if (entryType === 'VALUE_AREA_ROTATION')            return 'mean_reversion';
+  if (entryType === 'PIN_REVERSION')                  return 'mean_reversion';
+  if (entryType === 'SWEEP_RECLAIM_SCALP')            return 'reversal';
+  if (entryType === 'LVN_REJECTION_SCALP')            return 'mean_reversion';
+  if (entryType === 'VWAP_OSCILLATION_SCALP')         return 'mean_reversion';
+  if (entryType === 'OPENING_DRIVE_FAILURE')          return 'reversal';
+  if (entryType === 'MICRO_DELTA_FLIP')               return 'momentum_continuation';
+  if (entryType === 'OI_MIGRATION_TREND')             return 'momentum_continuation';
   return null;
 }
 

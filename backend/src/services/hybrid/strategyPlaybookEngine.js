@@ -1608,20 +1608,773 @@ function _deltaDriveScalp(ctx) {
   };
 }
 
+// ═════════════════════════════════════════════════════════════════════════
+// PHASE 1 INSTITUTIONAL PLAYBOOKS (cycle 28+)
+// Targeted at rotational / low-vol / micro-scalp regimes where the engine
+// previously stayed inactive. These convert "no trade" sessions into
+// 2-5 elite micro-scalps per day without breaking high-WR discipline.
+// ═════════════════════════════════════════════════════════════════════════
+
+// ─── PLAYBOOK 18: VALUE_AREA_ROTATION (rotational scalp) ──────────────────
+// Trade VAL ↔ POC ↔ VAH rotations during gamma-pin / balanced auctions.
+// Direction:
+//   bullish — price near VAL (≤25% into range) → fade up to POC
+//   bearish — price near VAH (≥75% into range) → fade down to POC
+// Tight target (1× rr), tight SL — high-frequency rotational engine.
+function _valueAreaRotation(ctx) {
+  const reasons = [];
+  let score = 0;
+  const required = [];
+  const confirmations = [];
+
+  // Need rotational meta-regime
+  const rotational = ctx.metaRegime?.state === 'gamma_pin'
+    || ctx.metaRegime?.state === 'balanced_auction'
+    || ctx.metaRegime?.state === 'slow_grind';
+  if (!rotational) required.push('not rotational regime');
+
+  // Inside-VA acceptance
+  if (ctx.volumeAnalysis?.acceptance !== 'inside_va') required.push('not inside_va');
+
+  // Position in VA
+  const va = ctx.volumeAnalysis?.frvp;
+  let edgeOK = false;
+  let posInRange = 0.5;
+  if (va?.vaHigh && va?.vaLow && Number.isFinite(ctx.spotPrice)) {
+    const range = va.vaHigh - va.vaLow;
+    if (range > 0) {
+      posInRange = (ctx.spotPrice - va.vaLow) / range;
+      // CALIBRATED cycle 29: relaxed edge tolerance (was 0.30 / 0.70 — only
+      // 1 valid match). Now 0.40 / 0.60 covers more rotational entries.
+      if (ctx.direction === 'bullish' && posInRange <= 0.40) {
+        edgeOK = true; score += 18; reasons.push(`near VAL (${(posInRange*100).toFixed(0)}%)`);
+      } else if (ctx.direction === 'bearish' && posInRange >= 0.60) {
+        edgeOK = true; score += 18; reasons.push(`near VAH (${(posInRange*100).toFixed(0)}%)`);
+      }
+    }
+  }
+  if (!edgeOK) required.push('not at VA edge');
+
+  // Block on expansion volatility (rotation broken)
+  if (ctx.volatilityRegime?.state === 'expansion') required.push('expansion vol — rotation broken');
+
+  const valid = required.length === 0;
+  if (!valid) {
+    return { name: 'VALUE_AREA_ROTATION', family: 'mean_reversion',
+             valid: false, score: 0, conviction: 'weak', missing: required,
+             reasoning: `missing: ${required.join(', ')}` };
+  }
+  score += 25;
+
+  // Confirmations
+  // Weak/neutral delta is ideal for rotation
+  const deltaPct = Math.abs(_safe(ctx.volumeAnalysis?.delta?.cvdPctLong));
+  if (deltaPct < 12) { score += 10; confirmations.push(`weak delta ${deltaPct}%`); }
+  else if (deltaPct > 25) { score -= 8; confirmations.push(`strong delta ${deltaPct}% — wrong setup`); }
+
+  // VSA upthrust (top edge bearish) / spring (bottom edge bullish)
+  const vsa = ctx.volumeAnalysis?.vsa;
+  if (vsa?.bias === ctx.direction) {
+    score += 8; confirmations.push(`VSA ${vsa.pattern}`);
+  }
+
+  // Auction reading favours rotation
+  if (ctx.auctionState?.tradingImplication === 'mean_reversion') {
+    score += 8; confirmations.push('auction mean_reversion');
+  }
+
+  // Failed breaks earlier confirm rotational behaviour
+  const failed = (ctx.sessionMemory?.failedBreakouts || 0)
+              + (ctx.sessionMemory?.failedBreakdowns || 0);
+  if (failed >= 1) { score += 6; confirmations.push(`${failed} prior failed break`); }
+
+  // Liquidity good
+  if (ctx.liquidity?.health === 'good' || ctx.liquidity?.health === 'excellent') {
+    score += 4; confirmations.push(`liq ${ctx.liquidity.health}`);
+  }
+
+  // Dead/low ATR amplifies rotation — small targets
+  if (ctx.volatilityRegime?.state === 'dead' || ctx.volatilityRegime?.atrPercentile < 30) {
+    score += 5; confirmations.push('dead/low vol');
+  }
+
+  const conviction = confirmations.length >= 4 ? 'elite' :
+                     confirmations.length >= 2 ? 'standard' : 'weak';
+
+  return {
+    name: 'VALUE_AREA_ROTATION',
+    family: 'mean_reversion',
+    valid: conviction !== 'weak' && score >= 45,
+    score: _clamp(score),
+    conviction,
+    holdProfile: { tradeType: 'SCALP', maxHoldSec: 180, rrTarget: 1.0 },
+    riskProfile: { slPct: 0.07, sizingFactor: 0.5 },
+    allowedDirections: ['bullish', 'bearish'],
+    preconditions: ['rotational_regime', 'inside_va', 'va_edge'],
+    confirmations,
+    reasoning: `${conviction.toUpperCase()} | ${confirmations.join(' | ')}`,
+  };
+}
+
+// ─── PLAYBOOK 19: PIN_REVERSION (gamma-magnet scalp) ─────────────────────
+// Trade BACK to gamma pin level when price is stretched away from it.
+// Conditions:
+//   positive gamma + |spotVsPin| > 15-20pts → reversion to pin is HIGH WR
+//   direction must be opposite the spot-vs-pin offset
+function _pinReversion(ctx) {
+  const reasons = [];
+  let score = 0;
+  const required = [];
+  const confirmations = [];
+
+  if (ctx.gammaRegime?.regime !== 'positive') required.push('not positive gamma');
+
+  const svp = _safe(ctx.gammaRegime?.spotVsPin);
+  const stretchAway = Math.abs(svp);
+  if (stretchAway < 12) required.push(`spotVsPin ${svp.toFixed(1)} too tight (need >12pts stretch)`);
+  if (stretchAway > 60) required.push(`spotVsPin ${svp.toFixed(1)} too wide (pin breaking)`);
+
+  // Direction: bullish trade when spot is BELOW pin (pull up); bearish when ABOVE
+  if (ctx.direction === 'bullish' && svp >= 0) required.push('bullish but already above pin');
+  if (ctx.direction === 'bearish' && svp <= 0) required.push('bearish but already below pin');
+
+  // Block on expansion vol — pin can break
+  if (ctx.volatilityRegime?.state === 'expansion') required.push('expansion vol — pin can break');
+
+  // Block on Friday after 1300 (position-square risk)
+  if (ctx.sessionPhase?.weekday === 'Fri' && ctx.sessionPhase?.hhmm >= 1300) {
+    required.push('Fri afternoon');
+  }
+
+  const valid = required.length === 0;
+  if (!valid) {
+    return { name: 'PIN_REVERSION', family: 'mean_reversion',
+             valid: false, score: 0, conviction: 'weak', missing: required,
+             reasoning: `missing: ${required.join(', ')}` };
+  }
+  score += 30; reasons.push(`positive gamma + stretch ${stretchAway.toFixed(1)}pts`);
+
+  // Confirmations
+  // Weak delta = no momentum to fight
+  const deltaPct = Math.abs(_safe(ctx.volumeAnalysis?.delta?.cvdPctLong));
+  if (deltaPct < 15) { score += 10; confirmations.push(`weak delta ${deltaPct}%`); }
+  else if (deltaPct > 30) { score -= 10; confirmations.push(`strong delta ${deltaPct}% — momentum continues`); }
+
+  // VSA reversal pattern
+  const vsa = ctx.volumeAnalysis?.vsa;
+  if (vsa?.bias === ctx.direction) {
+    score += 8; confirmations.push(`VSA ${vsa.pattern}`);
+  }
+
+  // Inside-VA acceptance preferred
+  if (ctx.volumeAnalysis?.acceptance === 'inside_va') {
+    score += 6; confirmations.push('inside VA');
+  }
+
+  // Low volatility is ideal
+  if (ctx.volatilityRegime?.state === 'dead' || ctx.volatilityRegime?.atrPercentile < 30) {
+    score += 6; confirmations.push('low vol');
+  }
+
+  // Stretch zone (15-30pts is sweet spot)
+  if (stretchAway >= 15 && stretchAway <= 30) {
+    score += 8; confirmations.push(`prime stretch zone ${stretchAway.toFixed(0)}pts`);
+  }
+
+  const conviction = confirmations.length >= 3 ? 'elite' :
+                     confirmations.length >= 2 ? 'standard' : 'weak';
+
+  return {
+    name: 'PIN_REVERSION',
+    family: 'mean_reversion',
+    valid: conviction !== 'weak' && score >= 45,
+    score: _clamp(score),
+    conviction,
+    holdProfile: { tradeType: 'SCALP', maxHoldSec: 180, rrTarget: 1.0 },
+    riskProfile: { slPct: 0.07, sizingFactor: 0.5 },
+    allowedDirections: ['bullish', 'bearish'],
+    preconditions: ['positive_gamma', 'stretch_from_pin', 'reversion_direction'],
+    confirmations,
+    reasoning: `${conviction.toUpperCase()} | ${confirmations.join(' | ')}`,
+  };
+}
+
+// ─── PLAYBOOK 20: SWEEP_RECLAIM_SCALP (micro stop-hunt fade) ─────────────
+// Tight scalp version of FAILED_AUCTION_REVERSAL — fires on smaller sweeps
+// without requiring delta divergence. Quick reclaim of swept level + delta
+// turns in our direction = 5-8pt scalp.
+function _sweepReclaimScalp(ctx) {
+  const reasons = [];
+  let score = 0;
+  const required = [];
+  const confirmations = [];
+
+  // Need a sweep event (smaller threshold than FAILED_AUCTION_REVERSAL)
+  const sm = ctx.sessionMemory || {};
+  const sweepBelow = (sm.sweepsBelowLow || 0) >= 1 || ctx.auctionState?.excessLow;
+  const sweepAbove = (sm.sweepsAboveHigh || 0) >= 1 || ctx.auctionState?.excessHigh;
+
+  // Bullish trade requires below-sweep; bearish above-sweep
+  const sweepOK = (ctx.direction === 'bullish' && sweepBelow)
+              || (ctx.direction === 'bearish' && sweepAbove);
+  if (!sweepOK) required.push('no sweep in direction');
+
+  // Need VWAP reclaim (price back above for bullish, below for bearish)
+  const vwapPos = ctx.vwap?.position;
+  const reclaim = (ctx.direction === 'bullish' && vwapPos === 'above')
+              || (ctx.direction === 'bearish' && vwapPos === 'below');
+  if (!reclaim) required.push(`VWAP not reclaimed (${vwapPos})`);
+
+  // Delta turning in direction (any bias supports)
+  const deltaBias = ctx.volumeAnalysis?.delta?.bias;
+  const deltaSupports = (ctx.direction === 'bullish' && /bullish/i.test(deltaBias || ''))
+                    || (ctx.direction === 'bearish' && /bearish/i.test(deltaBias || ''));
+  if (!deltaSupports) required.push(`delta ${deltaBias} not supporting`);
+
+  const valid = required.length === 0;
+  if (!valid) {
+    return { name: 'SWEEP_RECLAIM_SCALP', family: 'reversal',
+             valid: false, score: 0, conviction: 'weak', missing: required,
+             reasoning: `missing: ${required.join(', ')}` };
+  }
+  score += 35; reasons.push('sweep + reclaim');
+
+  // Confirmations
+  // VSA spring/upthrust
+  const vsa = ctx.volumeAnalysis?.vsa;
+  if ((vsa?.pattern === 'spring' && ctx.direction === 'bullish')
+   || (vsa?.pattern === 'upthrust' && ctx.direction === 'bearish')) {
+    score += 12; confirmations.push(`VSA ${vsa.pattern}`);
+  }
+
+  // OI absorption corroborates
+  if (ctx.oiAnalytics?.absorption?.detected) {
+    score += 10; confirmations.push(`OI absorption ${ctx.oiAnalytics.absorption.side}`);
+  }
+
+  // Responsive flow
+  if ((ctx.orderflowState?.state === 'responsive_buying' && ctx.direction === 'bullish')
+   || (ctx.orderflowState?.state === 'responsive_selling' && ctx.direction === 'bearish')) {
+    score += 10; confirmations.push(`responsive ${ctx.direction}`);
+  }
+
+  // 5m CHOCH supports
+  if ((ctx.direction === 'bullish' && ctx.mtfStructure?.choch5 === 'bullish_choch')
+   || (ctx.direction === 'bearish' && ctx.mtfStructure?.choch5 === 'bearish_choch')) {
+    score += 8; confirmations.push(`5m ${ctx.mtfStructure.choch5}`);
+  }
+
+  // Trap engine corroborates
+  if ((ctx.trap?.trapScore || 0) >= 40) {
+    score += 6; confirmations.push(`trap ${ctx.trap.trapScore}`);
+  }
+
+  const conviction = confirmations.length >= 3 ? 'elite' :
+                     confirmations.length >= 1 ? 'standard' : 'weak';
+
+  return {
+    name: 'SWEEP_RECLAIM_SCALP',
+    family: 'reversal',
+    valid: conviction !== 'weak' && score >= 45,
+    score: _clamp(score),
+    conviction,
+    holdProfile: { tradeType: 'SCALP', maxHoldSec: 240, rrTarget: 1.3 },
+    riskProfile: { slPct: 0.08, sizingFactor: 0.6 },
+    allowedDirections: ['bullish', 'bearish'],
+    preconditions: ['sweep', 'reclaim', 'delta_supportive'],
+    confirmations,
+    reasoning: `${conviction.toUpperCase()} | ${confirmations.join(' | ')}`,
+  };
+}
+
+// ─── PLAYBOOK 21: LVN_REJECTION_SCALP (rotational fade) ──────────────────
+// Price approaches an LVN, fails to accept, rejects back. This is a
+// clean rotation entry — high WR for short scalps.
+function _lvnRejectionScalp(ctx) {
+  const reasons = [];
+  let score = 0;
+  const required = [];
+  const confirmations = [];
+
+  const lvns = ctx.volumeAnalysis?.frvp?.lvn || [];
+  const spot = ctx.spotPrice;
+  let nearLvn = null;
+  if (Number.isFinite(spot)) {
+    nearLvn = lvns.find(l => Math.abs(l.price - spot) < 10);
+  }
+  if (!nearLvn) required.push('no LVN within 10pts');
+
+  // Direction: bullish trade requires LVN ABOVE spot (rejection down → fade up)
+  // Wait, that's wrong. LVN rejection = price tried to enter LVN but failed → reverses.
+  //   - Bullish: spot tried to break BELOW an LVN below us → bounced back up → buy
+  //   - Bearish: spot tried to break ABOVE an LVN above us → got rejected → sell
+  if (nearLvn) {
+    if (ctx.direction === 'bullish' && spot > nearLvn.price) {
+      score += 12; reasons.push(`LVN ${nearLvn.price} below — rejected, bouncing up`);
+    } else if (ctx.direction === 'bearish' && spot < nearLvn.price) {
+      score += 12; reasons.push(`LVN ${nearLvn.price} above — rejected, bouncing down`);
+    } else {
+      required.push('wrong side of LVN for rejection');
+    }
+  }
+
+  // Block on expansion (LVN won't reject)
+  if (ctx.volatilityRegime?.state === 'expansion') required.push('expansion vol — LVN may break');
+
+  // Need rotational regime
+  if (ctx.metaRegime?.state !== 'gamma_pin'
+      && ctx.metaRegime?.state !== 'balanced_auction'
+      && ctx.metaRegime?.state !== 'slow_grind'
+      && ctx.metaRegime?.state !== 'unknown') {
+    required.push(`meta ${ctx.metaRegime?.state} not rotational`);
+  }
+
+  const valid = required.length === 0;
+  if (!valid) {
+    return { name: 'LVN_REJECTION_SCALP', family: 'mean_reversion',
+             valid: false, score: 0, conviction: 'weak', missing: required,
+             reasoning: `missing: ${required.join(', ')}` };
+  }
+  score += 25;
+
+  // Confirmations
+  // VSA reversal pattern
+  const vsa = ctx.volumeAnalysis?.vsa;
+  if (vsa?.bias === ctx.direction) {
+    score += 10; confirmations.push(`VSA ${vsa.pattern}`);
+  }
+
+  // Delta supportive
+  const deltaBias = ctx.volumeAnalysis?.delta?.bias;
+  const deltaSupports = (ctx.direction === 'bullish' && /bullish/i.test(deltaBias || ''))
+                    || (ctx.direction === 'bearish' && /bearish/i.test(deltaBias || ''));
+  if (deltaSupports) { score += 8; confirmations.push(`delta ${deltaBias}`); }
+
+  // POC distance — there should be room to rotate back
+  const poc = ctx.volumeAnalysis?.frvp?.pocPrice;
+  if (Number.isFinite(poc) && Math.abs(poc - spot) > 8) {
+    score += 6; confirmations.push(`POC ${poc.toFixed(0)} target`);
+  }
+
+  // Liquidity good
+  if (ctx.liquidity?.health === 'good' || ctx.liquidity?.health === 'excellent') {
+    score += 4; confirmations.push(`liq ${ctx.liquidity.health}`);
+  }
+
+  // Low/dead vol amplifies
+  if (ctx.volatilityRegime?.state === 'dead' || ctx.volatilityRegime?.atrPercentile < 35) {
+    score += 4; confirmations.push('low vol');
+  }
+
+  const conviction = confirmations.length >= 3 ? 'elite' :
+                     confirmations.length >= 2 ? 'standard' : 'weak';
+
+  return {
+    name: 'LVN_REJECTION_SCALP',
+    family: 'mean_reversion',
+    valid: conviction !== 'weak' && score >= 45,
+    score: _clamp(score),
+    conviction,
+    holdProfile: { tradeType: 'SCALP', maxHoldSec: 200, rrTarget: 1.1 },
+    riskProfile: { slPct: 0.07, sizingFactor: 0.5 },
+    allowedDirections: ['bullish', 'bearish'],
+    preconditions: ['near_lvn', 'rotational_regime', 'rejection_side'],
+    confirmations,
+    reasoning: `${conviction.toUpperCase()} | ${confirmations.join(' | ')}`,
+  };
+}
+
+// ─── PLAYBOOK 22: VWAP_OSCILLATION_SCALP (mid-day rotational) ───────────
+// Price oscillates around VWAP repeatedly during balanced sessions.
+// Different from VWAP_BOUNCE_SCALP (which trades the right side); this
+// fades extension and trades back to VWAP from EITHER side after rejection.
+function _vwapOscillationScalp(ctx) {
+  const reasons = [];
+  let score = 0;
+  const required = [];
+  const confirmations = [];
+
+  const vwap = ctx.vwap;
+  const dist = Math.abs(_safe(vwap?.distance_pct));
+  if (!vwap?.vwap) required.push('no VWAP');
+
+  // Need rotational regime
+  const rotational = ctx.metaRegime?.state === 'gamma_pin'
+    || ctx.metaRegime?.state === 'balanced_auction'
+    || ctx.metaRegime?.state === 'slow_grind'
+    || ctx.metaRegime?.state === 'dealer_hedging';
+  if (!rotational) required.push('not rotational regime');
+
+  // Direction: bullish from BELOW vwap (heading up to it); bearish from ABOVE vwap
+  const vwapPos = vwap?.position;
+  const fadeOK = (ctx.direction === 'bullish' && vwapPos === 'below')
+              || (ctx.direction === 'bearish' && vwapPos === 'above');
+  if (!fadeOK) required.push(`VWAP fade direction wrong (${vwapPos})`);
+
+  // Need extension (price reasonably away from VWAP)
+  if (dist < 0.15) required.push(`too close to VWAP (${dist.toFixed(2)}%)`);
+  if (dist > 0.80) required.push(`too far from VWAP (${dist.toFixed(2)}%)`);
+
+  // Block on expansion
+  if (ctx.volatilityRegime?.state === 'expansion') required.push('expansion vol');
+
+  // Block on midday_chop only when delta strongly opposes (chop-with-trend)
+  // (Otherwise this playbook is FOR midday rotation)
+
+  const valid = required.length === 0;
+  if (!valid) {
+    return { name: 'VWAP_OSCILLATION_SCALP', family: 'mean_reversion',
+             valid: false, score: 0, conviction: 'weak', missing: required,
+             reasoning: `missing: ${required.join(', ')}` };
+  }
+  score += 25;
+
+  // Confirmations
+  // Delta turning in direction (bias toward our side)
+  const deltaBias = ctx.volumeAnalysis?.delta?.bias;
+  const deltaPct = _safe(ctx.volumeAnalysis?.delta?.cvdPctLong);
+  if ((ctx.direction === 'bullish' && deltaPct > 0)
+   || (ctx.direction === 'bearish' && deltaPct < 0)) {
+    score += 10; confirmations.push(`delta ${deltaBias} ${deltaPct}%`);
+  }
+
+  // VSA absorption / spring / upthrust
+  const vsa = ctx.volumeAnalysis?.vsa;
+  if (vsa?.bias === ctx.direction) {
+    score += 8; confirmations.push(`VSA ${vsa.pattern}`);
+  }
+
+  // Inside-VA helps oscillation
+  if (ctx.volumeAnalysis?.acceptance === 'inside_va') {
+    score += 6; confirmations.push('inside VA');
+  }
+
+  // Low ATR helps
+  if (ctx.volatilityRegime?.state === 'dead' || ctx.volatilityRegime?.atrPercentile < 35) {
+    score += 6; confirmations.push('low vol');
+  }
+
+  // Failed previous breaks confirm rotation
+  const failed = (ctx.sessionMemory?.failedBreakouts || 0)
+              + (ctx.sessionMemory?.failedBreakdowns || 0);
+  if (failed >= 1) { score += 4; confirmations.push(`${failed} failed breaks`); }
+
+  const conviction = confirmations.length >= 3 ? 'elite' :
+                     confirmations.length >= 2 ? 'standard' : 'weak';
+
+  return {
+    name: 'VWAP_OSCILLATION_SCALP',
+    family: 'mean_reversion',
+    valid: conviction !== 'weak' && score >= 45,
+    score: _clamp(score),
+    conviction,
+    holdProfile: { tradeType: 'SCALP', maxHoldSec: 200, rrTarget: 1.0 },
+    riskProfile: { slPct: 0.07, sizingFactor: 0.5 },
+    allowedDirections: ['bullish', 'bearish'],
+    preconditions: ['rotational_regime', 'vwap_fade_side', 'extension'],
+    confirmations,
+    reasoning: `${conviction.toUpperCase()} | ${confirmations.join(' | ')}`,
+  };
+}
+
+// ─── PLAYBOOK 23: OPENING_DRIVE_FAILURE (open trap reversal) ────────────
+// Opening 9:15-9:45 saw a strong drive that failed (price re-entered IB
+// range or prior-day value). Trade the reversal back into value.
+function _openingDriveFailure(ctx) {
+  const reasons = [];
+  let score = 0;
+  const required = [];
+  const confirmations = [];
+
+  // Window: 09:30 - 10:30 (after opening drive starts to fail)
+  const hhmm = ctx.sessionPhase?.hhmm || 0;
+  if (hhmm < 930 || hhmm >= 1100) required.push(`not in opening-failure window (${hhmm})`);
+
+  // Opening drive direction must be OPPOSITE our trade direction
+  const drive = ctx.sessionMemory?.openingDriveDir;
+  if (drive && ((ctx.direction === 'bullish' && drive !== 'down')
+             || (ctx.direction === 'bearish' && drive !== 'up'))) {
+    required.push(`opening drive ${drive} not opposite our direction`);
+  }
+  if (!drive) required.push('no opening drive recorded');
+
+  // Need price BACK INSIDE prior day range (failure confirmation)
+  const pdh = ctx.multiDayContext?.priorDay?.high;
+  const pdl = ctx.multiDayContext?.priorDay?.low;
+  const insidePrior = Number.isFinite(pdh) && Number.isFinite(pdl)
+    && Number.isFinite(ctx.spotPrice)
+    && ctx.spotPrice >= pdl && ctx.spotPrice <= pdh;
+  if (!insidePrior) required.push('not back inside prior-day range');
+
+  const valid = required.length === 0;
+  if (!valid) {
+    return { name: 'OPENING_DRIVE_FAILURE', family: 'reversal',
+             valid: false, score: 0, conviction: 'weak', missing: required,
+             reasoning: `missing: ${required.join(', ')}` };
+  }
+  score += 35; reasons.push(`opening drive ${drive} failed → ${ctx.direction} reversal`);
+
+  // Confirmations
+  // Delta divergence supports
+  const div = ctx.volumeAnalysis?.delta?.divergence;
+  const divBias = ctx.volumeAnalysis?.delta?.divergenceBias;
+  if (div && div !== 'none' && divBias === ctx.direction) {
+    score += 12; confirmations.push(`delta div ${div}`);
+  }
+
+  // Delta turn in direction
+  const deltaPct = _safe(ctx.volumeAnalysis?.delta?.cvdPctLong);
+  if ((ctx.direction === 'bullish' && deltaPct > 0)
+   || (ctx.direction === 'bearish' && deltaPct < 0)) {
+    score += 8; confirmations.push(`delta ${deltaPct}%`);
+  }
+
+  // 5m CHOCH
+  if ((ctx.direction === 'bullish' && ctx.mtfStructure?.choch5 === 'bullish_choch')
+   || (ctx.direction === 'bearish' && ctx.mtfStructure?.choch5 === 'bearish_choch')) {
+    score += 12; confirmations.push(`5m ${ctx.mtfStructure.choch5}`);
+  }
+
+  // VWAP reclaim corroborates
+  const vwapPos = ctx.vwap?.position;
+  if ((ctx.direction === 'bullish' && vwapPos === 'above')
+   || (ctx.direction === 'bearish' && vwapPos === 'below')) {
+    score += 8; confirmations.push(`VWAP ${vwapPos}`);
+  }
+
+  // Trap engine corroborates
+  if ((ctx.trap?.trapScore || 0) >= 40) {
+    score += 6; confirmations.push(`trap ${ctx.trap.trapScore}`);
+  }
+
+  const conviction = confirmations.length >= 3 ? 'elite' :
+                     confirmations.length >= 1 ? 'standard' : 'weak';
+
+  return {
+    name: 'OPENING_DRIVE_FAILURE',
+    family: 'reversal',
+    valid: conviction !== 'weak' && score >= 50,
+    score: _clamp(score),
+    conviction,
+    holdProfile: { tradeType: 'SCALP', maxHoldSec: 360, rrTarget: 1.6 },
+    riskProfile: { slPct: 0.09, sizingFactor: 0.6 },
+    allowedDirections: ['bullish', 'bearish'],
+    preconditions: ['opening_window', 'drive_opposite', 'back_in_prior_range'],
+    confirmations,
+    reasoning: `${conviction.toUpperCase()} | ${confirmations.join(' | ')}`,
+  };
+}
+
+// ─── PLAYBOOK 24: MICRO_DELTA_FLIP (micro-scalp) ─────────────────────────
+// 1m delta flips sharply in our direction after a stall. 2-5pt option
+// scalp on a tight time stop. Used in slow grind / midday for participation.
+function _microDeltaFlip(ctx) {
+  const reasons = [];
+  let score = 0;
+  const required = [];
+  const confirmations = [];
+
+  // Delta must be moderately in direction with the right TREND signal
+  const deltaPct = _safe(ctx.volumeAnalysis?.delta?.cvdPctLong);
+  const deltaTrend = ctx.volumeAnalysis?.delta?.trend;
+  const deltaFlipped = (ctx.direction === 'bullish' && deltaPct > 4 && deltaTrend === 'rising')
+                   || (ctx.direction === 'bearish' && deltaPct < -4 && deltaTrend === 'falling');
+  if (!deltaFlipped) required.push(`delta not flipped (${deltaPct}%, trend ${deltaTrend})`);
+
+  // Need rotational / low-vol regime (this is a micro-scalp)
+  const lowVolRegime = ctx.metaRegime?.state === 'gamma_pin'
+    || ctx.metaRegime?.state === 'balanced_auction'
+    || ctx.metaRegime?.state === 'slow_grind'
+    || ctx.metaRegime?.state === 'dealer_hedging';
+  if (!lowVolRegime) required.push(`not low-vol regime (${ctx.metaRegime?.state})`);
+
+  // Block expansion vol — this is a micro-scalp not a momentum trade
+  if (ctx.volatilityRegime?.state === 'expansion') required.push('expansion — use momentum playbook');
+
+  // VWAP supportive (right side)
+  const vwapPos = ctx.vwap?.position;
+  if ((ctx.direction === 'bullish' && vwapPos !== 'above')
+   || (ctx.direction === 'bearish' && vwapPos !== 'below')) {
+    required.push(`VWAP wrong side (${vwapPos})`);
+  }
+
+  // Block on midday_chop ONLY if no clear flip pattern
+  // (this playbook is FOR participation in chop)
+
+  // OI must not actively oppose
+  const oiR = ctx.oiAnalytics?.regime || '';
+  const oiAgainst = (ctx.direction === 'bullish' && (oiR === 'aggressive_short_buildup' || oiR === 'long_unwinding_collapse'))
+                || (ctx.direction === 'bearish' && (oiR === 'aggressive_long_buildup' || oiR === 'violent_short_covering'));
+  if (oiAgainst) required.push(`OI ${oiR} opposes`);
+
+  const valid = required.length === 0;
+  if (!valid) {
+    return { name: 'MICRO_DELTA_FLIP', family: 'momentum_continuation',
+             valid: false, score: 0, conviction: 'weak', missing: required,
+             reasoning: `missing: ${required.join(', ')}` };
+  }
+  score += 30; reasons.push(`delta flip ${deltaTrend} ${deltaPct}%`);
+
+  // Confirmations
+  // OI alignment
+  if ((ctx.direction === 'bullish' && (oiR === 'aggressive_long_buildup' || oiR === 'violent_short_covering'))
+   || (ctx.direction === 'bearish' && (oiR === 'aggressive_short_buildup' || oiR === 'long_unwinding_collapse'))) {
+    score += 10; confirmations.push(`OI ${oiR}`);
+  }
+
+  // VSA bias supports
+  const vsa = ctx.volumeAnalysis?.vsa;
+  if (vsa?.bias === ctx.direction && _safe(vsa.strength) >= 40) {
+    score += 8; confirmations.push(`VSA ${vsa.pattern}`);
+  }
+
+  // Acceptance favourable
+  const acc = ctx.volumeAnalysis?.acceptance;
+  if (acc === 'inside_va'
+   || (ctx.direction === 'bullish' && acc === 'above_va')
+   || (ctx.direction === 'bearish' && acc === 'below_va')) {
+    score += 5; confirmations.push(`acc ${acc}`);
+  }
+
+  // Low ATR helps the time-stop math
+  if (ctx.volatilityRegime?.state === 'dead' || ctx.volatilityRegime?.atrPercentile < 40) {
+    score += 5; confirmations.push('low vol');
+  }
+
+  // Liquidity
+  if (ctx.liquidity?.health === 'good' || ctx.liquidity?.health === 'excellent') {
+    score += 4; confirmations.push(`liq ${ctx.liquidity.health}`);
+  }
+
+  const conviction = confirmations.length >= 3 ? 'elite' :
+                     confirmations.length >= 2 ? 'standard' : 'weak';
+
+  return {
+    name: 'MICRO_DELTA_FLIP',
+    family: 'momentum_continuation',
+    valid: conviction !== 'weak' && score >= 45,
+    score: _clamp(score),
+    conviction,
+    holdProfile: { tradeType: 'SCALP', maxHoldSec: 150, rrTarget: 1.0 },
+    riskProfile: { slPct: 0.06, sizingFactor: 0.4 },
+    allowedDirections: ['bullish', 'bearish'],
+    preconditions: ['delta_flipped', 'low_vol_regime', 'vwap_side', 'oi_not_against'],
+    confirmations,
+    reasoning: `${conviction.toUpperCase()} | ${confirmations.join(' | ')}`,
+  };
+}
+
+// ─── PLAYBOOK 25: OI_MIGRATION_TREND (positioning trend) ────────────────
+// Multi-day OI walls migrate progressively in a direction → strong
+// directional bias. Trade with the migration.
+function _oiMigrationTrend(ctx) {
+  const reasons = [];
+  let score = 0;
+  const required = [];
+  const confirmations = [];
+
+  const ceMig = ctx.multiDayContext?.oiMigration?.ce;
+  const peMig = ctx.multiDayContext?.oiMigration?.pe;
+  // Bullish: PE peaks migrating UP (PE writers pulling stops higher) OR
+  //           CE peaks migrating UP (CE walls moving away)
+  // Bearish: opposite
+  const bullishMig = (ceMig === 'up' || peMig === 'up');
+  const bearishMig = (ceMig === 'down' || peMig === 'down');
+  const dirMig = (ctx.direction === 'bullish' && bullishMig)
+              || (ctx.direction === 'bearish' && bearishMig);
+  if (!dirMig) required.push(`OI migration ce=${ceMig} pe=${peMig} not aligned`);
+
+  // Need at least 3 prior days of migration data
+  const sessions = ctx.multiDayContext?.oiMigration?.sessionsTracked || 0;
+  if (sessions < 3) required.push(`only ${sessions} sessions tracked, need 3+`);
+
+  // Direction must align with current regime/VWAP
+  const vwapPos = ctx.vwap?.position;
+  if ((ctx.direction === 'bullish' && vwapPos !== 'above')
+   || (ctx.direction === 'bearish' && vwapPos !== 'below')) {
+    required.push(`VWAP wrong side (${vwapPos})`);
+  }
+
+  const valid = required.length === 0;
+  if (!valid) {
+    return { name: 'OI_MIGRATION_TREND', family: 'momentum_continuation',
+             valid: false, score: 0, conviction: 'weak', missing: required,
+             reasoning: `missing: ${required.join(', ')}` };
+  }
+  score += 30; reasons.push(`OI migration ${ctx.direction} aligned (${sessions} sessions)`);
+
+  // Confirmations
+  // Delta in direction
+  const deltaPct = _safe(ctx.volumeAnalysis?.delta?.cvdPctLong);
+  if ((ctx.direction === 'bullish' && deltaPct > 5)
+   || (ctx.direction === 'bearish' && deltaPct < -5)) {
+    score += 10; confirmations.push(`delta ${deltaPct}%`);
+  }
+
+  // OI regime alignment
+  const oiR = ctx.oiAnalytics?.regime || '';
+  if ((ctx.direction === 'bullish' && (oiR === 'aggressive_long_buildup' || oiR === 'violent_short_covering'))
+   || (ctx.direction === 'bearish' && (oiR === 'aggressive_short_buildup' || oiR === 'long_unwinding_collapse'))) {
+    score += 12; confirmations.push(`OI regime ${oiR}`);
+  }
+
+  // MTF supportive
+  if (ctx.mtfStructure?.alignment === 'full') {
+    score += 10; confirmations.push('MTF full');
+  } else if (ctx.mtfStructure?.alignment === 'partial') {
+    score += 5; confirmations.push('MTF partial');
+  }
+
+  // Futures aligned
+  if (ctx.futuresData?.direction === ctx.direction) {
+    score += 6; confirmations.push('futures aligned');
+  }
+
+  // Active volatility helps
+  if (ctx.volatilityRegime?.state === 'expansion' || ctx.volatilityRegime?.state === 'normal') {
+    score += 4; confirmations.push(`vol ${ctx.volatilityRegime.state}`);
+  }
+
+  // CALIBRATED cycle 29: OI_MIGRATION_TREND fired 212× as playbook winner
+  // but only 62% WR. Require ELITE conviction only (3+ confirmations) to
+  // prevent it from outranking better-WR playbooks like VWAP_BOUNCE_SCALP.
+  const conviction = confirmations.length >= 4 ? 'elite' :
+                     confirmations.length >= 3 ? 'standard' : 'weak';
+
+  return {
+    name: 'OI_MIGRATION_TREND',
+    family: 'momentum_continuation',
+    valid: conviction === 'elite' && score >= 60,
+    score: _clamp(score),
+    conviction,
+    holdProfile: { tradeType: 'SWING', maxHoldSec: 600, rrTarget: 2.5 },
+    riskProfile: { slPct: 0.12, sizingFactor: 0.7 },
+    allowedDirections: ['bullish', 'bearish'],
+    preconditions: ['oi_migration_aligned', 'multi_day_data', 'vwap_supportive'],
+    confirmations,
+    reasoning: `${conviction.toUpperCase()} | ${confirmations.join(' | ')}`,
+  };
+}
+
 // ─── REGIME → PLAYBOOK ELIGIBILITY MAP (institutional spec) ────────────────
 // This is the orchestrator's "permission map". Even if a playbook scores
 // high, it must match the current meta-regime to be eligible.
+//
+// CALIBRATED 2026-05-18 cycle 28-30: Phase 1 institutional rotational
+// playbooks added. OI_MIGRATION_TREND removed from REGIME maps because
+// it underperformed (55.6% WR) and outranked higher-WR playbooks. It can
+// be re-added once we have richer multi-day OI data.
 const REGIME_PLAYBOOKS = {
-  trend_auction:    ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'OPENING_DRIVE_CONTINUATION', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP'],
-  short_covering:   ['SHORT_COVERING_SQUEEZE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP'],
-  long_liquidation: ['LONG_LIQUIDATION_CASCADE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP'],
-  gamma_pin:        ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'FAILED_AUCTION_REVERSAL', 'EXHAUSTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP'],
-  balanced_auction: ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP'],
-  slow_grind:       ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'PULLBACK_CONTINUATION', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP'],
-  dealer_hedging:   ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP'],
-  expiry_expansion: ['WEEKLY_EXPIRY_DEALER_UNWIND', 'INITIATIVE_MOMENTUM_EXPANSION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'DELTA_DRIVE_SCALP'],
-  panic:            ['EXHAUSTION_REVERSAL', 'FAILED_AUCTION_REVERSAL'],
-  unknown:          ['GAMMA_PIN_MEAN_REVERSION', 'VWAP_RECLAIM_CLEAN', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'VWAP_BOUNCE_SCALP', 'DELTA_DRIVE_SCALP'],
+  trend_auction:    ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'OPENING_DRIVE_CONTINUATION', 'OPENING_DRIVE_FAILURE', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP'],
+  short_covering:   ['SHORT_COVERING_SQUEEZE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'SWEEP_RECLAIM_SCALP'],
+  long_liquidation: ['LONG_LIQUIDATION_CASCADE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'SWEEP_RECLAIM_SCALP'],
+  gamma_pin:        ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'FAILED_AUCTION_REVERSAL', 'EXHAUSTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'SWEEP_RECLAIM_SCALP'],
+  balanced_auction: ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'SWEEP_RECLAIM_SCALP', 'OPENING_DRIVE_FAILURE'],
+  slow_grind:       ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'PULLBACK_CONTINUATION', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP'],
+  dealer_hedging:   ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP'],
+  expiry_expansion: ['WEEKLY_EXPIRY_DEALER_UNWIND', 'INITIATIVE_MOMENTUM_EXPANSION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'DELTA_DRIVE_SCALP', 'PIN_REVERSION', 'SWEEP_RECLAIM_SCALP'],
+  panic:            ['EXHAUSTION_REVERSAL', 'FAILED_AUCTION_REVERSAL', 'SWEEP_RECLAIM_SCALP'],
+  unknown:          ['GAMMA_PIN_MEAN_REVERSION', 'VWAP_RECLAIM_CLEAN', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'VWAP_BOUNCE_SCALP', 'DELTA_DRIVE_SCALP', 'VALUE_AREA_ROTATION', 'VWAP_OSCILLATION_SCALP', 'LVN_REJECTION_SCALP'],
 };
 
 const ALL_PLAYBOOKS = [
@@ -1642,6 +2395,15 @@ const ALL_PLAYBOOKS = [
   _trendVwapFollow,
   _counterTrendReversal,
   _deltaDriveScalp,
+  // Phase 1 institutional rotational playbooks (cycle 28)
+  _valueAreaRotation,
+  _pinReversion,
+  _sweepReclaimScalp,
+  _lvnRejectionScalp,
+  _vwapOscillationScalp,
+  _openingDriveFailure,
+  _microDeltaFlip,
+  _oiMigrationTrend,
 ];
 
 /**

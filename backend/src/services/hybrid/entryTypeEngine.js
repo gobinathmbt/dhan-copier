@@ -520,6 +520,15 @@ function evaluate(ctx = {}) {
     TREND_VWAP_FOLLOW:             'pullback',
     COUNTER_TREND_REVERSAL:        'reversal',
     DELTA_DRIVE_SCALP:             'momentum_continuation',
+    // Phase 1 rotational (cycle 28)
+    VALUE_AREA_ROTATION:           'mean_reversion',
+    PIN_REVERSION:                 'mean_reversion',
+    SWEEP_RECLAIM_SCALP:           'reversal',
+    LVN_REJECTION_SCALP:           'mean_reversion',
+    VWAP_OSCILLATION_SCALP:        'mean_reversion',
+    OPENING_DRIVE_FAILURE:         'reversal',
+    MICRO_DELTA_FLIP:              'momentum_continuation',
+    OI_MIGRATION_TREND:            'momentum_continuation',
   };
 
   // Pre-filter: drop any setup whose family is blocked under the current
