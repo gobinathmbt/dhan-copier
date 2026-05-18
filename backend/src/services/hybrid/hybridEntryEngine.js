@@ -935,7 +935,7 @@ async function decide({
     metaRegime, marketRegime, volatilityRegime, gammaRegime,
     auctionState, orderflowState, trendPhase, mtfStructure,
     volumeAnalysis, oiAnalytics, vwap: payload?.vwap_analysis,
-    futuresData, sessionPhase, candles1m, candles5m,
+    futuresData, sessionPhase, candles1m, candles5m, candles15m,
     sessionMemory: multiDayContext?.sessionMemory,
     multiDayContext,
     marketInternals: algorithmOutputs?.marketInternals,

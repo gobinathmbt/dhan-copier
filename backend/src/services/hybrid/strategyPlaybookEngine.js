@@ -2764,6 +2764,548 @@ function _utBotFastScalp(ctx) {
   };
 }
 
+// ─── PLAYBOOK 28: RANGE_BREAK_RETEST ──────────────────────────────────
+// 2026-05-18 cycle 36 (zero/low-day rescue Phase 1):
+// 11 of the 42 low-trade days exhibit "mixed-chop trend" — net direction
+// is clearly trending (e.g. -0.81% close-to-close) but candle bodies flip
+// jaggedly. Existing playbooks reject because:
+//   - VWAP_BOUNCE_SCALP wants a clean reclaim event
+//   - UT_BOT_FAST_SCALP needs a strong-body 5m candle (jagged days fail)
+//   - INITIATIVE_MOMENTUM wants negative gamma + expansion + initiative orderflow
+//
+// Pattern this playbook captures: range break → retest → continuation.
+// Detection:
+//   1. Spot has broken above prior 30m high (bullish) or below prior 30m
+//      low (bearish) by ≥0.15% in the last 60 minutes
+//   2. Last 5m candle wicked back into the prior range and closed back
+//      out (rejection / acceptance pattern)
+//   3. VWAP aligned with the break direction
+//   4. Delta supportive (≥4% absolute in direction)
+//   5. NOT in midday_chop, NOT dead-vol
+//
+// Hold profile: SCALP, 240s, RR 1.2 — slightly longer hold than UT Bot
+// because retests need time to play out. Sizing 0.7x conservative.
+function _rangeBreakRetest(ctx) {
+  const reasons = [];
+  let score = 0;
+  const required = [];
+  const confirmations = [];
+
+  const c5 = ctx.candles5m || [];
+  const c15 = ctx.candles15m || [];
+  if (c5.length < 12) required.push('insufficient 5m candles');
+  if (c15.length < 4) required.push('insufficient 15m candles');
+
+  const spot = Number(ctx.spotPrice);
+  if (!Number.isFinite(spot)) required.push('no spot price');
+
+  // Build the "prior 30m range" window: bars before the last 12 (60min)
+  // were the consolidation range we want to see broken.
+  // CALIBRATED cycle 2: Use bars 6-18 (30-90min ago).
+  // CALIBRATED cycle 3: 30 trades at 40% WR — false breakouts. Require:
+  //   (a) bigger lookback (24-bar prior range = 2hrs of consolidation)
+  //   (b) stronger break magnitude (0.10% — ~25pts on NIFTY)
+  //   (c) retest must HOLD for ≥2 bars after rejection
+  //   (d) last 2 bars must close in direction
+  let priorHigh = null, priorLow = null;
+  if (c5.length >= 30) {
+    const priorBars = c5.slice(-30, -6); // bars 6-30 ago = 2hr range
+    priorHigh = Math.max(...priorBars.map(b => b.h));
+    priorLow  = Math.min(...priorBars.map(b => b.l));
+  }
+  if (priorHigh === null) required.push('cannot establish prior 2hr range');
+
+  // Break magnitude: 0.10% — clear of noise but not unreachable
+  const minBreakPct = 0.0010;
+  const breakUp = priorHigh && spot > priorHigh * (1 + minBreakPct);
+  const breakDn = priorLow && spot < priorLow * (1 - minBreakPct);
+  if (ctx.direction === 'bullish' && !breakUp) {
+    required.push(`no upper break (spot=${spot} priorHigh=${priorHigh})`);
+  }
+  if (ctx.direction === 'bearish' && !breakDn) {
+    required.push(`no lower break (spot=${spot} priorLow=${priorLow})`);
+  }
+
+  // Retest pattern (last 6 bars):
+  //   bullish: at least one bar dipped within 5pts of priorHigh and closed above it,
+  //            AND ALL bars after that dip closed above priorHigh (retest held)
+  //   bearish: mirror
+  let retestHeld = false;
+  const recent = c5.slice(-6);
+  for (let i = 0; i < recent.length - 1; i++) {
+    const b = recent[i];
+    if (ctx.direction === 'bullish' && priorHigh
+        && b.l <= priorHigh + 5 && b.c > priorHigh) {
+      // Check that all subsequent bars also closed above priorHigh
+      const followBars = recent.slice(i + 1);
+      if (followBars.length >= 2 && followBars.every(f => f.c > priorHigh)) {
+        retestHeld = true; break;
+      }
+    }
+    if (ctx.direction === 'bearish' && priorLow
+        && b.h >= priorLow - 5 && b.c < priorLow) {
+      const followBars = recent.slice(i + 1);
+      if (followBars.length >= 2 && followBars.every(f => f.c < priorLow)) {
+        retestHeld = true; break;
+      }
+    }
+  }
+  if (!retestHeld) required.push('no held retest of prior range edge');
+
+  // Last 2 bars must close in direction (real continuation, not whip)
+  const last2 = c5.slice(-2);
+  if (last2.length === 2) {
+    const closesInDir = (ctx.direction === 'bullish' && last2.every(b => b.c > b.o))
+                     || (ctx.direction === 'bearish' && last2.every(b => b.c < b.o));
+    if (!closesInDir) required.push(`last 2 bars not closing ${ctx.direction}`);
+  }
+
+  // VWAP must align with direction
+  const vwapPos = ctx.vwap?.position;
+  if ((ctx.direction === 'bullish' && vwapPos !== 'above')
+   || (ctx.direction === 'bearish' && vwapPos !== 'below')) {
+    required.push(`VWAP wrong side (${vwapPos})`);
+  }
+
+  // Delta supportive (≥4% absolute)
+  const deltaPct = _safe(ctx.volumeAnalysis?.delta?.cvdPctLong);
+  const deltaOK = (ctx.direction === 'bullish' && deltaPct >= 4)
+              || (ctx.direction === 'bearish' && deltaPct <= -4);
+  if (!deltaOK) required.push(`delta ${deltaPct}% not supportive (need ≥4% in dir)`);
+
+  // Hard exclusions
+  if (ctx.sessionPhase?.phase === 'midday_chop') required.push('midday_chop');
+  if (ctx.volatilityRegime?.state === 'dead') required.push('dead volatility');
+  if ((ctx.trap?.trapScore || 0) >= 70) required.push(`trap ${ctx.trap.trapScore}`);
+
+  const valid = required.length === 0;
+  if (!valid) {
+    return { name: 'RANGE_BREAK_RETEST', family: 'momentum_continuation',
+             valid: false, score: 0, conviction: 'weak', missing: required,
+             reasoning: `missing: ${required.join(', ')}` };
+  }
+  score += 35;
+  reasons.push(`break+retest of ${ctx.direction === 'bullish' ? priorHigh : priorLow} + VWAP ${vwapPos} + delta ${deltaPct}%`);
+
+  // ── Confirmations ──
+  // 1. Net move on the day already aligned (>0.5%)
+  const c0 = c5[0]?.o;
+  const cN = c5[c5.length - 1]?.c;
+  if (c0 && cN) {
+    const netPct = ((cN - c0) / c0) * 100;
+    if (ctx.direction === 'bullish' && netPct > 0.5) {
+      score += 8; confirmations.push(`day net +${netPct.toFixed(2)}%`);
+    } else if (ctx.direction === 'bearish' && netPct < -0.5) {
+      score += 8; confirmations.push(`day net ${netPct.toFixed(2)}%`);
+    }
+  }
+  // 2. 15m last candle in direction
+  const last15 = c15[c15.length - 1];
+  if (last15) {
+    if (ctx.direction === 'bullish' && last15.c > last15.o) {
+      score += 8; confirmations.push('15m candle bullish');
+    }
+    if (ctx.direction === 'bearish' && last15.c < last15.o) {
+      score += 8; confirmations.push('15m candle bearish');
+    }
+  }
+  // 3. Strong delta (≥10%)
+  if (Math.abs(deltaPct) >= 10) {
+    score += 8; confirmations.push(`strong delta ${deltaPct}%`);
+  }
+  // 4. Futures aligned
+  if (ctx.futuresData?.direction === ctx.direction) {
+    score += 6; confirmations.push('futures aligned');
+  }
+  // 5. OI in direction
+  const oiR = ctx.oiAnalytics?.regime || '';
+  const oiAligned = (ctx.direction === 'bullish'
+                    && (oiR === 'aggressive_long_buildup' || oiR === 'violent_short_covering'))
+                || (ctx.direction === 'bearish'
+                    && (oiR === 'aggressive_short_buildup' || oiR === 'long_unwinding_collapse'));
+  if (oiAligned) {
+    score += 8; confirmations.push(`OI ${oiR}`);
+  }
+  // 6. Volume spike on entry candle
+  const tvState = ctx.volumeAnalysis?.timeVolume?.state;
+  if (tvState === 'spike') {
+    score += 6; confirmations.push('volume spike');
+  } else if (tvState === 'dry_up') {
+    score -= 4; confirmations.push('volume dry');
+  }
+  // 7. VWAP distance moderate (not stretched)
+  const dist = Math.abs(_safe(ctx.vwap?.distance_pct));
+  if (dist < 0.3) {
+    score += 5; confirmations.push(`near VWAP ${dist.toFixed(2)}%`);
+  } else if (dist > 0.7) {
+    score -= 3; confirmations.push(`stretched VWAP ${dist.toFixed(2)}%`);
+  }
+  // 8. UT Bot 5m aligned (extra confidence)
+  const tf5 = ctx.utBot?.perTimeframe?.['5m']?.trend;
+  if (tf5 === ctx.direction) {
+    score += 6; confirmations.push(`UT 5m ${tf5}`);
+  }
+  // 9. MTF structure aligned
+  if (ctx.mtfStructure?.alignment === 'full') {
+    score += 6; confirmations.push('MTF full');
+  }
+
+  // Need ≥3 confirmations for elite, ≥2 for standard
+  const conviction = confirmations.length >= 3 ? 'elite' :
+                     confirmations.length >= 2 ? 'standard' : 'weak';
+
+  return {
+    name: 'RANGE_BREAK_RETEST',
+    family: 'momentum_continuation',
+    // Standard+ allowed — this is a fallback for mixed-chop days where
+    // structural confirmations are inherently weaker. The break+retest
+    // pattern itself is the primary edge.
+    valid: conviction !== 'weak',
+    score: _clamp(score),
+    conviction,
+    holdProfile: { tradeType: 'SCALP', maxHoldSec: 240, rrTarget: 1.2 },
+    riskProfile: { slPct: 0.10, sizingFactor: conviction === 'elite' ? 0.85 : 0.7 },
+    minScoreOverride: 65,
+    allowedDirections: ['bullish', 'bearish'],
+    preconditions: ['break_of_30m_range', 'retest_held', 'vwap_aligned', 'delta_4pct'],
+    confirmations,
+    reasoning: `${conviction.toUpperCase()} | ${confirmations.join(' | ')}`,
+  };
+}
+
+// ─── PLAYBOOK 29: QUIET_RANGE_FADE ────────────────────────────────────
+// 2026-05-18 cycle 37 (zero/low-day rescue Phase 2):
+// Quiet sideways days (~5 of the 42 low-trade days) have:
+//   - rangePct < 0.7%, ATR5m < 25 (tight compressed range)
+//   - bouncing between dayHigh and dayLow
+//   - GAMMA_PIN_MEAN_REVERSION wants `inside_va` AND a clear edge position
+//     (<35% or >65% of VA), but these days hover at POC center
+//
+// This playbook fades the day's high/low directly when:
+//   1. Compressed range: ATR5m < 25 AND rangePct < 0.8%
+//   2. Spot within 8pts of dayHigh (bearish setup) or dayLow (bullish setup)
+//   3. VWAP near spot (dist_pct < 0.4%)
+//   4. Volume not climaxing (pure compressive trade)
+//   5. NOT in expansion/high-vol regime (would imply real breakout)
+//
+// Hold profile: SCALP, 120s, RR 0.8 — quick rotational scalp, sizing 0.4x
+// (small positions because tight ranges = tight rewards).
+function _quietRangeFade(ctx) {
+  const reasons = [];
+  let score = 0;
+  const required = [];
+  const confirmations = [];
+
+  const c5 = ctx.candles5m || [];
+  if (c5.length < 12) required.push('insufficient 5m candles');
+
+  const spot = Number(ctx.spotPrice);
+  if (!Number.isFinite(spot)) required.push('no spot price');
+
+  // Compressed-range gate: small ATR + small range
+  // CALIBRATED cycle 2: backtest showed most days have rangePct 0.85-1.15%.
+  // Tightening to <0.8% blocked all candidates. Loosen to <1.2% which still
+  // captures genuinely range-bound days (vs <2.5% trend days).
+  const atr5m = _safe(ctx.volatilityRegime?.atr5m);
+  if (atr5m === 0 || atr5m > 35) {
+    required.push(`ATR5m ${atr5m} too high (need <35)`);
+  }
+
+  // Compute day high/low and rangePct from candles5m
+  let dayHigh = -Infinity, dayLow = Infinity;
+  for (const b of c5) { if (b.h > dayHigh) dayHigh = b.h; if (b.l < dayLow) dayLow = b.l; }
+  const opening = c5[0]?.o;
+  const rangePct = opening ? ((dayHigh - dayLow) / opening) * 100 : 999;
+  if (rangePct > 2.0) required.push(`range ${rangePct.toFixed(2)}% too wide`);
+
+  // Edge position — spot must be near dayHigh (bearish fade) or dayLow (bullish fade)
+  // CALIBRATED cycle 2: 8pts → 12pts to allow more candidates
+  const distFromHigh = dayHigh - spot;
+  const distFromLow  = spot - dayLow;
+  if (ctx.direction === 'bearish' && distFromHigh > 12) {
+    required.push(`bearish needs spot near dayHigh (dist=${distFromHigh.toFixed(1)})`);
+  }
+  if (ctx.direction === 'bullish' && distFromLow > 12) {
+    required.push(`bullish needs spot near dayLow (dist=${distFromLow.toFixed(1)})`);
+  }
+
+  // VWAP near spot — confirms range-bound character
+  const vwapDist = Math.abs(_safe(ctx.vwap?.distance_pct));
+  if (vwapDist > 0.4) required.push(`VWAP too far (${vwapDist.toFixed(2)}%)`);
+
+  // Volume must not be climaxing — that signals real breakout, not fade
+  const tvState = ctx.volumeAnalysis?.timeVolume?.state;
+  if (tvState === 'climax' || tvState === 'spike') {
+    required.push(`volume ${tvState} (real breakout signal)`);
+  }
+
+  // Block expansion / high-vol regimes
+  if (ctx.volatilityRegime?.state === 'expansion') required.push('expansion vol');
+
+  // Block trending market regime — pure mean-revert tool
+  const regime = ctx.marketRegime?.regime;
+  if (regime === 'trending_bullish' || regime === 'trending_bearish') {
+    required.push(`regime ${regime} — fade tool needs ranging market`);
+  }
+
+  // Hard exclusions: trap, midday only fine, expiry afternoon
+  if ((ctx.trap?.trapScore || 0) >= 70) required.push(`trap ${ctx.trap.trapScore}`);
+  if (ctx.sessionPhase?.isExpiryDay && ctx.sessionPhase?.hhmm >= 1430) {
+    required.push('expiry afternoon');
+  }
+
+  const valid = required.length === 0;
+  if (!valid) {
+    return { name: 'QUIET_RANGE_FADE', family: 'mean_reversion',
+             valid: false, score: 0, conviction: 'weak', missing: required,
+             reasoning: `missing: ${required.join(', ')}` };
+  }
+  score += 35;
+  reasons.push(`compressed ${rangePct.toFixed(2)}% range, edge fade, VWAP ${vwapDist.toFixed(2)}% close`);
+
+  // ── Confirmations ──
+  // 1. Failed breakouts in session — pin is real
+  const failed = (ctx.sessionMemory?.failedBreakouts || 0) + (ctx.sessionMemory?.failedBreakdowns || 0);
+  if (failed >= 1) { score += 8; confirmations.push(`${failed} failed break(s)`); }
+
+  // 2. VSA upthrust (bearish from edge) / spring (bullish from low)
+  const vsa = ctx.volumeAnalysis?.vsa;
+  if ((ctx.direction === 'bullish' && vsa?.pattern === 'spring')
+   || (ctx.direction === 'bearish' && vsa?.pattern === 'upthrust')) {
+    score += 12; confirmations.push(`VSA ${vsa.pattern}`);
+  }
+
+  // 3. Weak delta — no momentum to fight
+  const deltaPct = Math.abs(_safe(ctx.volumeAnalysis?.delta?.cvdPctLong));
+  if (deltaPct < 8) {
+    score += 8; confirmations.push(`weak delta ${deltaPct}%`);
+  } else if (deltaPct > 20) {
+    score -= 12; confirmations.push(`strong delta ${deltaPct}% — wrong setup`);
+  }
+
+  // 4. Positive gamma regime — supports mean reversion
+  if (ctx.gammaRegime?.regime === 'positive') {
+    score += 10; confirmations.push('positive gamma');
+  }
+
+  // 5. Inside VA helps (we already passed above logic without requiring it)
+  if (ctx.volumeAnalysis?.acceptance === 'inside_va') {
+    score += 6; confirmations.push('inside VA');
+  }
+
+  // 6. Liquidity good
+  if (ctx.liquidity?.health === 'good' || ctx.liquidity?.health === 'excellent') {
+    score += 4; confirmations.push(`liq ${ctx.liquidity.health}`);
+  }
+
+  // 7. Last 5m candle showing rejection wick (fade signal)
+  const last = c5[c5.length - 1];
+  if (last) {
+    const upperWick = last.h - Math.max(last.o, last.c);
+    const lowerWick = Math.min(last.o, last.c) - last.l;
+    const rng = (last.h - last.l) || 1;
+    if (ctx.direction === 'bearish' && upperWick / rng > 0.4) {
+      score += 8; confirmations.push('upper wick reject');
+    }
+    if (ctx.direction === 'bullish' && lowerWick / rng > 0.4) {
+      score += 8; confirmations.push('lower wick reject');
+    }
+  }
+
+  const conviction = confirmations.length >= 3 ? 'elite' :
+                     confirmations.length >= 2 ? 'standard' : 'weak';
+
+  return {
+    name: 'QUIET_RANGE_FADE',
+    family: 'mean_reversion',
+    valid: conviction !== 'weak',
+    score: _clamp(score),
+    conviction,
+    holdProfile: { tradeType: 'SCALP', maxHoldSec: 120, rrTarget: 0.8 },
+    riskProfile: { slPct: 0.07, sizingFactor: conviction === 'elite' ? 0.6 : 0.4 },
+    minScoreOverride: 65,
+    allowedDirections: ['bullish', 'bearish'],
+    preconditions: ['compressed_range', 'edge_position', 'vwap_close', 'no_climax', 'no_trend_regime'],
+    confirmations,
+    reasoning: `${conviction.toUpperCase()} | ${confirmations.join(' | ')}`,
+  };
+}
+
+// ─── PLAYBOOK 30: TREND_RIDE_NO_CONFIRMATION ──────────────────────────
+// 2026-05-18 cycle 38 (zero/low-day rescue Phase 3):
+// Strong directional trend days (~6 of the 42 low-trade days) where
+// INITIATIVE_MOMENTUM_EXPANSION rejects because:
+//   - orderflow_state isn't "initiative_buying" / "initiative_selling"
+//   - OR meta_regime isn't "trend_auction"
+//
+// But the candle action IS clearly trending: 5m/15m/30m all closing in the
+// same direction, net move > 0.8%, ATR > 25.
+//
+// Detection:
+//   1. Last 4 of 5m candles: ≥3 closing in direction (not strict every-bar)
+//   2. Last 2 of 15m candles: BOTH closing in direction
+//   3. Net move on day > 0.6% in direction
+//   4. ATR5m > 25 (real moves)
+//   5. VWAP aligned
+//   6. Delta supportive (≥4% in direction)
+//   7. NOT in chop / midday_chop
+//
+// Hold profile: SCALP, 240s, RR 1.0 (longer hold for trend rides), sizing 0.7x
+function _trendRideNoConfirmation(ctx) {
+  const reasons = [];
+  let score = 0;
+  const required = [];
+  const confirmations = [];
+
+  const c5 = ctx.candles5m || [];
+  const c15 = ctx.candles15m || [];
+  if (c5.length < 12) required.push('insufficient 5m candles');
+  if (c15.length < 4) required.push('insufficient 15m candles');
+
+  // 1. Last 4 of 5m candles — at least 3 closing in direction
+  const last5x4 = c5.slice(-4);
+  const dirBars5m = last5x4.filter(b => {
+    if (ctx.direction === 'bullish') return b.c > b.o;
+    if (ctx.direction === 'bearish') return b.c < b.o;
+    return false;
+  }).length;
+  if (dirBars5m < 3) required.push(`only ${dirBars5m}/4 5m bars in dir`);
+
+  // 2. Last 2 of 15m candles — both in direction
+  const last15x2 = c15.slice(-2);
+  const dirBars15m = last15x2.filter(b => {
+    if (ctx.direction === 'bullish') return b.c > b.o;
+    if (ctx.direction === 'bearish') return b.c < b.o;
+    return false;
+  }).length;
+  if (dirBars15m < 2) required.push(`only ${dirBars15m}/2 15m bars in dir`);
+
+  // 3. Net move on day > 0.6%
+  const c0 = c5[0]?.o;
+  const cN = c5[c5.length - 1]?.c;
+  const netPct = (c0 && cN) ? ((cN - c0) / c0) * 100 : 0;
+  if (ctx.direction === 'bullish' && netPct < 0.6) {
+    required.push(`net move +${netPct.toFixed(2)}% < 0.6%`);
+  }
+  if (ctx.direction === 'bearish' && netPct > -0.6) {
+    required.push(`net move ${netPct.toFixed(2)}% > -0.6%`);
+  }
+
+  // 4. ATR5m > 25
+  const atr5m = _safe(ctx.volatilityRegime?.atr5m);
+  if (atr5m < 25) required.push(`ATR5m ${atr5m} < 25`);
+
+  // 5. VWAP aligned
+  const vwapPos = ctx.vwap?.position;
+  if ((ctx.direction === 'bullish' && vwapPos !== 'above')
+   || (ctx.direction === 'bearish' && vwapPos !== 'below')) {
+    required.push(`VWAP wrong side (${vwapPos})`);
+  }
+
+  // 6. Delta supportive (≥4%)
+  const deltaPct = _safe(ctx.volumeAnalysis?.delta?.cvdPctLong);
+  const deltaOK = (ctx.direction === 'bullish' && deltaPct >= 4)
+              || (ctx.direction === 'bearish' && deltaPct <= -4);
+  if (!deltaOK) required.push(`delta ${deltaPct}% not supportive`);
+
+  // Hard exclusions
+  const regime = ctx.marketRegime?.regime;
+  if (regime === 'choppy' || regime === 'ranging') {
+    required.push(`regime ${regime} (need trending)`);
+  }
+  if (ctx.sessionPhase?.phase === 'midday_chop') required.push('midday_chop');
+  if ((ctx.trap?.trapScore || 0) >= 70) required.push(`trap ${ctx.trap.trapScore}`);
+  if (ctx.sessionPhase?.isExpiryDay && ctx.sessionPhase?.hhmm >= 1430) {
+    required.push('expiry afternoon');
+  }
+
+  const valid = required.length === 0;
+  if (!valid) {
+    return { name: 'TREND_RIDE_NO_CONFIRMATION', family: 'momentum_continuation',
+             valid: false, score: 0, conviction: 'weak', missing: required,
+             reasoning: `missing: ${required.join(', ')}` };
+  }
+  score += 35;
+  reasons.push(`net ${netPct.toFixed(2)}% + ${dirBars5m}/4 5m + ${dirBars15m}/2 15m + VWAP ${vwapPos}`);
+
+  // ── Confirmations ──
+  // 1. UT Bot 5m + 15m both aligned
+  const ut5 = ctx.utBot?.perTimeframe?.['5m']?.trend;
+  const ut15 = ctx.utBot?.perTimeframe?.['15m']?.trend;
+  if (ut5 === ctx.direction && ut15 === ctx.direction) {
+    score += 12; confirmations.push(`UT 5m+15m ${ctx.direction}`);
+  } else if (ut5 === ctx.direction) {
+    score += 6; confirmations.push(`UT 5m ${ctx.direction}`);
+  }
+  // 2. Strong delta
+  if (Math.abs(deltaPct) >= 10) {
+    score += 8; confirmations.push(`strong delta ${deltaPct}%`);
+  }
+  // 3. Futures aligned
+  if (ctx.futuresData?.direction === ctx.direction) {
+    score += 6; confirmations.push('futures aligned');
+  }
+  // 4. OI in direction
+  const oiR = ctx.oiAnalytics?.regime || '';
+  const oiAligned = (ctx.direction === 'bullish'
+                    && (oiR === 'aggressive_long_buildup' || oiR === 'violent_short_covering'))
+                || (ctx.direction === 'bearish'
+                    && (oiR === 'aggressive_short_buildup' || oiR === 'long_unwinding_collapse'));
+  if (oiAligned) {
+    score += 8; confirmations.push(`OI ${oiR}`);
+  }
+  // 5. MTF structure aligned
+  if (ctx.mtfStructure?.alignment === 'full') {
+    score += 8; confirmations.push('MTF full');
+  } else if (ctx.mtfStructure?.alignment === 'partial') {
+    score += 4; confirmations.push('MTF partial');
+  }
+  // 6. Expansion vol
+  if (ctx.volatilityRegime?.state === 'expansion') {
+    score += 6; confirmations.push('expansion vol');
+  }
+  // 7. Last 5m candle body strength
+  const last = c5[c5.length - 1];
+  if (last) {
+    const body = Math.abs(last.c - last.o);
+    const rng = (last.h - last.l) || 1;
+    const closingInDir = (ctx.direction === 'bullish' && last.c > last.o)
+                      || (ctx.direction === 'bearish' && last.c < last.o);
+    if (closingInDir && body / rng > 0.6) {
+      score += 6; confirmations.push(`strong body ${(body/rng*100).toFixed(0)}%`);
+    }
+  }
+  // 8. Volume spike (real participation)
+  const tvState = ctx.volumeAnalysis?.timeVolume?.state;
+  if (tvState === 'spike' || tvState === 'climax') {
+    score += 4; confirmations.push(`volume ${tvState}`);
+  }
+
+  // Need ≥3 confirmations for elite (this is a "no orderflow confirmation"
+  // playbook — it has fewer structural confirmations available, so we
+  // require multiple alternative pillars to align).
+  const conviction = confirmations.length >= 3 ? 'elite' :
+                     confirmations.length >= 2 ? 'standard' : 'weak';
+
+  return {
+    name: 'TREND_RIDE_NO_CONFIRMATION',
+    family: 'momentum_continuation',
+    // Standard+ allowed — this is the trend-ride fallback for days when
+    // orderflow doesn't match the strict initiative pattern. The 3+5m
+    // candle alignment is a strong alternative signal.
+    valid: conviction !== 'weak',
+    score: _clamp(score),
+    conviction,
+    holdProfile: { tradeType: 'SCALP', maxHoldSec: 240, rrTarget: 1.0 },
+    riskProfile: { slPct: 0.10, sizingFactor: conviction === 'elite' ? 0.85 : 0.7 },
+    minScoreOverride: 65,
+    allowedDirections: ['bullish', 'bearish'],
+    preconditions: ['multi_tf_alignment', 'net_0.6pct', 'atr_25', 'vwap_aligned', 'delta_4pct', 'no_chop'],
+    confirmations,
+    reasoning: `${conviction.toUpperCase()} | ${confirmations.join(' | ')}`,
+  };
+}
+
 // ─── REGIME → PLAYBOOK ELIGIBILITY MAP (institutional spec) ────────────────
 // This is the orchestrator's "permission map". Even if a playbook scores
 // high, it must match the current meta-regime to be eligible.
@@ -2779,16 +3321,16 @@ function _utBotFastScalp(ctx) {
 // its strict preconditions (typically dead-vol drift). Conservative
 // management (200s/1.2RR/0.5 sizing) keeps the win-rate impact minimal.
 const REGIME_PLAYBOOKS = {
-  trend_auction:    ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'OPENING_DRIVE_CONTINUATION', 'OPENING_DRIVE_FAILURE', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'UT_BOT_FAST_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
-  short_covering:   ['SHORT_COVERING_SQUEEZE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'SWEEP_RECLAIM_SCALP', 'UT_BOT_FAST_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
-  long_liquidation: ['LONG_LIQUIDATION_CASCADE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'SWEEP_RECLAIM_SCALP', 'UT_BOT_FAST_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
+  trend_auction:    ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'OPENING_DRIVE_CONTINUATION', 'OPENING_DRIVE_FAILURE', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP'],
+  short_covering:   ['SHORT_COVERING_SQUEEZE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'SWEEP_RECLAIM_SCALP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP'],
+  long_liquidation: ['LONG_LIQUIDATION_CASCADE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'SWEEP_RECLAIM_SCALP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP'],
   gamma_pin:        ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'FAILED_AUCTION_REVERSAL', 'EXHAUSTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'SWEEP_RECLAIM_SCALP'],
   balanced_auction: ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'SWEEP_RECLAIM_SCALP', 'OPENING_DRIVE_FAILURE'],
   slow_grind:       ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'PULLBACK_CONTINUATION', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'LIGHT_TREND_DRIFT_SCALP'],
-  dealer_hedging:   ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'UT_BOT_FAST_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
-  expiry_expansion: ['WEEKLY_EXPIRY_DEALER_UNWIND', 'INITIATIVE_MOMENTUM_EXPANSION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'DELTA_DRIVE_SCALP', 'PIN_REVERSION', 'SWEEP_RECLAIM_SCALP', 'UT_BOT_FAST_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
+  dealer_hedging:   ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP'],
+  expiry_expansion: ['WEEKLY_EXPIRY_DEALER_UNWIND', 'INITIATIVE_MOMENTUM_EXPANSION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'DELTA_DRIVE_SCALP', 'PIN_REVERSION', 'SWEEP_RECLAIM_SCALP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP'],
   panic:            ['EXHAUSTION_REVERSAL', 'FAILED_AUCTION_REVERSAL', 'SWEEP_RECLAIM_SCALP'],
-  unknown:          ['GAMMA_PIN_MEAN_REVERSION', 'VWAP_RECLAIM_CLEAN', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'VWAP_BOUNCE_SCALP', 'DELTA_DRIVE_SCALP', 'VALUE_AREA_ROTATION', 'VWAP_OSCILLATION_SCALP', 'LVN_REJECTION_SCALP', 'UT_BOT_FAST_SCALP', 'LIGHT_TREND_DRIFT_SCALP'],
+  unknown:          ['GAMMA_PIN_MEAN_REVERSION', 'VWAP_RECLAIM_CLEAN', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'VWAP_BOUNCE_SCALP', 'DELTA_DRIVE_SCALP', 'VALUE_AREA_ROTATION', 'VWAP_OSCILLATION_SCALP', 'LVN_REJECTION_SCALP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP'],
 };
 
 const ALL_PLAYBOOKS = [
@@ -2823,6 +3365,9 @@ const ALL_PLAYBOOKS = [
   // Phase 3 user-spec UT Bot fast scalp (2026-05-18) — 10-15pt momentum
   // capture using ATR-trailing stop as execution trigger.
   _utBotFastScalp,
+  // Phase 4 trend-ride no-confirmation (2026-05-18 cycle 38) — strong trends
+  // without orderflow's strict initiative classification.
+  _trendRideNoConfirmation,
 ];
 
 /**

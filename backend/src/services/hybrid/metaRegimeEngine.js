@@ -206,6 +206,12 @@ function familyOf(entryType) {
   if (entryType === 'LIGHT_TREND_DRIFT_SCALP')         return 'momentum_continuation';
   // Phase 3 user-spec UT Bot fast scalp (2026-05-18) — momentum continuation
   if (entryType === 'UT_BOT_FAST_SCALP')               return 'momentum_continuation';
+  // Phase 4 zero/low-day rescue (2026-05-18 cycle 36)
+  if (entryType === 'RANGE_BREAK_RETEST')              return 'momentum_continuation';
+  // Phase 4 zero/low-day rescue (2026-05-18 cycle 37)
+  if (entryType === 'QUIET_RANGE_FADE')                return 'mean_reversion';
+  // Phase 4 zero/low-day rescue (2026-05-18 cycle 38)
+  if (entryType === 'TREND_RIDE_NO_CONFIRMATION')      return 'momentum_continuation';
   return null;
 }
 
