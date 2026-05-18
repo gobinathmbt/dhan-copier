@@ -143,6 +143,20 @@ function _reversal(ctx) {
 function _meanReversion(ctx) {
   const reasons = [];
   let score = 0, valid = true;
+  // CALIBRATED 2026-05-19 cycle 37: legacy MEAN_REVERSION fallback has
+  // historically pulled WR down. The institutional playbooks
+  // (GAMMA_PIN_MEAN_REVERSION + PIN_REVERSION + VALUE_AREA_ROTATION +
+  // COMPOSITE_PROFILE_EDGE_REJECTION) are strictly better. Force-invalid
+  // so it can never be chosen as the legacy fallback.
+  return {
+    type: 'MEAN_REVERSION',
+    valid: false,
+    score: 0,
+    holdProfile: { tradeType: 'SCALP', maxHoldSec: 200, rrTarget: 1.0 },
+    exitStyle: 'fixed_target_tight_sl',
+    reasoning: 'DISABLED cycle 37 — legacy fallback. Use playbook variants.',
+  };
+  // eslint-disable-next-line no-unreachable
   // Positive gamma essential
   if (ctx.gammaRegime?.regime !== 'positive') { valid = false; reasons.push('not positive gamma'); }
   else { score += 25; reasons.push('positive gamma'); }
