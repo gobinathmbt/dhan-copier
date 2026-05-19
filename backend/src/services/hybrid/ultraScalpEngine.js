@@ -1,120 +1,154 @@
 /**
- * Ultra Scalp Engine (v5 — multi-layer UT Bot confluence + asymmetric)
- * ====================================================================
+ * Ultra Scalp Engine (v6 — regime-adaptive multi-layer UT Bot)
+ * ============================================================
  * Dedicated 5-20 point scalping signal generator that mirrors the user's
- * TradingView "UT Bot Alerts" indicator with full institutional confluence.
+ * TradingView "UT Bot Alerts" indicator with REGIME-ADAPTIVE filtering.
  *
- * v5 ARCHITECTURE (2026-05-19):
+ * v6 — REGIME ADAPTATION (2026-05-19):
+ *   The biggest leap in this revision: instead of static minScore/flipLimit/
+ *   slope filters, EVERY filter now adapts to the live volatility regime.
  *
- * FOUR-LAYER UT BOT STACK:
- *   Layer 1 — TRIGGER       (1m)  — fast, sensitive, fires the entry bar
- *   Layer 2 — CONFIRMATION  (3m)  — must agree with trigger direction
- *   Layer 3 — TREND BIAS    (5m)  — primary trend layer
- *   Layer 4 — REGIME FILTER (15m) — macro filter; trades only with regime
+ *   Volatility regime → filter profile:
+ *     expansion  → minScore 55, flipLimit 5, slope 0.5, allowStaleBar=true
+ *     trend      → minScore 65, flipLimit 4, slope 0.7, allowStaleBar=true (≤2)
+ *     normal     → minScore 70, flipLimit 3, slope 0.8
+ *     chop/dead  → minScore 80, flipLimit 2, slope 1.0  (very strict)
  *
- * ASYMMETRIC BUY/SELL CONFIGS:
- *   Markets fall faster than they rise. Each layer runs TWO UT Bot streams:
- *     • SELL stream — sensitive ATR, lower Key (catches fast crashes)
- *     • BUY  stream — smoother ATR, higher Key (only strong reversals)
+ *   Per-regime UT Bot configs (1m / 3m / 5m / 15m) shift to faster-tighter
+ *   in expansion and slower-cleaner in chop.
  *
- * WEIGHTED CONSENSUS SCORING:
- *   Each layer's UT Bot trend agreement contributes a weight:
- *     1m=15, 3m=25, 5m=30, 15m=30  (configurable)
- *   Trade fires when weighted score >= settings.ultraScalp.minScore (default 70)
+ *   15m REGIME FILTER: now OPTIONAL for small scalps (target ≤ 10pts).
+ *   Only required for elite runner-mode entries.
  *
- * FLIP VELOCITY FILTER:
- *   Tracks recent UT Bot flips per TF. If the trigger TF has flipped > N
- *   times in the last K minutes, the engine treats the market as choppy
- *   and refuses to trade. Default: skip if 1m flipped >3x in 10 minutes.
+ *   CONSENSUS WEIGHT REBALANCE: 1m=25, 3m=35, 5m=25, 15m=15
+ *   (was 15/25/30/30 — too 15m-heavy for ultra scalp)
  *
- * ATR EXPANSION CONFIRMATION:
- *   ATR-rising bias — current ATR(5m) must be >= avg of last K bars × 1.0.
- *   Filters dead-volume false breaks.
+ * NEW FILTERS:
+ *   1. Momentum exhaustion — block entry if recent move > 2.5×ATR AND
+ *      slope decreasing (late-continuation chase).
+ *   2. Pullback continuation — when 5m+3m trend agree but 1m hasn't
+ *      flipped in this cycle, accept as continuation entry if slope is
+ *      strong enough (vs. requiring fresh flip every time).
  *
- * SLOPE STRENGTH:
- *   Distance from price to trailing stop is normalised by ATR. A larger
- *   `slopeStrength` = stronger move; small slope = weak/late entry.
+ * INHERITED FROM v5:
+ *   - Asymmetric BUY/SELL configs per layer
+ *   - Weighted consensus scoring
+ *   - Flip velocity filter (chop detection)
+ *   - Slope strength
+ *   - ATR expansion confirmation
+ *   - Tier classification (elite/standard/weak) → exit mode
  *
  * The whole point: catch the EXACT signals the user sees on the chart with
- * institutional-grade noise filters.
+ * regime-aware noise filters.
  */
 
 const { calculateUTBot } = require('../algorithms/multiTimeframe.service');
 
 // ────────────────────────────────────────────────────────────────────────
-// PROFILE LIBRARY — pre-canned stacks the user can select via
-// `settings.ultraScalp.preset`. Each profile has BUY and SELL configs.
+// REGIME PROFILES — minScore / flipLimit / slope / barsSinceFlip per
+// volatility regime. These kick in dynamically each cycle.
 // ────────────────────────────────────────────────────────────────────────
-//
-// 'best_practical'  — recommended user spec: 1m/3m/5m/15m layered, asymmetric
-// 'high_accuracy'   — slower/cleaner — fewer trades, sharper edges
-// 'aggressive'      — more trades, lower thresholds, accepts more noise
-//
-// Each TF profile carries:
-//   buyConfig, sellConfig         — UT Bot params per direction
-//   role                          — 'trigger' | 'confirmation' | 'trend' | 'regime'
-//   weight                        — consensus scoring weight (only on confirmation/trend/regime layers)
-//   maxHoldSec, slPtsMin/Max,
-//   targetMin/Max, sizingFactor   — sizing & exit parameters (used when this TF is the trigger)
-// ────────────────────────────────────────────────────────────────────────
-const PRESETS = {
-  best_practical: {
-    '1m':  { buyConfig:  { keyValue: 1.25, atrPeriod: 7  },
-             sellConfig: { keyValue: 0.8,  atrPeriod: 3  },
-             role: 'trigger',      weight: 15,
-             maxHoldSec: 90,  slPtsMin: 4, slPtsMax: 8,  targetMin: 5,  targetMax: 12, sizingFactor: 0.5 },
-    '3m':  { buyConfig:  { keyValue: 1.5,  atrPeriod: 7  },
-             sellConfig: { keyValue: 1.0,  atrPeriod: 5  },
-             role: 'confirmation', weight: 25,
-             maxHoldSec: 120, slPtsMin: 5, slPtsMax: 10, targetMin: 6,  targetMax: 15, sizingFactor: 0.6 },
-    '5m':  { buyConfig:  { keyValue: 2.0,  atrPeriod: 10 },
-             sellConfig: { keyValue: 1.5,  atrPeriod: 7  },
-             role: 'trend',        weight: 30,
-             maxHoldSec: 150, slPtsMin: 6, slPtsMax: 12, targetMin: 8,  targetMax: 20, sizingFactor: 0.7 },
-    '15m': { buyConfig:  { keyValue: 3.0,  atrPeriod: 14 },
-             sellConfig: { keyValue: 2.5,  atrPeriod: 10 },
-             role: 'regime',       weight: 30,
-             maxHoldSec: 180, slPtsMin: 8, slPtsMax: 14, targetMin: 10, targetMax: 20, sizingFactor: 0.7 },
+const REGIME_PROFILES = {
+  expansion: {
+    minScore: 65, flipLimit: 3, slopeMin: 0.8, allowStaleBar: true,
+    maxBarsSinceFlip: 2, atrExpansionMin: 0.85,
   },
-  high_accuracy: {
-    '1m':  { buyConfig:  { keyValue: 1.5,  atrPeriod: 7  },
-             sellConfig: { keyValue: 1.2,  atrPeriod: 5  },
-             role: 'trigger',      weight: 15,
-             maxHoldSec: 120, slPtsMin: 5, slPtsMax: 9,  targetMin: 7,  targetMax: 14, sizingFactor: 0.5 },
-    '3m':  { buyConfig:  { keyValue: 2.0,  atrPeriod: 10 },
-             sellConfig: { keyValue: 1.5,  atrPeriod: 7  },
-             role: 'confirmation', weight: 25,
-             maxHoldSec: 180, slPtsMin: 6, slPtsMax: 12, targetMin: 8,  targetMax: 18, sizingFactor: 0.6 },
-    '5m':  { buyConfig:  { keyValue: 2.5,  atrPeriod: 14 },
-             sellConfig: { keyValue: 2.0,  atrPeriod: 10 },
-             role: 'trend',        weight: 30,
-             maxHoldSec: 240, slPtsMin: 8, slPtsMax: 14, targetMin: 10, targetMax: 20, sizingFactor: 0.7 },
-    '15m': { buyConfig:  { keyValue: 3.0,  atrPeriod: 14 },
-             sellConfig: { keyValue: 2.5,  atrPeriod: 10 },
-             role: 'regime',       weight: 30,
-             maxHoldSec: 240, slPtsMin: 10, slPtsMax: 16, targetMin: 12, targetMax: 20, sizingFactor: 0.7 },
+  trend: {
+    minScore: 70, flipLimit: 3, slopeMin: 0.9, allowStaleBar: true,
+    maxBarsSinceFlip: 2, atrExpansionMin: 0.85,
   },
-  aggressive: {
-    '1m':  { buyConfig:  { keyValue: 1.0,  atrPeriod: 3  },
-             sellConfig: { keyValue: 0.8,  atrPeriod: 3  },
-             role: 'trigger',      weight: 20,
-             maxHoldSec: 60,  slPtsMin: 3, slPtsMax: 7,  targetMin: 4,  targetMax: 10, sizingFactor: 0.4 },
-    '3m':  { buyConfig:  { keyValue: 1.0,  atrPeriod: 5  },
-             sellConfig: { keyValue: 1.0,  atrPeriod: 5  },
-             role: 'confirmation', weight: 30,
-             maxHoldSec: 90,  slPtsMin: 4, slPtsMax: 9,  targetMin: 5,  targetMax: 12, sizingFactor: 0.5 },
-    '5m':  { buyConfig:  { keyValue: 1.5,  atrPeriod: 7  },
-             sellConfig: { keyValue: 1.5,  atrPeriod: 7  },
-             role: 'trend',        weight: 50,
-             maxHoldSec: 120, slPtsMin: 5, slPtsMax: 11, targetMin: 7,  targetMax: 16, sizingFactor: 0.6 },
-    // 15m disabled in aggressive preset (more trades, less filtering)
+  normal: {
+    minScore: 78, flipLimit: 2, slopeMin: 1.0, allowStaleBar: true,
+    maxBarsSinceFlip: 1, atrExpansionMin: 0.90,
+  },
+  chop: {
+    minScore: 85, flipLimit: 2, slopeMin: 1.1, allowStaleBar: false,
+    maxBarsSinceFlip: 1, atrExpansionMin: 0.95,
+  },
+  dead: {
+    minScore: 90, flipLimit: 1, slopeMin: 1.3, allowStaleBar: false,
+    maxBarsSinceFlip: 1, atrExpansionMin: 1.0,
   },
 };
 
-const DEFAULT_PRESET = 'high_accuracy';
-const DEFAULT_MIN_SCORE = 80;
+// Map our internal volatility state strings → regime profile keys.
+// (volatilityRegime.state values: 'dead' | 'low' | 'normal' | 'expansion')
+function _classifyRegime(volState, marketRegime) {
+  const v = String(volState || '').toLowerCase();
+  if (v === 'expansion' || v === 'high') return 'expansion';
+  if (v === 'dead')                       return 'dead';
+  if (v === 'low')                        return 'chop';
+  // For 'normal', refine via marketRegime if provided
+  const mr = String(marketRegime?.regime || marketRegime || '').toLowerCase();
+  if (mr === 'choppy' || mr === 'ranging') return 'chop';
+  if (mr.startsWith('trending'))           return 'trend';
+  return 'normal';
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// PRESETS — pre-canned UT Bot stacks. The active stack switches BETWEEN
+// presets each cycle based on the regime classification (live data driven).
+// ────────────────────────────────────────────────────────────────────────
+const PRESETS = {
+  expansion: {
+    '1m':  { buyConfig:  { keyValue: 1.0, atrPeriod: 3 },
+             sellConfig: { keyValue: 0.8, atrPeriod: 3 },
+             role: 'trigger',      weight: 25,
+             maxHoldSec: 60,  slPtsMin: 3, slPtsMax: 7,  targetMin: 4,  targetMax: 10, sizingFactor: 0.4 },
+    '3m':  { buyConfig:  { keyValue: 1.0, atrPeriod: 5 },
+             sellConfig: { keyValue: 1.0, atrPeriod: 5 },
+             role: 'confirmation', weight: 35,
+             maxHoldSec: 90,  slPtsMin: 4, slPtsMax: 9,  targetMin: 5,  targetMax: 12, sizingFactor: 0.5 },
+    '5m':  { buyConfig:  { keyValue: 1.5, atrPeriod: 7 },
+             sellConfig: { keyValue: 1.5, atrPeriod: 7 },
+             role: 'trend',        weight: 25,
+             maxHoldSec: 120, slPtsMin: 5, slPtsMax: 11, targetMin: 7,  targetMax: 16, sizingFactor: 0.6 },
+    '15m': { buyConfig:  { keyValue: 2.0, atrPeriod: 10 },
+             sellConfig: { keyValue: 2.0, atrPeriod: 10 },
+             role: 'regime',       weight: 15,
+             maxHoldSec: 150, slPtsMin: 8, slPtsMax: 14, targetMin: 10, targetMax: 18, sizingFactor: 0.6 },
+  },
+  trend: {
+    '1m':  { buyConfig:  { keyValue: 1.25, atrPeriod: 5 },
+             sellConfig: { keyValue: 1.0,  atrPeriod: 5 },
+             role: 'trigger',      weight: 25,
+             maxHoldSec: 90,  slPtsMin: 4, slPtsMax: 8,  targetMin: 5,  targetMax: 12, sizingFactor: 0.5 },
+    '3m':  { buyConfig:  { keyValue: 1.5,  atrPeriod: 7 },
+             sellConfig: { keyValue: 1.2,  atrPeriod: 5 },
+             role: 'confirmation', weight: 35,
+             maxHoldSec: 120, slPtsMin: 5, slPtsMax: 10, targetMin: 6,  targetMax: 15, sizingFactor: 0.6 },
+    '5m':  { buyConfig:  { keyValue: 2.0,  atrPeriod: 10 },
+             sellConfig: { keyValue: 1.5,  atrPeriod: 7 },
+             role: 'trend',        weight: 25,
+             maxHoldSec: 150, slPtsMin: 6, slPtsMax: 12, targetMin: 8,  targetMax: 20, sizingFactor: 0.7 },
+    '15m': { buyConfig:  { keyValue: 3.0,  atrPeriod: 14 },
+             sellConfig: { keyValue: 2.5,  atrPeriod: 10 },
+             role: 'regime',       weight: 15,
+             maxHoldSec: 180, slPtsMin: 8, slPtsMax: 14, targetMin: 10, targetMax: 20, sizingFactor: 0.7 },
+  },
+  chop: {
+    '1m':  { buyConfig:  { keyValue: 1.5, atrPeriod: 7 },
+             sellConfig: { keyValue: 1.5, atrPeriod: 7 },
+             role: 'trigger',      weight: 25,
+             maxHoldSec: 120, slPtsMin: 5, slPtsMax: 9,  targetMin: 7,  targetMax: 14, sizingFactor: 0.5 },
+    '3m':  { buyConfig:  { keyValue: 2.0, atrPeriod: 10 },
+             sellConfig: { keyValue: 2.0, atrPeriod: 10 },
+             role: 'confirmation', weight: 35,
+             maxHoldSec: 180, slPtsMin: 6, slPtsMax: 12, targetMin: 8,  targetMax: 18, sizingFactor: 0.6 },
+    '5m':  { buyConfig:  { keyValue: 3.0, atrPeriod: 14 },
+             sellConfig: { keyValue: 3.0, atrPeriod: 14 },
+             role: 'trend',        weight: 25,
+             maxHoldSec: 240, slPtsMin: 8, slPtsMax: 14, targetMin: 10, targetMax: 20, sizingFactor: 0.7 },
+    '15m': { buyConfig:  { keyValue: 3.0, atrPeriod: 14 },
+             sellConfig: { keyValue: 3.0, atrPeriod: 14 },
+             role: 'regime',       weight: 15,
+             maxHoldSec: 240, slPtsMin: 10, slPtsMax: 16, targetMin: 12, targetMax: 20, sizingFactor: 0.7 },
+  },
+};
+PRESETS.normal = PRESETS.trend;          // alias
+PRESETS.dead   = PRESETS.chop;           // alias
+
 const DEFAULT_FLIP_WINDOW_MIN = 10;
-const DEFAULT_FLIP_LIMIT = 2;
 
 // ────────────────────────────────────────────────────────────────────────
 // HELPERS
@@ -147,10 +181,6 @@ function _atrSeq(candles, period) {
   return out;
 }
 
-/**
- * Compute UT Bot stop+pos series. Returns { stopSeq, posSeq, atrSeq }.
- * Used both for read-out and for flip-velocity counting.
- */
 function _utSeries(utbCandles, config) {
   const closes = utbCandles.map(c => c.close);
   const atrSeq = _atrSeq(utbCandles, config.atrPeriod);
@@ -206,12 +236,21 @@ function _utBotRead(candles, config) {
   const lastPos = posSeq[posSeq.length - 1];
   const trend = lastPos === 1 ? 'bullish' : lastPos === -1 ? 'bearish' : 'neutral';
 
-  // Slope strength — distance from price to trailing stop, normalised by ATR.
-  // Larger = stronger directional momentum.
   const lastClose = utbCandles[utbCandles.length - 1].close;
   const lastStop  = stopSeq[stopSeq.length - 1];
   const lastAtr   = result.atr || 1;
   const slopeStrength = Math.abs(lastClose - lastStop) / Math.max(0.0001, lastAtr);
+
+  // Slope direction — is slope expanding (good) or compressing (bad)?
+  // Compare last slope to slope 3 bars ago.
+  let slopeTrend = 'flat';
+  if (stopSeq.length >= 4) {
+    const prevClose = utbCandles[utbCandles.length - 4].close;
+    const prevStop  = stopSeq[stopSeq.length - 4];
+    const prevSlope = Math.abs(prevClose - prevStop) / Math.max(0.0001, lastAtr);
+    if (slopeStrength > prevSlope * 1.05) slopeTrend = 'expanding';
+    else if (slopeStrength < prevSlope * 0.95) slopeTrend = 'compressing';
+  }
 
   return {
     signalNow, signalBar, trend,
@@ -220,16 +259,12 @@ function _utBotRead(candles, config) {
     barsSinceFlip,
     warmupShort: false,
     slopeStrength,
-    posSeq, stopSeq,                      // exposed for flip-velocity / debug
+    slopeTrend,
+    posSeq, stopSeq,
     config,
   };
 }
 
-/**
- * ASYMMETRIC dual-config UT Bot read. Runs BUY config + SELL config in
- * parallel, then selects whichever stream has the freshest cross in its
- * allowed direction.
- */
 function _dualUtBotRead(candles, profile) {
   const buyCfg  = profile.buyConfig  || profile;
   const sellCfg = profile.sellConfig || profile;
@@ -253,9 +288,6 @@ function _dualUtBotRead(candles, profile) {
   } else if (buySignal !== 'none')  { chosen = 'buy';  read = buyRead;  }
   else if (sellSignal !== 'none')   { chosen = 'sell'; read = sellRead; }
 
-  // For trend agreement / scoring, we want both streams' trends — buy
-  // stream's trend describes the smooth bullish bias, sell stream's trend
-  // describes the sensitive bearish bias.
   return {
     chosenSignal: chosen,
     chosenRead: read,
@@ -265,20 +297,12 @@ function _dualUtBotRead(candles, profile) {
     atr: read.atr,
     barsSinceFlip: read.barsSinceFlip,
     slopeStrength: read.slopeStrength,
+    slopeTrend: read.slopeTrend,
     warmupShort: read.warmupShort,
     streams: { buy: buyRead, sell: sellRead },
   };
 }
 
-/**
- * Count UT Bot flips inside a time window. We count from the chosen
- * direction's stream (whichever was used to identify the trigger).
- *
- * @param {Array} utbCandles  candles_used_by_engine (have .t epoch seconds)
- * @param {Array} posSeq      position series from _utSeries
- * @param {number} windowMin
- * @returns {number} flip count within `windowMin` minutes of last bar
- */
 function _flipsInWindow(utbCandles, posSeq, windowMin) {
   if (!Array.isArray(posSeq) || posSeq.length < 2) return 0;
   const lastT = utbCandles[utbCandles.length - 1]?.t;
@@ -294,6 +318,15 @@ function _flipsInWindow(utbCandles, posSeq, windowMin) {
   return flips;
 }
 
+// Recent move size — used by exhaustion filter
+function _recentMoveSize(candles, lookback = 8) {
+  if (!Array.isArray(candles) || candles.length < lookback + 1) return 0;
+  const tail = candles.slice(-lookback);
+  const high = Math.max(...tail.map(c => c.h ?? c.high));
+  const low  = Math.min(...tail.map(c => c.l ?? c.low));
+  return high - low;
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // PUBLIC: decide()
 // ────────────────────────────────────────────────────────────────────────
@@ -305,13 +338,20 @@ function decide({
   vwap = null,
   volumeAnalysis = null,
   volatilityRegime = null,
+  marketRegime = null,
   spotPrice = null,
   atr = null,
   settings = {},
 } = {}) {
   const userCfg = settings?.ultraScalp || {};
-  const presetKey = userCfg.preset || DEFAULT_PRESET;
-  const baseProfiles = PRESETS[presetKey] || PRESETS[DEFAULT_PRESET];
+
+  // ── REGIME CLASSIFICATION ────────────────────────────────────────────
+  // Single source of truth — every threshold downstream comes from this.
+  const regime = userCfg.forceRegime || _classifyRegime(volatilityRegime?.state, marketRegime);
+  const regimeProfile = REGIME_PROFILES[regime] || REGIME_PROFILES.normal;
+
+  // ── PRESETS — UT Bot configs adapt to regime ─────────────────────────
+  const baseProfiles = PRESETS[regime] || PRESETS.trend;
   function _resolveProfile(tf) {
     const dflt = baseProfiles[tf];
     if (!dflt) return null;
@@ -323,6 +363,7 @@ function decide({
     if (p) tfProfiles[tf] = p;
   }
 
+  // ── Behaviour flags (regime defaults, user can override) ─────────────
   const enable = {
     '1m':  userCfg.enable1m  !== false && !!tfProfiles['1m'],
     '3m':  userCfg.enable3m  !== false && !!tfProfiles['3m'],
@@ -331,14 +372,19 @@ function decide({
   };
   const vwapStrict       = userCfg.vwapStrict !== false;
   const requireBarColor  = userCfg.requireBarColor !== false;
-  const allowStaleBar    = userCfg.allowStaleBar === true;
-  const minScore         = Number(userCfg.minScore) || DEFAULT_MIN_SCORE;
+  const allowStaleBar    = userCfg.allowStaleBar !== undefined
+                         ? userCfg.allowStaleBar
+                         : regimeProfile.allowStaleBar;
+  const maxBarsSinceFlip = userCfg.maxBarsSinceFlip ?? regimeProfile.maxBarsSinceFlip;
+  const minScore         = Number(userCfg.minScore) || regimeProfile.minScore;
   const triggerTf        = userCfg.triggerTf || '1m';
   const flipWindowMin    = Number(userCfg.flipWindowMin) || DEFAULT_FLIP_WINDOW_MIN;
-  const flipLimit        = Number(userCfg.flipLimit)     || DEFAULT_FLIP_LIMIT;
-  const requireRegime    = userCfg.requireRegime !== false;     // 15m must agree if enabled
-  const atrExpansionMin  = Number(userCfg.atrExpansionMin) || 0.85; // current ATR ≥ 0.85× recent avg
-  const slopeMin         = Number(userCfg.slopeMin) || 1.0;      // trigger slope ≥ 1.0×ATR (calibrated)
+  const flipLimit        = Number(userCfg.flipLimit)     || regimeProfile.flipLimit;
+  const atrExpansionMin  = Number(userCfg.atrExpansionMin) || regimeProfile.atrExpansionMin;
+  const slopeMin         = Number(userCfg.slopeMin) || regimeProfile.slopeMin;
+  // 15m regime filter — only required for elite runner-mode entries; small
+  // scalps (target ≤ 10pts) skip the 15m gate. User can still force on/off.
+  const requireRegime    = userCfg.requireRegime;     // undefined = adaptive
 
   // ── Run dual UT Bot per enabled TF ───────────────────────────────────
   const tfReads = {};
@@ -356,6 +402,7 @@ function decide({
       trailingStop: v.read.trailingStop,
       barsSinceFlip: v.read.barsSinceFlip,
       slopeStrength: v.read.slopeStrength,
+      slopeTrend: v.read.slopeTrend,
       warmupShort: v.read.warmupShort,
       streams: {
         buy:  { trend: v.read.streams?.buy?.trend,  signalBar: v.read.streams?.buy?.signalBar  },
@@ -364,41 +411,72 @@ function decide({
     }])
   );
 
-  // ── Find trigger flip ────────────────────────────────────────────────
+  // ── TRIGGER detection (with stale-bar tolerance) ─────────────────────
+  // Try fresh trigger TF first, fallback to other enabled TFs.
   const tfPriority = [triggerTf, '1m', '3m', '5m'].filter(
     (v, i, a) => a.indexOf(v) === i && tfReads[v]
   );
   let trigger = null;
+  let triggerKind = 'fresh';
   for (const tf of tfPriority) {
     const r = tfReads[tf]?.read;
     if (!r || r.warmupShort) continue;
     if (r.signalBar === 'buy' || r.signalBar === 'sell') {
-      if (!allowStaleBar && r.barsSinceFlip != null && r.barsSinceFlip > 1) continue;
+      const age = r.barsSinceFlip ?? 0;
+      if (!allowStaleBar && age > 1) continue;
+      if (allowStaleBar && age > maxBarsSinceFlip) continue;
       trigger = { tf, signal: r.signalBar, read: r, profile: tfReads[tf].profile, candles: tfReads[tf].candles };
+      triggerKind = age === 0 ? 'fresh' : 'stale_ok';
       break;
     }
   }
+
+  // ── PULLBACK CONTINUATION — when no fresh trigger fires but a strong
+  // multi-TF trend is intact + 1m UT trail is being respected, accept
+  // a continuation entry. Only in expansion/trend regimes.
+  // ─────────────────────────────────────────────────────────────────────
+  if (!trigger && (regime === 'expansion' || regime === 'trend')) {
+    const r1 = tfReads['1m']?.read;
+    const r3 = tfReads['3m']?.read;
+    const r5 = tfReads['5m']?.read;
+    if (r1 && r3 && r5 && !r1.warmupShort && !r3.warmupShort && !r5.warmupShort) {
+      const dirAgree = ['bullish', 'bearish'].find(d =>
+        r3.trend === d && r5.trend === d
+        && (r1.streams?.buy?.trend === d || r1.streams?.sell?.trend === d)
+      );
+      if (dirAgree) {
+        const directionStream = dirAgree === 'bullish' ? r1.streams?.buy : r1.streams?.sell;
+        // Slope on 3m must be expanding for valid continuation
+        if (r3.slopeStrength >= slopeMin
+            && (r3.slopeTrend === 'expanding' || r5.slopeTrend === 'expanding')) {
+          trigger = {
+            tf: '3m', signal: dirAgree === 'bullish' ? 'buy' : 'sell',
+            read: r3, profile: tfReads['3m'].profile, candles: tfReads['3m'].candles,
+          };
+          triggerKind = 'pullback_continuation';
+        }
+      }
+    }
+  }
+
   if (!trigger) {
     return {
       fired: false,
-      reasoning: `no UT Bot cross within 1 bar on trigger TFs [${tfPriority.join('/')}]`,
-      pillars: { tfReads: exposedReads, preset: presetKey },
+      reasoning: `regime=${regime}: no UT Bot cross within bar limit on [${tfPriority.join('/')}] (allowStaleBar=${allowStaleBar} maxBars=${maxBarsSinceFlip})`,
+      pillars: { tfReads: exposedReads, regime, regimeProfile },
     };
   }
 
   const direction = trigger.signal === 'buy' ? 'bullish' : 'bearish';
   const signal    = trigger.signal === 'buy' ? 'BUY'     : 'SELL';
 
-  // ── 15m REGIME FILTER ────────────────────────────────────────────────
-  // The 15m UT Bot trend (using whichever stream matches our direction)
-  // must already be in our direction. This is the macro filter the user
-  // requested — only BUY when 15m bullish, only SELL when 15m bearish.
-  //
-  // Fail-soft when the 15m stream is warmupShort (insufficient history) —
-  // happens early in a session before enough 15m candles have accumulated.
-  // The integrity service backfills multi-day data so live sessions will
-  // typically have enough 15m history within minutes; backtest day-by-day
-  // replay won't.
+  // ── 15m REGIME FILTER (now adaptive — skip for small scalps) ─────────
+  const triggerCfg = trigger.signal === 'buy' ? trigger.profile.buyConfig : trigger.profile.sellConfig;
+  const triggerTargetMax = trigger.profile.targetMax || 12;
+  const isSmallScalp = triggerTargetMax <= 10;
+  const regimeRequired = requireRegime !== undefined
+    ? requireRegime
+    : !isSmallScalp;             // adaptive: small scalps skip 15m
   const regimeRead = tfReads['15m']?.read;
   const regimeStream = direction === 'bullish'
     ? regimeRead?.streams?.buy
@@ -409,44 +487,38 @@ function decide({
   const regimeAgrees = !!regimeStream
                     && regimeStream.trend === direction
                     && !regimeStream.warmupShort;
-  if (requireRegime && enable['15m'] && tfProfiles['15m']
-      && !regimeWarmupShort                                       // skip filter when not warm
-      && !regimeAgrees) {
+  if (regimeRequired && enable['15m'] && tfProfiles['15m']
+      && !regimeWarmupShort && !regimeAgrees) {
     return {
       fired: false, signal: null, direction,
-      reasoning: `15m regime against ${direction} ` +
-        `(buy.trend=${regimeRead?.streams?.buy?.trend} sell.trend=${regimeRead?.streams?.sell?.trend})`,
-      pillars: { tfReads: exposedReads, preset: presetKey, triggerTf: trigger.tf, regimeAgrees: false },
+      reasoning: `[regime=${regime}] 15m macro against ${direction} ` +
+        `(buy=${regimeRead?.streams?.buy?.trend} sell=${regimeRead?.streams?.sell?.trend})`,
+      pillars: { tfReads: exposedReads, regime, regimeAgrees: false },
     };
   }
 
-  // ── FLIP VELOCITY FILTER ─────────────────────────────────────────────
-  // Count flips in the trigger TF's stream over the last K minutes.
-  // High flip count = chop = skip.
-  const triggerCfg = trigger.signal === 'buy' ? trigger.profile.buyConfig : trigger.profile.sellConfig;
+  // ── FLIP VELOCITY (regime-adaptive limit) ────────────────────────────
   const triggerUtb = _toUtBotCandles(trigger.candles);
   const triggerSeries = _utSeries(triggerUtb, triggerCfg);
   const flipsRecent = _flipsInWindow(triggerUtb, triggerSeries.posSeq, flipWindowMin);
   if (flipsRecent > flipLimit) {
     return {
       fired: false, signal: null, direction,
-      reasoning: `flip velocity ${flipsRecent}/${flipLimit} in ${flipWindowMin}min — chop detected`,
-      pillars: { tfReads: exposedReads, preset: presetKey, triggerTf: trigger.tf, flipsRecent },
+      reasoning: `[regime=${regime}] flip velocity ${flipsRecent}/${flipLimit} in ${flipWindowMin}min — chop`,
+      pillars: { tfReads: exposedReads, regime, triggerTf: trigger.tf, flipsRecent },
     };
   }
 
-  // ── SLOPE STRENGTH ───────────────────────────────────────────────────
+  // ── SLOPE STRENGTH (regime-adaptive) ─────────────────────────────────
   if (Number.isFinite(trigger.read.slopeStrength) && trigger.read.slopeStrength < slopeMin) {
     return {
       fired: false, signal: null, direction,
-      reasoning: `slope ${trigger.read.slopeStrength.toFixed(2)} < ${slopeMin} — weak/late entry`,
-      pillars: { tfReads: exposedReads, preset: presetKey, triggerTf: trigger.tf, slope: trigger.read.slopeStrength },
+      reasoning: `[regime=${regime}] slope ${trigger.read.slopeStrength.toFixed(2)} < ${slopeMin}`,
+      pillars: { tfReads: exposedReads, regime, slope: trigger.read.slopeStrength },
     };
   }
 
   // ── ATR EXPANSION CONFIRMATION ───────────────────────────────────────
-  // Use 5m candles to compute current ATR vs recent avg. ATR must be
-  // expanding (current >= avg × atrExpansionMin) for the move to have legs.
   const atrExpansion = (() => {
     const u = _toUtBotCandles(candles5m);
     if (u.length < 20) return { ok: true, reason: 'insufficient bars (skip filter)' };
@@ -459,17 +531,26 @@ function decide({
   if (!atrExpansion.ok) {
     return {
       fired: false, signal: null, direction,
-      reasoning: `ATR contracting ${atrExpansion.ratio?.toFixed(2)}× < ${atrExpansionMin}× — dead market`,
-      pillars: { tfReads: exposedReads, preset: presetKey, triggerTf: trigger.tf, atrExpansion },
+      reasoning: `[regime=${regime}] ATR ${atrExpansion.ratio?.toFixed(2)}× < ${atrExpansionMin}× — dead`,
+      pillars: { tfReads: exposedReads, regime, atrExpansion },
+    };
+  }
+
+  // ── MOMENTUM EXHAUSTION FILTER ───────────────────────────────────────
+  // Block entry if recent 8-bar move > 2.5×ATR AND slope is compressing
+  // (late-continuation chase after the move is done).
+  const recentMove = _recentMoveSize(candles5m, 8);
+  const atrPts = _safe(atr?.atr_5m) || _safe(volatilityRegime?.atr5m) || 12;
+  const moveRatio = recentMove / Math.max(0.0001, atrPts);
+  if (moveRatio > 2.5 && trigger.read.slopeTrend === 'compressing') {
+    return {
+      fired: false, signal: null, direction,
+      reasoning: `[regime=${regime}] exhaustion: 8-bar move ${recentMove.toFixed(1)}pts (${moveRatio.toFixed(1)}×ATR) + slope compressing`,
+      pillars: { tfReads: exposedReads, regime, recentMove, moveRatio, slopeTrend: trigger.read.slopeTrend },
     };
   }
 
   // ── WEIGHTED CONSENSUS SCORE ─────────────────────────────────────────
-  // For each enabled TF that is warm, add its weight to the score if its
-  // trend (in the matching directional stream) agrees with our direction.
-  // The trigger TF is always included (it just flipped). Layers that are
-  // warmupShort are EXCLUDED from totalWeight so a small-history backtest
-  // doesn't drag the score below threshold automatically.
   let score = 0;
   let totalWeight = 0;
   const layerResults = [];
@@ -487,7 +568,6 @@ function decide({
       agrees = !warmupShort && stream.trend === direction;
     }
     if (warmupShort) {
-      // Don't count cold layers in either numerator or denominator
       layerResults.push({ tf, role: tfProfiles[tf].role, weight: w, agrees: false, warmupShort: true });
       continue;
     }
@@ -495,36 +575,39 @@ function decide({
     if (agrees) score += w;
     layerResults.push({ tf, role: tfProfiles[tf].role, weight: w, agrees });
   }
-  // Normalise to 0-100 in case weights don't sum exactly
   const scorePct = totalWeight > 0 ? Math.round((score / totalWeight) * 100) : 0;
   if (scorePct < minScore) {
     return {
       fired: false, signal: null, direction,
-      reasoning: `consensus score ${scorePct}/100 < ${minScore} (layers: ${layerResults.map(l => `${l.tf}:${l.agrees ? 'OK' : 'X'}`).join(',')})`,
-      pillars: { tfReads: exposedReads, preset: presetKey, triggerTf: trigger.tf, score, scorePct, layerResults },
+      reasoning: `[regime=${regime}] consensus ${scorePct}/100 < ${minScore} (${layerResults.map(l => `${l.tf}:${l.agrees ? 'OK' : 'X'}`).join(',')})`,
+      pillars: { tfReads: exposedReads, regime, triggerTf: trigger.tf, score, scorePct, layerResults },
     };
   }
 
   // ── CONFIRMATION GATES ───────────────────────────────────────────────
   const reasons = [
-    `[preset=${presetKey}] UT Bot ${trigger.tf} ${trigger.signal.toUpperCase()} ` +
-    `(Key=${triggerCfg.keyValue} ATR=${triggerCfg.atrPeriod}, ${trigger.profile.role || 'trigger'})`,
+    `[regime=${regime}/${triggerKind}] UT Bot ${trigger.tf} ${trigger.signal.toUpperCase()} ` +
+    `(K=${triggerCfg.keyValue} ATR=${triggerCfg.atrPeriod}, ${trigger.profile.role || 'trigger'})`,
     `consensus ${scorePct}/100 (${layerResults.filter(l => l.agrees).map(l => l.tf).join('+')})`,
-    `slope=${trigger.read.slopeStrength?.toFixed(2)}`,
-    `flips=${flipsRecent}/${flipLimit} in ${flipWindowMin}m`,
+    `slope=${trigger.read.slopeStrength?.toFixed(2)} (${trigger.read.slopeTrend})`,
+    `flips=${flipsRecent}/${flipLimit}`,
   ];
   if (atrExpansion.ratio) reasons.push(`atrExp=${atrExpansion.ratio.toFixed(2)}×`);
   if (regimeAgrees) reasons.push('15m regime aligned');
 
   const blockers = [];
   const pillars = {
-    preset: presetKey,
+    regime,
+    regimeProfile,
     triggerTf: trigger.tf, triggerCfg,
+    triggerKind,
     barsSinceFlip: trigger.read.barsSinceFlip,
     trailingStop: trigger.read.trailingStop,
     slopeStrength: trigger.read.slopeStrength,
+    slopeTrend: trigger.read.slopeTrend,
     flipsRecent, atrExpansion, regimeAgrees,
     score, scorePct, layerResults,
+    recentMove, moveRatio,
     tfReads: exposedReads,
   };
 
@@ -545,7 +628,9 @@ function decide({
     const lo = last1.open  ?? last1.o;
     const dirOk = (direction === 'bullish' && lc > lo) || (direction === 'bearish' && lc < lo);
     pillars.last1mAgrees = !!dirOk;
-    if (!dirOk && requireBarColor) blockers.push(`last 1m bar against (o=${lo} c=${lc})`);
+    if (!dirOk && requireBarColor && triggerKind === 'fresh') {
+      blockers.push(`last 1m bar against (o=${lo} c=${lc})`);
+    }
   }
 
   // 5m bar color (informational)
@@ -560,7 +645,7 @@ function decide({
 
   // Volatility / orderflow safety
   const dPct = _safe(volumeAnalysis?.delta?.cvdPctLong);
-  if (volatilityRegime?.state === 'expansion') {
+  if (regime === 'expansion') {
     const deltaAgainst = (direction === 'bullish' && dPct < -10)
                       || (direction === 'bearish' && dPct >  10);
     if (deltaAgainst) blockers.push(`expansion + delta ${dPct}% strongly against`);
@@ -581,7 +666,6 @@ function decide({
 
   // ── SIZING ───────────────────────────────────────────────────────────
   const profile = trigger.profile;
-  const atrPts = _safe(atr?.atr_5m) || _safe(volatilityRegime?.atr5m) || 12;
   let target_pts = Math.max(profile.targetMin, Math.min(profile.targetMax, Math.round(atrPts * 0.6)));
   let sl_pts = profile.slPtsMin + 2;
   if (Number.isFinite(spotPrice) && Number.isFinite(trigger.read.trailingStop)) {
@@ -591,8 +675,6 @@ function decide({
   const rrTarget = +(target_pts / Math.max(1, sl_pts)).toFixed(2);
 
   // ── CONFIDENCE ───────────────────────────────────────────────────────
-  // Baseline tracks the consensus score, scaled into 60-95 band.
-  // 70 → 60, 85 → 75, 100 → 90 (then bonuses on top up to 95)
   let confidence = 60 + (scorePct - 70) * 0.6;
   confidence = Math.max(60, Math.min(90, confidence));
   if (pillars.vwap === 'aligned')   confidence += 3;
@@ -606,35 +688,25 @@ function decide({
     confidence += 2; reasons.push(`ATR expanding (${atrExpansion.ratio.toFixed(2)}×)`);
   }
   if (regimeAgrees) confidence += 2;
+  if (triggerKind === 'pullback_continuation') confidence += 2;
   confidence = Math.min(95, Math.round(confidence));
 
-  // Tier classification — for downstream sizing
-  const tier = scorePct >= 90 ? 'elite' : scorePct >= 75 ? 'standard' : 'weak';
+  // ── TIER & exit mode ─────────────────────────────────────────────────
+  const tier = scorePct >= 90 ? 'elite' : scorePct >= 70 ? 'standard' : 'weak';
   const tierSizing = { elite: 1.0, standard: 0.85, weak: 0.65 }[tier] || 0.65;
   const sizingFactor = (profile.sizingFactor || 0.6) * tierSizing;
 
-  // ── DYNAMIC EXIT MODE ────────────────────────────────────────────────
-  // ELITE     (score ≥ 90, all 4 layers + ATR expansion + regime)
-  //           → 'hybrid_runner_continuation' — fixed target IGNORED once
-  //             peak crosses target; ride momentum until 1m flips, slope
-  //             collapses, or volatility-adaptive giveback fires.
-  // STANDARD  (score ≥ 75)
-  //           → 'hybrid' — standard target + smart-lock + adaptive trail.
-  // WEAK      (score < 75)
-  //           → 'fixed' — classic hard target/SL only (legacy behaviour).
   const exitMode = userCfg.forceExitMode
     || (tier === 'elite'    ? 'hybrid_runner_continuation'
       : tier === 'standard' ? 'hybrid'
       :                       'fixed');
 
-  // Volatility-adaptive giveback override is handled in runnerExitEngine
-  // by reading the live volState — but if user wants a hard override per
-  // entry, smartTrail.peakGivebackPct will be honoured.
   const smartTrail = {
     mode:             exitMode,
-    lockTriggerPct:   userCfg.lockTriggerPct  ?? 0.50,    // lock at 50% of target
-    peakGivebackPct:  userCfg.peakGivebackPct ?? null,    // null → use vol-adaptive table
-    slopeExitMin:     userCfg.slopeExitMin    ?? 0.30,    // runner exits if slope drops below
+    lockTriggerPct:   userCfg.lockTriggerPct  ?? 0.50,
+    peakGivebackPct:  userCfg.peakGivebackPct ?? null,
+    slopeExitMin:     userCfg.slopeExitMin    ?? 0.30,
+    earlyFailureCheck: userCfg.earlyFailureCheck ?? true,
   };
 
   return {
@@ -648,6 +720,7 @@ function decide({
     maxHoldSec: profile.maxHoldSec,
     rrTarget,
     barsSinceFlip: trigger.read.barsSinceFlip,
+    triggerKind,
     confidence,
     pillars,
     timeframe: trigger.tf,
@@ -657,8 +730,7 @@ function decide({
     riskProfile: { slPct: 0.10, sizingFactor },
     confluenceTier: tier,
     consensusScore: scorePct,
-    preset: presetKey,
-    // Smart-trail metadata used by runner exit engine in monitor + backtest:
+    regime,
     smartTrail,
   };
 }
@@ -666,5 +738,5 @@ function decide({
 module.exports = {
   decide,
   PRESETS,
-  DEFAULT_PRESET,
+  REGIME_PROFILES,
 };

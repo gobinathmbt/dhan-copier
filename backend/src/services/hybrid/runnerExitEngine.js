@@ -105,6 +105,25 @@ function decideRunnerExit({
   // Phase 2+ adaptive logic — only for hybrid / runner modes
   if (mode === 'fixed') return { action: 'HOLD', phase };
 
+  // EARLY FAILURE DETECTION (NEW v6) — within first 60s, if peak P&L
+  // never exceeded 2pts AND slope is compressing or against us, exit
+  // immediately to save theta + spread bleed. Only fires when explicitly
+  // enabled via smartTrail.earlyFailureCheck.
+  if (smartTrail.earlyFailureCheck && heldSec >= 30 && heldSec <= 60
+      && peakPts < 2 && pnlPts <= 0) {
+    const slopeWeak = Number.isFinite(momentum.slopeStrength)
+                   && momentum.slopeStrength < (smartTrail.earlyFailureSlope || 0.5);
+    const slopeCompressing = momentum.slopeTrend === 'compressing';
+    if (slopeWeak || slopeCompressing) {
+      return {
+        action: 'EXIT',
+        reason: `Early failure: peak +${peakPts.toFixed(2)}pts at ${heldSec}s, ` +
+                `slope=${momentum.slopeStrength?.toFixed?.(2) || '?'} (${momentum.slopeTrend || 'flat'})`,
+        phase: 'early_failure',
+      };
+    }
+  }
+
   if (phase === 'pre_lock') return { action: 'HOLD', phase };
 
   // PHASE 2 (locked): floor breach

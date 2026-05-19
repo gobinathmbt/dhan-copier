@@ -114,13 +114,23 @@ const SETTINGS = {
   windowStartHhmm: Number(userOpts.windowStart) || 920,
   windowEndHhmm:   Number(userOpts.windowEnd)   || 1500,
   ultraScalp: {
-    preset: userOpts.preset || 'high_accuracy',
-    minScore: Number(userOpts.minScore) || 80,
-    requireRegime: userOpts.requireRegime !== 'false',
-    flipWindowMin: Number(userOpts.flipWindowMin) || 10,
-    flipLimit: Number(userOpts.flipLimit) || 2,
-    atrExpansionMin: Number(userOpts.atrExpansionMin) || 0.85,
-    slopeMin: Number(userOpts.slopeMin) || 1.0,
+    // NOTE: with v6 regime adaptation, the engine derives minScore /
+    // flipLimit / slope / barsSinceFlip / atrExpansion from the live
+    // volatility regime each cycle. CLI flags can still override.
+    forceRegime:      userOpts.regime          || undefined,    // 'expansion'|'trend'|'normal'|'chop'|'dead'
+    minScore:         userOpts.minScore        ? Number(userOpts.minScore) : undefined,
+    flipLimit:        userOpts.flipLimit       ? Number(userOpts.flipLimit) : undefined,
+    flipWindowMin:    userOpts.flipWindowMin   ? Number(userOpts.flipWindowMin) : undefined,
+    slopeMin:         userOpts.slopeMin        ? Number(userOpts.slopeMin) : undefined,
+    atrExpansionMin:  userOpts.atrExpansionMin ? Number(userOpts.atrExpansionMin) : undefined,
+    requireRegime:    userOpts.requireRegime !== undefined
+      ? (userOpts.requireRegime !== 'false' && userOpts.requireRegime !== false)
+      : undefined,
+    allowStaleBar:    userOpts.allowStaleBar   ? userOpts.allowStaleBar !== 'false' : undefined,
+    maxBarsSinceFlip: userOpts.maxBarsSinceFlip ? Number(userOpts.maxBarsSinceFlip) : undefined,
+    earlyFailureCheck: userOpts.earlyFailureCheck !== undefined
+      ? (userOpts.earlyFailureCheck !== 'false')
+      : undefined,
   },
 };
 
@@ -233,6 +243,17 @@ function buildContext(day, cycleEpoch) {
   const cvdPctLong = (upVol + downVol) > 0 ? ((upVol - downVol) / (upVol + downVol)) * 100 : 0;
   const volumeAnalysis = { delta: { cvdPctLong, bias: cvdPctLong > 5 ? 'bullish' : cvdPctLong < -5 ? 'bearish' : 'neutral' } };
 
+  // Crude market regime (chop/trend) — directional ratio over last 12 bars
+  const tailUps   = tail.filter((c, i, a) => i > 0 && c.c > a[i-1].c).length;
+  const tailDowns = tail.filter((c, i, a) => i > 0 && c.c < a[i-1].c).length;
+  const directional = Math.abs(tailUps - tailDowns) / Math.max(1, tail.length - 1);
+  const marketRegime = {
+    regime: directional >= 0.4
+      ? (tailUps > tailDowns ? 'trending_bullish' : 'trending_bearish')
+      : 'choppy',
+    bias: tailUps > tailDowns ? 'bullish' : tailDowns > tailUps ? 'bearish' : 'neutral',
+  };
+
   return {
     candles1m: c1m,
     candles3m: _build3mFromOneMin(c1m),
@@ -242,6 +263,7 @@ function buildContext(day, cycleEpoch) {
     vwap: { vwap, position: vwapPos },
     volumeAnalysis,
     volatilityRegime,
+    marketRegime,
     optionChain: oc,
   };
 }
@@ -325,7 +347,11 @@ function simulateTrade(day, decision, entryEpoch) {
       const er = runnerExit.decideRunnerExit({
         entry: entryLtp, current: ltp, peak: peakLtp,
         targetPts, slPts, smartTrail, volState,
-        momentum: {}, heldSec: t - entryEpoch, maxHoldSec,
+        momentum: {
+          slopeStrength: decision.slopeStrength,
+          slopeTrend: decision.slopeTrend,
+        },
+        heldSec: t - entryEpoch, maxHoldSec,
       });
       if (er.action === 'EXIT') {
         const code = er.reason.startsWith('SL hit')        ? 'SL'
@@ -333,6 +359,7 @@ function simulateTrade(day, decision, entryEpoch) {
                    : er.reason.startsWith('Smart-lock')    ? 'SMART_LOCK'
                    : er.reason.startsWith('Adaptive')      ? 'SMART_TRAIL'
                    : er.reason.startsWith('Runner end')    ? 'RUNNER_END'
+                   : er.reason.startsWith('Early failure') ? 'EARLY_FAIL'
                    :                                          'EXIT';
         return _close(code, entryLtp, ltp, t - entryEpoch, decision, peakLtp);
       }
@@ -432,6 +459,7 @@ async function backtestDay(dayLabel) {
       vwap: ctx.vwap,
       volumeAnalysis: ctx.volumeAnalysis,
       volatilityRegime: ctx.volatilityRegime,
+      marketRegime: ctx.marketRegime,
       spotPrice: ctx.spotPrice,
       atr: { atr_5m: ctx.volatilityRegime.atr5m },
       settings: { ultraScalp: SETTINGS.ultraScalp },
@@ -485,6 +513,10 @@ async function backtestDay(dayLabel) {
       timeframe: ultra.timeframe,
       smartTrail: ultra.smartTrail,
       volState: ctx.volatilityRegime.state,
+      regime: ultra.regime,
+      // Slope context for runner exit's early-failure / runner-end branches
+      slopeStrength: ultra.pillars?.slopeStrength,
+      slopeTrend: ultra.pillars?.slopeTrend,
       reasoning: ultra.reasoning,
     };
 
@@ -538,8 +570,8 @@ async function backtestDay(dayLabel) {
     process.exit(1);
   }
 
-  console.log(`\nULTRA SCALP backtest — ${days.length} day(s)`);
-  console.log(`Settings: preset=${SETTINGS.ultraScalp.preset}  minScore=${SETTINGS.ultraScalp.minScore}  flips=${SETTINGS.ultraScalp.flipLimit}/${SETTINGS.ultraScalp.flipWindowMin}m  slope≥${SETTINGS.ultraScalp.slopeMin}  atrExp≥${SETTINGS.ultraScalp.atrExpansionMin}`);
+  console.log(`\nULTRA SCALP backtest (v6 regime-adaptive) — ${days.length} day(s)`);
+  console.log(`Settings: forceRegime=${SETTINGS.ultraScalp.forceRegime || 'auto'}  minScore=${SETTINGS.ultraScalp.minScore || 'regime'}  flipLimit=${SETTINGS.ultraScalp.flipLimit || 'regime'}  slopeMin=${SETTINGS.ultraScalp.slopeMin || 'regime'}  earlyFail=${SETTINGS.ultraScalp.earlyFailureCheck === false ? 'off' : 'on'}`);
   console.log(`Window: ${SETTINGS.windowStartHhmm}-${SETTINGS.windowEndHhmm} IST  cooldown=${SETTINGS.cooldownSec}s  maxTrades/day=${SETTINGS.maxTradesPerDay}\n`);
 
   const results = [];

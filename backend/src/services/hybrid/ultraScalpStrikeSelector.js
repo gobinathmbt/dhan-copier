@@ -36,9 +36,9 @@ const STRIKE_STEP = 50;
 const TIER_PROFILES = {
   elite: {
     deltaMin: 0.42, deltaMax: 0.58,
-    deltaHardMax: 0.65,                   // never deeper ITM than this
+    deltaHardMax: 0.65,
     minPremium: 25,
-    maxPremium: 200,                      // cap absolute rupee risk per lot
+    maxPremium: 400,                      // widened — runner mode benefits from rich premium
     moneynessBonus: { OTM: 16, ATM: 10, ITM: 0 },
     distMaxFromAtm: 100,
   },
@@ -46,7 +46,7 @@ const TIER_PROFILES = {
     deltaMin: 0.40, deltaMax: 0.55,
     deltaHardMax: 0.62,
     minPremium: 25,
-    maxPremium: 180,
+    maxPremium: 250,
     moneynessBonus: { OTM: 8, ATM: 14, ITM: 0 },
     distMaxFromAtm: 100,
   },
