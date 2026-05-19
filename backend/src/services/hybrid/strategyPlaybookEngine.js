@@ -3946,6 +3946,324 @@ function _overnightOiShiftFollow(ctx) {
   };
 }
 
+// ─── PLAYBOOK 38: MICRO_POC_MAGNET ─────────────────────────────────────────
+// Institutional rotational scalp. POC (point of control) acts as a magnet.
+// When price is stretched far from POC inside a balanced auction, the most
+// likely next move is a rotation BACK to POC.
+//
+// CALIBRATION 2026-05-19 cycle 51 (NEW): per institutional review — adds
+// dedicated micro-rotation logic for quiet days. Dead vol + balanced
+// auction + spot 8-25pt from POC = high-availability scalp setup. Targets
+// 5-8 premium points with 60-120s holds.
+//
+// Detection:
+//   1. Spot is 8-25pts from POC (stretched but recoverable)
+//   2. Direction is TOWARD POC (bullish if spot < POC, bearish if spot > POC)
+//   3. Balanced/gamma_pin/slow_grind regime (mean-reversion environment)
+//   4. NOT in expansion volatility
+//   5. NOT in midday_chop deep doldrums (still need some flow)
+//   6. Trap score < 50
+//   7. Recent 1m bars showing rejection at the extreme (last 2 close back
+//      toward POC)
+function _microPocMagnet(ctx) {
+  const reasons = [];
+  let score = 0;
+  const required = [];
+  const confirmations = [];
+
+  const poc = _safe(ctx.volumeAnalysis?.frvp?.pocPrice);
+  const spot = Number(ctx.spotPrice);
+  if (!poc) required.push('no POC');
+  if (!Number.isFinite(spot)) required.push('no spot');
+
+  const c1 = ctx.candles1m || [];
+  if (c1.length < 4) required.push('insufficient 1m candles');
+
+  // Direction toward POC check
+  if (poc && Number.isFinite(spot)) {
+    if (ctx.direction === 'bullish' && spot >= poc) {
+      required.push(`bullish needs spot<POC (${spot.toFixed(0)} >= ${poc.toFixed(0)})`);
+    }
+    if (ctx.direction === 'bearish' && spot <= poc) {
+      required.push(`bearish needs spot>POC (${spot.toFixed(0)} <= ${poc.toFixed(0)})`);
+    }
+    const dist = Math.abs(spot - poc);
+    if (dist < 8) required.push(`too close to POC (${dist.toFixed(1)}pt)`);
+    if (dist > 25) required.push(`too far from POC (${dist.toFixed(1)}pt)`);
+  }
+
+  // Regime gate — only fire in balanced / pin / grind environments
+  const meta = ctx.metaRegime?.state;
+  if (!['gamma_pin', 'balanced_auction', 'slow_grind'].includes(meta || '')) {
+    required.push(`meta=${meta} not balanced/pin/grind`);
+  }
+
+  // Block in expansion vol and during chop
+  if (ctx.volatilityRegime?.state === 'expansion') {
+    required.push('expansion vol — POC magnet fails on trend days');
+  }
+
+  // Block on traps and very late expiry
+  if ((ctx.trap?.trapScore || 0) >= 50) required.push(`trap ${ctx.trap.trapScore}`);
+  if (ctx.sessionPhase?.isExpiryDay && ctx.sessionPhase?.hhmm >= 1430) {
+    required.push('expiry afternoon');
+  }
+
+  // Recent rejection at the extreme — last 2 1m bars closing back toward POC
+  if (poc && c1.length >= 2) {
+    const last2 = c1.slice(-2);
+    const movingTowardPoc = last2.every(b => {
+      if (ctx.direction === 'bullish') return b.c > b.o;
+      return b.c < b.o;
+    });
+    if (!movingTowardPoc) required.push('last 2 1m bars not closing toward POC');
+  }
+
+  const valid = required.length === 0;
+  if (!valid) {
+    return { name: 'MICRO_POC_MAGNET', family: 'mean_reversion',
+             valid: false, score: 0, conviction: 'weak', missing: required,
+             reasoning: `missing: ${required.join(', ')}` };
+  }
+  const distToPoc = Math.abs(spot - poc);
+  score += 30;
+  reasons.push(`${distToPoc.toFixed(1)}pt from POC, rotating ${ctx.direction}`);
+
+  // ── Confirmations ──
+  // 1. Inside value area
+  if (ctx.volumeAnalysis?.acceptance === 'inside_va') {
+    score += 8; confirmations.push('inside VA');
+  }
+  // 2. Positive gamma (pin keeps us)
+  if (ctx.gammaRegime?.regime === 'positive') {
+    score += 8; confirmations.push('gamma positive');
+  }
+  // 3. Volume drying / not climactic (mean reversion env)
+  const tv = ctx.volumeAnalysis?.timeVolume?.state;
+  if (tv === 'dry_up' || tv === 'normal') {
+    score += 5; confirmations.push(`vol ${tv}`);
+  }
+  // 4. Liquidity good
+  if (ctx.liquidity?.health === 'good' || ctx.liquidity?.health === 'excellent') {
+    score += 5; confirmations.push(`liq ${ctx.liquidity.health}`);
+  }
+  // 5. VSA absorption supporting fade
+  const vsa = ctx.volumeAnalysis?.vsa;
+  if (vsa?.bias === ctx.direction && _safe(vsa.strength) >= 30) {
+    score += 8; confirmations.push(`VSA ${vsa.pattern}`);
+  }
+  // 6. OI not against
+  const oiR = ctx.oiAnalytics?.regime || '';
+  const oiAgainst = (ctx.direction === 'bullish'
+                    && (oiR === 'aggressive_short_buildup' || oiR === 'long_unwinding_collapse'))
+                || (ctx.direction === 'bearish'
+                    && (oiR === 'aggressive_long_buildup' || oiR === 'violent_short_covering'));
+  if (!oiAgainst) {
+    score += 6; confirmations.push(`OI ${oiR || 'neutral'} not against`);
+  }
+  // 7. ADX low (consistent with rotation, not trend)
+  const adx = _safe(ctx.adx?.value);
+  if (adx > 0 && adx < 20) {
+    score += 5; confirmations.push(`ADX ${adx} low`);
+  }
+  // 8. Microstructure absorption
+  const m = ctx.microstructure;
+  if (m?.available
+      && ((ctx.direction === 'bullish' && m.state === 'absorption_long')
+       || (ctx.direction === 'bearish' && m.state === 'absorption_short'))) {
+    score += 8; confirmations.push(`micro ${m.state}`);
+  }
+  // 9. Delta NOT aggressively against (extreme delta = real trend, no rotation)
+  const deltaPct = _safe(ctx.volumeAnalysis?.delta?.cvdPctLong);
+  const deltaAgainst = (ctx.direction === 'bullish' && deltaPct < -15)
+                    || (ctx.direction === 'bearish' && deltaPct > 15);
+  if (!deltaAgainst) {
+    score += 4; confirmations.push(`delta ${deltaPct}% not extreme against`);
+  }
+
+  // 3+ confirmations for elite (rotational scalp doesn't need many)
+  const conviction = confirmations.length >= 4 ? 'elite' :
+                     confirmations.length >= 3 ? 'standard' : 'weak';
+
+  return {
+    name: 'MICRO_POC_MAGNET',
+    family: 'mean_reversion',
+    valid: conviction !== 'weak' && score >= 45,
+    score: _clamp(score),
+    conviction,
+    // Fast scalp — 120s hold, 1.2 RR. Smaller size since rotation is
+    // statistically lower-edge than initiative trades.
+    holdProfile: { tradeType: 'SCALP', maxHoldSec: 120, rrTarget: 1.2 },
+    riskProfile: { slPct: 0.07, sizingFactor: conviction === 'elite' ? 0.6 : 0.45 },
+    minScoreOverride: 60,
+    allowedDirections: ['bullish', 'bearish'],
+    preconditions: ['stretched_from_poc', 'balanced_meta', 'not_expansion', 'rejecting_at_extreme'],
+    confirmations,
+    reasoning: `${conviction.toUpperCase()} | dist=${distToPoc.toFixed(1)}pt | ${confirmations.join(' | ')}`,
+  };
+}
+
+// ─── PLAYBOOK 39: VAH_VAL_FADE_SCALP ───────────────────────────────────────
+// Institutional rotational scalp at value-area extremes. When price tags
+// VAH (Value Area High) or VAL (Value Area Low) on a balanced auction day,
+// fade back into value area. Classic auction-theory rotation.
+//
+// CALIBRATION 2026-05-19 cycle 51 (NEW): complements MICRO_POC_MAGNET.
+// POC magnet trades when price is mid-range; VAH/VAL fade trades the
+// extremes. Together they cover the full rotation envelope.
+//
+// Detection:
+//   1. Price tags VAH (for bearish fade) or VAL (for bullish fade) within 8pts
+//   2. Balanced/gamma_pin regime
+//   3. NOT trending strongly through the level (last 2 bars showing rejection)
+//   4. Volume drying or normal (not climactic — climax = real break)
+//   5. NOT in expansion vol
+//   6. Trap score < 50
+function _vahValFadeScalp(ctx) {
+  const reasons = [];
+  let score = 0;
+  const required = [];
+  const confirmations = [];
+
+  const va = ctx.volumeAnalysis?.frvp;
+  const vah = _safe(va?.vaHigh);
+  const val = _safe(va?.vaLow);
+  const spot = Number(ctx.spotPrice);
+  if (!vah || !val) required.push('no VAH/VAL');
+  if (!Number.isFinite(spot)) required.push('no spot');
+
+  const c1 = ctx.candles1m || [];
+  if (c1.length < 3) required.push('insufficient 1m candles');
+
+  // Direction-aware tag check
+  let levelTagged = null;
+  let levelDist = Infinity;
+  if (vah && val && Number.isFinite(spot)) {
+    if (ctx.direction === 'bearish') {
+      // Fade bearish at VAH
+      const distVah = vah - spot; // negative if above VAH (already broken)
+      if (Math.abs(spot - vah) <= 8) { levelTagged = 'VAH'; levelDist = vah - spot; }
+      else required.push(`bearish needs spot near VAH (${(vah - spot).toFixed(1)}pt)`);
+    } else {
+      // Fade bullish at VAL
+      if (Math.abs(spot - val) <= 8) { levelTagged = 'VAL'; levelDist = spot - val; }
+      else required.push(`bullish needs spot near VAL (${(spot - val).toFixed(1)}pt)`);
+    }
+  }
+
+  // Regime gate — balanced auction / pin
+  const meta = ctx.metaRegime?.state;
+  if (!['gamma_pin', 'balanced_auction', 'slow_grind'].includes(meta || '')) {
+    required.push(`meta=${meta} not balanced/pin/grind`);
+  }
+
+  // Block expansion + traps + late expiry
+  if (ctx.volatilityRegime?.state === 'expansion') {
+    required.push('expansion vol — fade fails on trend days');
+  }
+  if ((ctx.trap?.trapScore || 0) >= 50) required.push(`trap ${ctx.trap.trapScore}`);
+  if (ctx.sessionPhase?.isExpiryDay && ctx.sessionPhase?.hhmm >= 1430) {
+    required.push('expiry afternoon');
+  }
+
+  // Block on climactic volume (= real break, not fade)
+  const tvState = ctx.volumeAnalysis?.timeVolume?.state;
+  if (tvState === 'climax' || tvState === 'spike') {
+    required.push(`volume ${tvState} — real break`);
+  }
+
+  // Last 1m bar showing rejection (closes in fade direction)
+  const lastC1 = c1[c1.length - 1];
+  if (lastC1) {
+    if (ctx.direction === 'bullish' && lastC1.c <= lastC1.o) {
+      required.push('last 1m close not bullish at VAL');
+    }
+    if (ctx.direction === 'bearish' && lastC1.c >= lastC1.o) {
+      required.push('last 1m close not bearish at VAH');
+    }
+  }
+
+  const valid = required.length === 0;
+  if (!valid) {
+    return { name: 'VAH_VAL_FADE_SCALP', family: 'mean_reversion',
+             valid: false, score: 0, conviction: 'weak', missing: required,
+             reasoning: `missing: ${required.join(', ')}` };
+  }
+  score += 30;
+  reasons.push(`${levelTagged} fade, dist=${levelDist.toFixed(1)}pt`);
+
+  // ── Confirmations ──
+  // 1. Positive gamma
+  if (ctx.gammaRegime?.regime === 'positive') {
+    score += 10; confirmations.push('gamma positive');
+  }
+  // 2. VSA reject signal at the extreme
+  const vsa = ctx.volumeAnalysis?.vsa;
+  if ((ctx.direction === 'bullish' && (vsa?.pattern === 'spring' || vsa?.pattern === 'absorption'))
+   || (ctx.direction === 'bearish' && (vsa?.pattern === 'upthrust' || vsa?.pattern === 'absorption'))) {
+    score += 12; confirmations.push(`VSA ${vsa.pattern}`);
+  }
+  // 3. Failed breakout history (this side has failed before today)
+  const failed = (ctx.sessionMemory?.failedBreakouts || 0) + (ctx.sessionMemory?.failedBreakdowns || 0);
+  if (failed >= 1) {
+    score += 6; confirmations.push(`${failed} failed break(s)`);
+  }
+  // 4. Wick rejection on last 5m candle
+  const c5 = ctx.candles5m || [];
+  const last5 = c5[c5.length - 1];
+  if (last5) {
+    const upperWick = last5.h - Math.max(last5.o, last5.c);
+    const lowerWick = Math.min(last5.o, last5.c) - last5.l;
+    const rng = (last5.h - last5.l) || 1;
+    if (ctx.direction === 'bearish' && upperWick / rng > 0.4) {
+      score += 8; confirmations.push(`upper wick reject ${(upperWick/rng*100).toFixed(0)}%`);
+    }
+    if (ctx.direction === 'bullish' && lowerWick / rng > 0.4) {
+      score += 8; confirmations.push(`lower wick reject ${(lowerWick/rng*100).toFixed(0)}%`);
+    }
+  }
+  // 5. Delta divergence (price hit extreme but delta didn't follow through)
+  const div = ctx.volumeAnalysis?.delta?.divergence;
+  const divBias = ctx.volumeAnalysis?.delta?.divergenceBias;
+  if (div && div !== 'none' && divBias === ctx.direction) {
+    score += 8; confirmations.push(`delta div ${div}`);
+  }
+  // 6. Liquidity good
+  if (ctx.liquidity?.health === 'good' || ctx.liquidity?.health === 'excellent') {
+    score += 4; confirmations.push(`liq ${ctx.liquidity.health}`);
+  }
+  // 7. Microstructure absorption
+  const m = ctx.microstructure;
+  if (m?.available
+      && ((ctx.direction === 'bullish' && (m.state === 'absorption_long' || m.state === 'iceberg_support'))
+       || (ctx.direction === 'bearish' && (m.state === 'absorption_short' || m.state === 'iceberg_resistance')))) {
+    score += 10; confirmations.push(`micro ${m.state}`);
+  }
+  // 8. ADX low
+  const adx = _safe(ctx.adx?.value);
+  if (adx > 0 && adx < 20) {
+    score += 4; confirmations.push(`ADX ${adx} low`);
+  }
+
+  const conviction = confirmations.length >= 4 ? 'elite' :
+                     confirmations.length >= 3 ? 'standard' : 'weak';
+
+  return {
+    name: 'VAH_VAL_FADE_SCALP',
+    family: 'mean_reversion',
+    valid: conviction !== 'weak' && score >= 45,
+    score: _clamp(score),
+    conviction,
+    holdProfile: { tradeType: 'SCALP', maxHoldSec: 180, rrTarget: 1.3 },
+    riskProfile: { slPct: 0.08, sizingFactor: conviction === 'elite' ? 0.65 : 0.45 },
+    minScoreOverride: 60,
+    allowedDirections: ['bullish', 'bearish'],
+    preconditions: ['va_extreme_tag', 'balanced_meta', 'no_climax_vol', 'rejection_bar'],
+    confirmations,
+    reasoning: `${conviction.toUpperCase()} | ${levelTagged} ${levelDist.toFixed(1)}pt | ${confirmations.join(' | ')}`,
+  };
+}
+
 // ─── REGIME → PLAYBOOK ELIGIBILITY MAP (institutional spec) ────────────────
 // This is the orchestrator's "permission map". Even if a playbook scores
 // high, it must match the current meta-regime to be eligible.
@@ -3964,9 +4282,9 @@ const REGIME_PLAYBOOKS = {
   trend_auction:    ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'OPENING_DRIVE_CONTINUATION', 'OPENING_DRIVE_FAILURE', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP', 'DELTA_VELOCITY_BREAKOUT', 'PDH_PDL_SWEEP_REVERSAL', 'DOUBLE_DISTRIBUTION_TREND', 'OVERNIGHT_OI_SHIFT_FOLLOW'],
   short_covering:   ['SHORT_COVERING_SQUEEZE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'SWEEP_RECLAIM_SCALP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP', 'DELTA_VELOCITY_BREAKOUT', 'OVERNIGHT_OI_SHIFT_FOLLOW'],
   long_liquidation: ['LONG_LIQUIDATION_CASCADE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'SWEEP_RECLAIM_SCALP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP', 'DELTA_VELOCITY_BREAKOUT', 'OVERNIGHT_OI_SHIFT_FOLLOW'],
-  gamma_pin:        ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'FAILED_AUCTION_REVERSAL', 'EXHAUSTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'SWEEP_RECLAIM_SCALP', 'PDH_PDL_SWEEP_REVERSAL', 'ABSORPTION_REVERSAL'],
-  balanced_auction: ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'SWEEP_RECLAIM_SCALP', 'OPENING_DRIVE_FAILURE', 'PDH_PDL_SWEEP_REVERSAL', 'ABSORPTION_REVERSAL'],
-  slow_grind:       ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'PULLBACK_CONTINUATION', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'LIGHT_TREND_DRIFT_SCALP', 'ABSORPTION_REVERSAL'],
+  gamma_pin:        ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'FAILED_AUCTION_REVERSAL', 'EXHAUSTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'SWEEP_RECLAIM_SCALP', 'PDH_PDL_SWEEP_REVERSAL', 'ABSORPTION_REVERSAL', 'MICRO_POC_MAGNET', 'VAH_VAL_FADE_SCALP'],
+  balanced_auction: ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'SWEEP_RECLAIM_SCALP', 'OPENING_DRIVE_FAILURE', 'PDH_PDL_SWEEP_REVERSAL', 'ABSORPTION_REVERSAL', 'MICRO_POC_MAGNET', 'VAH_VAL_FADE_SCALP'],
+  slow_grind:       ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'PULLBACK_CONTINUATION', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'LIGHT_TREND_DRIFT_SCALP', 'ABSORPTION_REVERSAL', 'MICRO_POC_MAGNET', 'VAH_VAL_FADE_SCALP'],
   dealer_hedging:   ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP', 'DELTA_VELOCITY_BREAKOUT'],
   expiry_expansion: ['WEEKLY_EXPIRY_DEALER_UNWIND', 'INITIATIVE_MOMENTUM_EXPANSION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'DELTA_DRIVE_SCALP', 'PIN_REVERSION', 'SWEEP_RECLAIM_SCALP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP', 'DELTA_VELOCITY_BREAKOUT', 'PDH_PDL_SWEEP_REVERSAL'],
   panic:            ['EXHAUSTION_REVERSAL', 'FAILED_AUCTION_REVERSAL', 'SWEEP_RECLAIM_SCALP', 'PDH_PDL_SWEEP_REVERSAL', 'ABSORPTION_REVERSAL'],
@@ -4015,6 +4333,11 @@ const ALL_PLAYBOOKS = [
   _doubleDistributionTrend,
   _absorptionReversal,
   _overnightOiShiftFollow,
+  // Phase 7 institutional micro-rotation 2026-05-19 cycle 51 — high-
+  // availability scalp setups for quiet/balanced/gamma_pin days. Closes
+  // the gap on 8-9 zero/sub-3-trade days where elite setups don't qualify.
+  _microPocMagnet,
+  _vahValFadeScalp,
 ];
 
 /**
