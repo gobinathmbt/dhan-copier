@@ -1280,7 +1280,10 @@ function _vwapBounceScalp(ctx) {
   // CALIBRATED cycle 24: require 3+ confirmations for graduation. Cycle 18-22
   // showed 32 losses dominated by 'standard' conviction trades (only 2 confs).
   // Boosting bar to 3 confs cuts the weakest signals while keeping 100+ trades.
-  const conviction = confirmations.length >= 4 ? 'elite' :
+  // CALIBRATED cycle 41 (2026-05-19): bump elite to 5+ confirmations to drop
+  // borderline 'elite-by-default' trades. 17 of 20 cycle-38 losses were VBS
+  // and most showed 4 confirmations exactly — dropping the long tail.
+  const conviction = confirmations.length >= 5 ? 'elite' :
                      confirmations.length >= 3 ? 'standard' : 'weak';
   return {
     name: 'VWAP_BOUNCE_SCALP',
