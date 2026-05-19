@@ -67,6 +67,11 @@ function _moneynessFromAtm(strikeVal, atmStrike, direction) {
  * @param {Object} [opts.expiryOverrides] - { preferITM, minDelta, ... }
  * @param {number} [opts.hhmm]          - current IST time, used for theta penalty
  * @param {boolean}[opts.preferOTM]     - when true, OTM > ATM > ITM scoring bonus
+ * @param {Object} [opts.ultra]         - ultra-scalp tuning hints when this is
+ *                                        an ULTRA_SCALP_UT_BOT entry. Carries:
+ *                                          { tier: 'elite'|'standard'|'weak',
+ *                                            mode: 'fixed'|'hybrid'|'hybrid_runner_continuation',
+ *                                            consensusScore: 0..100 }
  *
  * Strategy:
  *   - Anchor on `openingStrike` when provided. Restrict candidates to
@@ -80,6 +85,13 @@ function _moneynessFromAtm(strikeVal, atmStrike, direction) {
  *     fine with OTM.
  *   - Expiry overrides can force `preferITM` / `minDelta` (e.g. on Thursday
  *     after 14:00).
+ *   - ULTRA SCALP MODE (added 2026-05-19):
+ *       elite tier  → prefer slight OTM, delta 0.45-0.55 (runner P&L leverage)
+ *       standard    → prefer ATM, delta 0.40-0.55 (balanced)
+ *       weak        → strict ATM, delta 0.40-0.50 (small move recovery)
+ *     Plus a hard cap that NEVER picks deep-ITM (delta > 0.65) on ultra
+ *     scalps — the premium is too high for 5-20pt scalps to overcome
+ *     spread + brokerage on adverse moves.
  */
 function select({
   direction,
@@ -94,6 +106,7 @@ function select({
   expiryOverrides = null,
   hhmm = null,
   preferOTM = false,
+  ultra = null,
 } = {}) {
   if (!primaryStrikes.length || !atmStrike) {
     return { ok: false, reason: 'no chain or atm', strike: null };
@@ -119,6 +132,31 @@ function select({
   }
   if (expiryOverrides?.minDelta) targetMin = Math.max(targetMin, expiryOverrides.minDelta);
 
+  // ULTRA SCALP delta band — narrower and tier-aware.
+  // Override the default band when ultra hints are provided.
+  let ultraBoost = null;
+  let ultraHardDeltaMax = null;
+  if (ultra && ultra.tier) {
+    if (ultra.tier === 'elite') {
+      // Elite runner mode — slight OTM gives best leverage on runner moves.
+      // Premium is small enough to absorb adverse moves; delta is high
+      // enough to capture the runner expansion.
+      targetMin = 0.42; targetMax = 0.55;
+      ultraBoost = { otm: 14, atm: 8, itm: 0 };
+    } else if (ultra.tier === 'standard') {
+      // Standard tier — balanced ATM bias.
+      targetMin = 0.40; targetMax = 0.55;
+      ultraBoost = { otm: 8, atm: 12, itm: 0 };
+    } else {
+      // Weak tier — strict ATM, never deep ITM.
+      targetMin = 0.40; targetMax = 0.50;
+      ultraBoost = { otm: 4, atm: 10, itm: -8 };
+    }
+    // Ultra scalps NEVER pick delta > 0.65 — premium is too rich for
+    // a 5-20pt scalp to overcome spread + brokerage on a small adverse move.
+    ultraHardDeltaMax = 0.65;
+  }
+
   // Theta penalty — same-day OTM after 14:00 is brutal
   const lateAfternoon = Number.isFinite(hhmm) && hhmm >= 1400;
 
@@ -126,7 +164,7 @@ function select({
   // strikes have delta > 0.7 which means a 10pt adverse spot move = 7pt
   // premium loss in absolute terms. Backtest's largest losses were all on
   // deep ITM (entry premiums > ₹250, losing 8-13% per SL hit).
-  const MAX_DIST_FROM_ATM = 150;
+  const MAX_DIST_FROM_ATM = ultra ? 100 : 150;     // tighter for ultra scalp
 
   const candidates = primaryStrikes
     .filter(s => s && Number.isFinite(s.strike)
@@ -142,6 +180,12 @@ function select({
 
       if (ltp < minPremium) { score = 0; reasons.push(`ltp ${ltp} < min ${minPremium}`); }
       if (oi < 1)           { score = Math.min(score, 10); reasons.push('oi 0'); }
+
+      // Hard reject deep ITM on ultra scalp — premium too rich for small moves
+      if (ultraHardDeltaMax != null && dlt > ultraHardDeltaMax) {
+        score = Math.min(score, 5);
+        reasons.push(`ultra: delta ${dlt.toFixed(2)} > hard max ${ultraHardDeltaMax}`);
+      }
 
       // Delta band
       if (dlt >= targetMin && dlt <= targetMax) {
@@ -187,6 +231,17 @@ function select({
         reasons.push('expiry override prefers ITM');
       }
 
+      // ── Ultra scalp moneyness bias (tier-driven) ───────────────────────
+      if (ultraBoost && !expiryOverrides?.preferITM
+          && !(ivPercentile != null && ivPercentile > 80)
+          && !lateAfternoon) {
+        const bonus = ultraBoost[moneyness === 'ATM' ? 'atm' : moneyness === 'OTM' ? 'otm' : 'itm'] || 0;
+        if (bonus !== 0) {
+          score += bonus;
+          reasons.push(`ultra ${ultra.tier} ${moneyness} bonus ${bonus > 0 ? '+' : ''}${bonus}`);
+        }
+      }
+
       // ── User-spec OTM preference (2026-05-18) ─────────────────────────
       // OTM > ATM > ITM ordering for both CE and PE. The earlier safety
       // guards (max-pain, late-day theta, expiry prefer-ITM, distance cap)
@@ -194,7 +249,8 @@ function select({
       // bonus only nudges scoring within the allowed candidate set.
       // Skipped when expiry override forces ITM, or when high-IV regime
       // already penalised OTM.
-      if (preferOTM && !expiryOverrides?.preferITM
+      if (preferOTM && !ultraBoost
+          && !expiryOverrides?.preferITM
           && !(ivPercentile != null && ivPercentile > 80)
           && !lateAfternoon) {
         if (moneyness === 'OTM') {

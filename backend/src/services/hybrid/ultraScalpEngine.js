@@ -393,14 +393,25 @@ function decide({
   // The 15m UT Bot trend (using whichever stream matches our direction)
   // must already be in our direction. This is the macro filter the user
   // requested — only BUY when 15m bullish, only SELL when 15m bearish.
+  //
+  // Fail-soft when the 15m stream is warmupShort (insufficient history) —
+  // happens early in a session before enough 15m candles have accumulated.
+  // The integrity service backfills multi-day data so live sessions will
+  // typically have enough 15m history within minutes; backtest day-by-day
+  // replay won't.
   const regimeRead = tfReads['15m']?.read;
   const regimeStream = direction === 'bullish'
     ? regimeRead?.streams?.buy
     : regimeRead?.streams?.sell;
+  const regimeWarmupShort = !regimeRead
+                         || !!regimeRead.warmupShort
+                         || !!regimeStream?.warmupShort;
   const regimeAgrees = !!regimeStream
                     && regimeStream.trend === direction
                     && !regimeStream.warmupShort;
-  if (requireRegime && enable['15m'] && tfProfiles['15m'] && !regimeAgrees) {
+  if (requireRegime && enable['15m'] && tfProfiles['15m']
+      && !regimeWarmupShort                                       // skip filter when not warm
+      && !regimeAgrees) {
     return {
       fired: false, signal: null, direction,
       reasoning: `15m regime against ${direction} ` +
@@ -454,9 +465,11 @@ function decide({
   }
 
   // ── WEIGHTED CONSENSUS SCORE ─────────────────────────────────────────
-  // For each enabled TF, add its weight to the score if its trend (in the
-  // matching directional stream) agrees with our direction. The trigger TF
-  // is always included since it just flipped.
+  // For each enabled TF that is warm, add its weight to the score if its
+  // trend (in the matching directional stream) agrees with our direction.
+  // The trigger TF is always included (it just flipped). Layers that are
+  // warmupShort are EXCLUDED from totalWeight so a small-history backtest
+  // doesn't drag the score below threshold automatically.
   let score = 0;
   let totalWeight = 0;
   const layerResults = [];
@@ -464,14 +477,21 @@ function decide({
     if (!enable[tf] || !tfReads[tf]) continue;
     const r = tfReads[tf].read;
     const w = tfProfiles[tf].weight || 0;
-    totalWeight += w;
     let agrees = false;
+    let warmupShort = false;
     if (tf === trigger.tf) {
-      agrees = true;   // trigger inherently agrees
+      agrees = true;
     } else {
       const stream = direction === 'bullish' ? r?.streams?.buy : r?.streams?.sell;
-      agrees = !!stream && stream.trend === direction && !stream.warmupShort;
+      warmupShort = !stream || !!stream.warmupShort;
+      agrees = !warmupShort && stream.trend === direction;
     }
+    if (warmupShort) {
+      // Don't count cold layers in either numerator or denominator
+      layerResults.push({ tf, role: tfProfiles[tf].role, weight: w, agrees: false, warmupShort: true });
+      continue;
+    }
+    totalWeight += w;
     if (agrees) score += w;
     layerResults.push({ tf, role: tfProfiles[tf].role, weight: w, agrees });
   }
@@ -593,6 +613,30 @@ function decide({
   const tierSizing = { elite: 1.0, standard: 0.85, weak: 0.65 }[tier] || 0.65;
   const sizingFactor = (profile.sizingFactor || 0.6) * tierSizing;
 
+  // ── DYNAMIC EXIT MODE ────────────────────────────────────────────────
+  // ELITE     (score ≥ 90, all 4 layers + ATR expansion + regime)
+  //           → 'hybrid_runner_continuation' — fixed target IGNORED once
+  //             peak crosses target; ride momentum until 1m flips, slope
+  //             collapses, or volatility-adaptive giveback fires.
+  // STANDARD  (score ≥ 75)
+  //           → 'hybrid' — standard target + smart-lock + adaptive trail.
+  // WEAK      (score < 75)
+  //           → 'fixed' — classic hard target/SL only (legacy behaviour).
+  const exitMode = userCfg.forceExitMode
+    || (tier === 'elite'    ? 'hybrid_runner_continuation'
+      : tier === 'standard' ? 'hybrid'
+      :                       'fixed');
+
+  // Volatility-adaptive giveback override is handled in runnerExitEngine
+  // by reading the live volState — but if user wants a hard override per
+  // entry, smartTrail.peakGivebackPct will be honoured.
+  const smartTrail = {
+    mode:             exitMode,
+    lockTriggerPct:   userCfg.lockTriggerPct  ?? 0.50,    // lock at 50% of target
+    peakGivebackPct:  userCfg.peakGivebackPct ?? null,    // null → use vol-adaptive table
+    slopeExitMin:     userCfg.slopeExitMin    ?? 0.30,    // runner exits if slope drops below
+  };
+
   return {
     fired: true,
     signal,
@@ -614,11 +658,8 @@ function decide({
     confluenceTier: tier,
     consensusScore: scorePct,
     preset: presetKey,
-    // Smart-trail metadata used by monitor / backtest:
-    smartTrail: {
-      lockTriggerPct: 0.50,         // lock once 50% of target is hit
-      peakGivebackPct: 0.10,        // exit on 10% giveback from peak after lock
-    },
+    // Smart-trail metadata used by runner exit engine in monitor + backtest:
+    smartTrail,
   };
 }
 

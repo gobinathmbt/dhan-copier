@@ -1637,6 +1637,17 @@ async function decide({
     expiryOverrides: expiry?.overrides || null,
     hhmm: sessionPhase?.hhmm,
     preferOTM: settings?.preferOTMStrikes === true,
+    // Ultra-scalp aware strike picking — when the entry is an ULTRA_SCALP
+    // playbook, narrow the delta band per tier and forbid deep-ITM picks.
+    ultra: entryType?.bestType === 'ULTRA_SCALP_UT_BOT'
+      ? {
+          tier:           entryType?.playbook?.score >= 90 ? 'elite'
+                        : entryType?.playbook?.score >= 75 ? 'standard'
+                        : 'weak',
+          mode:           entryType?.playbook?.smartTrail?.mode || 'hybrid',
+          consensusScore: entryType?.bestScore || 0,
+        }
+      : null,
   });
   if (!strikeRes.ok) {
     return _noTrade(`Strike selection failed: ${strikeRes.reason}`);

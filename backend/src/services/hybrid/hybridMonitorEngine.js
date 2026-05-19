@@ -112,41 +112,54 @@ function _scalpGates(trade, settings) {
   // if (pnlPts < 0 && slPct >= 80) {
   //   return _exit(`Approaching SL: ${pnlPts.toFixed(2)}pts (${slPct.toFixed(1)}% of ${slPts}pt SL)`, 'hybrid:sl_proximity');
   // }
-  // 3. Target hit
-  if (targetPct >= 100) {
+  // 3. Target hit — only when NOT in runner mode. Runner-mode setups
+  // explicitly want to ignore the fixed target and ride momentum further.
+  const _smartTrail = trade.aiEntryDecision?.hybridSnapshot?.entryType?.playbook?.smartTrail
+                  || trade.hybridEntrySnapshot?.entryType?.playbook?.smartTrail
+                  || null;
+  const _isRunnerMode = _smartTrail?.mode === 'runner'
+                    || _smartTrail?.mode === 'hybrid_runner_continuation';
+  if (targetPct >= 100 && !_isRunnerMode) {
     return _exit(`Target hit: ${pnlPts.toFixed(2)}pts (${targetPct.toFixed(1)}%)`, 'hybrid:target_hit');
   }
 
-  // 3b. CALIBRATED 2026-05-19: SMART-TRAIL (ultra-scalp lock + peak giveback)
-  // When the entry's hybridSnapshot carries a smartTrail config:
-  //   - lockTriggerPct: once peak P&L reaches this fraction of target,
-  //     remember that level as a "locked floor". Any return below it = exit.
-  //   - peakGivebackPct: after lock, exit when current P&L gives back this
-  //     fraction of the peak run-up.
-  // Hard SL still triggers immediately above; this is a *profit-protection*
-  // layer that captures most of the move and avoids round-trips.
-  const smartTrail = trade.aiEntryDecision?.hybridSnapshot?.entryType?.playbook?.smartTrail
-                  || trade.hybridEntrySnapshot?.entryType?.playbook?.smartTrail
-                  || null;
-  if (smartTrail && (smartTrail.lockTriggerPct > 0 || smartTrail.peakGivebackPct > 0)) {
-    const peakPrice = Number(trade.maxPriceReached) || trade.entryPrice;
-    const peakPts   = peakPrice - trade.entryPrice;
-    const lockPts   = (smartTrail.lockTriggerPct || 0) * targetPts;
-    if (lockPts > 0 && peakPts >= lockPts) {
-      const lockedFloor = trade.entryPrice + lockPts;
-      if (trade.currentPrice < lockedFloor) {
-        return _exit(
-          `Smart-lock breach: peak +${peakPts.toFixed(2)}pts crossed lock at +${lockPts.toFixed(2)}pts, ` +
-          `now ${pnlPts.toFixed(2)}pts (below floor ${lockedFloor.toFixed(2)})`,
-          'hybrid:scalp_smart_lock'
-        );
-      }
-      const giveback = peakPts * (smartTrail.peakGivebackPct || 0);
-      if (giveback > 0 && peakPts - pnlPts >= giveback && pnlPts > 0) {
-        return _exit(
-          `Smart-trail: ${(giveback).toFixed(2)}pts giveback from peak (peak +${peakPts.toFixed(2)}, now +${pnlPts.toFixed(2)})`,
-          'hybrid:scalp_smart_trail'
-        );
+  // 3b. CALIBRATED 2026-05-19: RUNNER EXIT ENGINE (ultra-scalp adaptive)
+  // Delegates to runnerExitEngine for:
+  //   - smart-lock breach (peak crossed lockTriggerPct, now below floor)
+  //   - volatility-adaptive peak giveback
+  //   - runner-mode momentum-decay exits (UT flip / slope collapse / ATR contract)
+  // Hard SL still triggers above; this is the profit-protection layer.
+  if (_smartTrail && (_smartTrail.lockTriggerPct > 0 || _smartTrail.peakGivebackPct != null
+                       || _smartTrail.mode === 'runner' || _smartTrail.mode === 'hybrid_runner_continuation')) {
+    let runnerExit;
+    try { runnerExit = require('./runnerExitEngine'); } catch (_) { runnerExit = null; }
+    if (runnerExit) {
+      const peakPrice = Number(trade.maxPriceReached) || trade.entryPrice;
+      const volState  = trade.aiEntryDecision?.hybridSnapshot?.volatilityState
+                     || trade.hybridEntrySnapshot?.volatilityState
+                     || 'normal';
+      const exitRes = runnerExit.decideRunnerExit({
+        entry: trade.entryPrice,
+        current: trade.currentPrice,
+        peak: peakPrice,
+        targetPts, slPts,
+        smartTrail: _smartTrail,
+        volState,
+        // momentum hints can be filled in by callers that have live UT
+        // reads. The monitor doesn't have them today; leaving empty makes
+        // the runner phase rely on giveback + hard SL.
+        momentum: {},
+        heldSec: elapsed,
+        maxHoldSec: Number(trade.maxHoldSeconds) || Number(settings?.maxHoldTimeSeconds) || 180,
+      });
+      if (exitRes.action === 'EXIT') {
+        const src = exitRes.reason.startsWith('SL hit')          ? 'hybrid:scalp_sl'
+                  : exitRes.reason.startsWith('Target hit')      ? 'hybrid:target_hit'
+                  : exitRes.reason.startsWith('Smart-lock')      ? 'hybrid:scalp_smart_lock'
+                  : exitRes.reason.startsWith('Adaptive')        ? 'hybrid:scalp_smart_trail'
+                  : exitRes.reason.startsWith('Runner end')      ? 'hybrid:scalp_runner_end'
+                  :                                                 'hybrid:scalp_runner';
+        return _exit(exitRes.reason, src);
       }
     }
   }
@@ -176,9 +189,21 @@ function _scalpGates(trade, settings) {
   // backtest sim respects the engine's per-trade hold (180-240s typically),
   // so live and backtest were exiting at very different times.
   // Falls back to settings.maxHoldTimeSeconds if the trade doesn't carry one.
-  const maxHold = Number(trade.maxHoldSeconds)
-                || Number(settings?.maxHoldTimeSeconds)
-                || 180;
+  let maxHold = Number(trade.maxHoldSeconds)
+              || Number(settings?.maxHoldTimeSeconds)
+              || 180;
+  // RUNNER MODE — once the trade has crossed the lock threshold and is
+  // riding momentum, allow up to 3× the base hold so we don't kill a
+  // working runner just because the timer expired. Hard SL and runner
+  // momentum-decay exits still apply.
+  if (_isRunnerMode) {
+    const peakPrice = Number(trade.maxPriceReached) || trade.entryPrice;
+    const peakPts = peakPrice - trade.entryPrice;
+    const lockPts = (_smartTrail.lockTriggerPct || 0.5) * targetPts;
+    if (peakPts >= lockPts) {
+      maxHold = Math.max(maxHold, maxHold * 3);   // extend to 3× base hold
+    }
+  }
   if (elapsed >= maxHold) {
     return _exit(`Max hold reached ${elapsed}s ≥ ${maxHold}s, P&L ${pnlPts.toFixed(2)}pts`, 'hybrid:scalp_max_hold');
   }
@@ -192,8 +217,9 @@ function _scalpGates(trade, settings) {
   // eventual timeout exit. Hard SL still triggers immediately and
   // trailing SL handles the profitable cases, so this only catches the
   // slow-leak losers that the timer would otherwise resolve unfavourably.
+  // SKIPPED for runner-mode entries — those are designed to extend.
   const noProgressDeadline = Math.floor(maxHold * 0.7);
-  if (elapsed >= noProgressDeadline) {
+  if (!_isRunnerMode && elapsed >= noProgressDeadline) {
     const entry = Number(trade.entryPrice) || 0;
     const peak = Number(trade.maxPriceReached) || entry;
     const peakPnlPts = peak - entry;

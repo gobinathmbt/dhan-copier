@@ -422,58 +422,90 @@ function simulateTrade(day, decision, entryEpoch) {
   const strike = decision.strike;
   const entryLtp = decision.entry_premium_estimate;
   if (!entryLtp || entryLtp <= 0) return null;
-  const slPrice     = entryLtp - (decision.sl_points || 15);
-  const targetPrice = entryLtp + (decision.target_points || 10);
-  const maxHoldSec  = decision.max_hold_seconds || 180;
+  const slPts       = decision.sl_points || 15;
   const targetPts   = decision.target_points || 10;
+  const slPrice     = entryLtp - slPts;
+  const targetPrice = entryLtp + targetPts;
+  const maxHoldSec  = decision.max_hold_seconds || 180;
 
   // Smart-trail metadata (only present on ultra-scalp entries).
-  // lockTriggerPct: once price has moved this fraction of target into
-  //   profit, lock that level — any return back below it triggers exit.
-  // peakGivebackPct: after the lock, exit if price retraces by this
-  //   fraction of the peak run-up from entry.
   const smartTrail = decision.hybridSnapshot?.entryType?.playbook?.smartTrail
                   || decision._raw?.hybridSnapshot?.entryType?.playbook?.smartTrail
                   || null;
-  const lockTriggerPct  = smartTrail?.lockTriggerPct  || 0;
-  const peakGivebackPct = smartTrail?.peakGivebackPct || 0;
-  const lockTriggerPts  = lockTriggerPct  > 0 ? targetPts * lockTriggerPct  : 0;
-  let lockedFloor       = null;     // entry+lockTriggerPts once peakPts crosses lockTrigger
-  let peakLtp           = entryLtp;
+  // Volatility regime hint for adaptive giveback table
+  const volState = decision.hybridSnapshot?.volatilityState
+                || decision._raw?.hybridSnapshot?.volatilityState
+                || 'normal';
+  // 1m UT Bot reads (for runner-mode opposite-flip detection)
+  const utReads1m = decision.hybridSnapshot?.entryType?.playbook?.pillars?.tfReads?.['1m']
+                || null;
+
+  const runnerExit = require('../src/services/hybrid/runnerExitEngine');
+  let peakLtp = entryLtp;
+  // Runner mode → extend max hold to 3× base after lock threshold crossed
+  const isRunnerMode = smartTrail?.mode === 'runner'
+                    || smartTrail?.mode === 'hybrid_runner_continuation';
+  let effectiveMaxHoldSec = maxHoldSec;
+  let runnerExtended = false;
 
   const exitDeadline = entryEpoch + maxHoldSec;
   const noProgressDeadline = entryEpoch + Math.floor(maxHoldSec * 0.7);
 
-  for (let t = entryEpoch + 30; t <= exitDeadline; t += 30) {
+  let t = entryEpoch + 30;
+  while (t <= entryEpoch + effectiveMaxHoldSec) {
     const ltp = getOptionLtpAt(day, strike, side, t);
-    if (ltp == null) continue;
+    if (ltp == null) { t += 30; continue; }
     if (ltp > peakLtp) peakLtp = ltp;
-    if (ltp <= slPrice) {
-      return _closeTrade('SL', entryLtp, ltp, t - entryEpoch, decision);
-    }
-    if (ltp >= targetPrice) {
-      return _closeTrade('TARGET', entryLtp, ltp, t - entryEpoch, decision);
-    }
-    // Smart-trail (ultra scalp): once we've moved 50% of target up, lock
-    // that level. Any return below the lock = immediate exit.
-    if (lockTriggerPts > 0) {
-      const peakPts = peakLtp - entryLtp;
-      if (lockedFloor == null && peakPts >= lockTriggerPts) {
-        lockedFloor = entryLtp + lockTriggerPts;
-      }
-      if (lockedFloor != null && ltp < lockedFloor) {
-        return _closeTrade('SMART_LOCK', entryLtp, ltp, t - entryEpoch, decision);
-      }
-      // After lock, also exit if price retraces peakGivebackPct from peak
-      if (lockedFloor != null && peakGivebackPct > 0) {
-        const giveback = (peakLtp - entryLtp) * peakGivebackPct;
-        if (peakLtp - ltp >= giveback && (ltp - entryLtp) > 0) {
-          return _closeTrade('SMART_TRAIL', entryLtp, ltp, t - entryEpoch, decision);
-        }
+
+    // Runner mode hold extension — once peak crossed lock threshold,
+    // bump the deadline to 3× base hold so a working runner can mature.
+    if (isRunnerMode && !runnerExtended) {
+      const lockPts = (smartTrail.lockTriggerPct || 0.5) * targetPts;
+      if (peakLtp - entryLtp >= lockPts) {
+        effectiveMaxHoldSec = Math.max(maxHoldSec, maxHoldSec * 3);
+        runnerExtended = true;
       }
     }
+
+    // Use the runner exit engine when smartTrail is configured (ultra scalp)
+    if (smartTrail) {
+      const exitDecision = runnerExit.decideRunnerExit({
+        entry: entryLtp,
+        current: ltp,
+        peak: peakLtp,
+        targetPts,
+        slPts,
+        smartTrail,
+        volState,
+        // Backtest doesn't have live UT flip detection between bars — leave
+        // momentum hints out so we rely on giveback / lock + hard exits.
+        momentum: {},
+        heldSec: t - entryEpoch,
+        maxHoldSec,
+      });
+      if (exitDecision.action === 'EXIT') {
+        const reasonCode = exitDecision.reason.startsWith('SL hit')        ? 'SL'
+                         : exitDecision.reason.startsWith('Target hit')    ? 'TARGET'
+                         : exitDecision.reason.startsWith('Smart-lock')    ? 'SMART_LOCK'
+                         : exitDecision.reason.startsWith('Adaptive')      ? 'SMART_TRAIL'
+                         : exitDecision.reason.startsWith('Runner end')    ? 'RUNNER_END'
+                         :                                                   'EXIT';
+        return _closeTrade(reasonCode, entryLtp, ltp, t - entryEpoch, decision);
+      }
+    } else {
+      // Legacy non-ultra path — fixed SL/target only
+      if (ltp <= slPrice) {
+        return _closeTrade('SL', entryLtp, ltp, t - entryEpoch, decision);
+      }
+      if (ltp >= targetPrice) {
+        return _closeTrade('TARGET', entryLtp, ltp, t - entryEpoch, decision);
+      }
+    }
+
     // No-progress exit (existing): past 70% of hold, peak < 30% target, current ≤ +1pt
-    if (t >= noProgressDeadline) {
+    // For runners, we use the ORIGINAL maxHoldSec for the no-progress
+    // window (not the extended one) so a stuck pre-lock trade still bails.
+    if (!isRunnerMode && t >= noProgressDeadline) {
       const peakPts = peakLtp - entryLtp;
       const curPts = ltp - entryLtp;
       const peakPctTarget = (peakPts / Math.max(1, targetPts)) * 100;
@@ -481,10 +513,11 @@ function simulateTrade(day, decision, entryEpoch) {
         return _closeTrade('NO_PROGRESS', entryLtp, ltp, t - entryEpoch, decision);
       }
     }
+    t += 30;
   }
   // Max hold reached -> exit at last available LTP
-  const finalLtp = getOptionLtpAt(day, strike, side, exitDeadline);
-  return _closeTrade('TIMEOUT', entryLtp, finalLtp ?? entryLtp, maxHoldSec, decision);
+  const finalLtp = getOptionLtpAt(day, strike, side, entryEpoch + effectiveMaxHoldSec);
+  return _closeTrade('TIMEOUT', entryLtp, finalLtp ?? entryLtp, effectiveMaxHoldSec, decision);
 }
 
 function _closeTrade(reason, entry, exit, heldSec, decision) {
