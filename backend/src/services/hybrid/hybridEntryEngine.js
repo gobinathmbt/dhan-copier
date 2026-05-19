@@ -595,6 +595,7 @@ async function decide({
         candles5m,
         candles3m: _build3mEarly(candles1m),
         candles1m,
+        candles15m,
         vwap: payload?.vwap_analysis,
         volumeAnalysis,
         volatilityRegime,
@@ -1319,6 +1320,7 @@ async function decide({
         candles5m,
         candles3m: _build3m(candles1m),
         candles1m,
+        candles15m,
         vwap: payload?.vwap_analysis,
         volumeAnalysis,
         volatilityRegime,
@@ -1353,6 +1355,8 @@ async function decide({
         confirmations: Object.entries(ultra.pillars).map(([k, v]) => `${k}:${typeof v === 'object' ? JSON.stringify(v).slice(0, 30) : v}`),
         preconditions: ['ut_bot_5m_cross'],
         ultra: true,
+        // Smart-trail metadata used by monitor & backtest exit logic.
+        smartTrail: ultra.smartTrail || null,
       };
       // Stamp ultra-scalp hold/RR onto the strategy
       strategy.tradeType  = 'SCALP';

@@ -116,6 +116,41 @@ function _scalpGates(trade, settings) {
   if (targetPct >= 100) {
     return _exit(`Target hit: ${pnlPts.toFixed(2)}pts (${targetPct.toFixed(1)}%)`, 'hybrid:target_hit');
   }
+
+  // 3b. CALIBRATED 2026-05-19: SMART-TRAIL (ultra-scalp lock + peak giveback)
+  // When the entry's hybridSnapshot carries a smartTrail config:
+  //   - lockTriggerPct: once peak P&L reaches this fraction of target,
+  //     remember that level as a "locked floor". Any return below it = exit.
+  //   - peakGivebackPct: after lock, exit when current P&L gives back this
+  //     fraction of the peak run-up.
+  // Hard SL still triggers immediately above; this is a *profit-protection*
+  // layer that captures most of the move and avoids round-trips.
+  const smartTrail = trade.aiEntryDecision?.hybridSnapshot?.entryType?.playbook?.smartTrail
+                  || trade.hybridEntrySnapshot?.entryType?.playbook?.smartTrail
+                  || null;
+  if (smartTrail && (smartTrail.lockTriggerPct > 0 || smartTrail.peakGivebackPct > 0)) {
+    const peakPrice = Number(trade.maxPriceReached) || trade.entryPrice;
+    const peakPts   = peakPrice - trade.entryPrice;
+    const lockPts   = (smartTrail.lockTriggerPct || 0) * targetPts;
+    if (lockPts > 0 && peakPts >= lockPts) {
+      const lockedFloor = trade.entryPrice + lockPts;
+      if (trade.currentPrice < lockedFloor) {
+        return _exit(
+          `Smart-lock breach: peak +${peakPts.toFixed(2)}pts crossed lock at +${lockPts.toFixed(2)}pts, ` +
+          `now ${pnlPts.toFixed(2)}pts (below floor ${lockedFloor.toFixed(2)})`,
+          'hybrid:scalp_smart_lock'
+        );
+      }
+      const giveback = peakPts * (smartTrail.peakGivebackPct || 0);
+      if (giveback > 0 && peakPts - pnlPts >= giveback && pnlPts > 0) {
+        return _exit(
+          `Smart-trail: ${(giveback).toFixed(2)}pts giveback from peak (peak +${peakPts.toFixed(2)}, now +${pnlPts.toFixed(2)})`,
+          'hybrid:scalp_smart_trail'
+        );
+      }
+    }
+  }
+
   // 4. Below min hold time — only SL is allowed to exit (already handled above)
   const minHold = 30;
   if (elapsed < minHold) {

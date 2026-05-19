@@ -427,12 +427,23 @@ function simulateTrade(day, decision, entryEpoch) {
   const maxHoldSec  = decision.max_hold_seconds || 180;
   const targetPts   = decision.target_points || 10;
 
+  // Smart-trail metadata (only present on ultra-scalp entries).
+  // lockTriggerPct: once price has moved this fraction of target into
+  //   profit, lock that level — any return back below it triggers exit.
+  // peakGivebackPct: after the lock, exit if price retraces by this
+  //   fraction of the peak run-up from entry.
+  const smartTrail = decision.hybridSnapshot?.entryType?.playbook?.smartTrail
+                  || decision._raw?.hybridSnapshot?.entryType?.playbook?.smartTrail
+                  || null;
+  const lockTriggerPct  = smartTrail?.lockTriggerPct  || 0;
+  const peakGivebackPct = smartTrail?.peakGivebackPct || 0;
+  const lockTriggerPts  = lockTriggerPct  > 0 ? targetPts * lockTriggerPct  : 0;
+  let lockedFloor       = null;     // entry+lockTriggerPts once peakPts crosses lockTrigger
+  let peakLtp           = entryLtp;
+
   const exitDeadline = entryEpoch + maxHoldSec;
-  // CALIBRATED 2026-05-19: track peak unrealized P&L for the no-progress
-  // early-exit gate (mirrors hybridMonitorEngine._scalpGates step 8).
   const noProgressDeadline = entryEpoch + Math.floor(maxHoldSec * 0.7);
-  let peakLtp = entryLtp;
-  // Walk forward in 30-second steps
+
   for (let t = entryEpoch + 30; t <= exitDeadline; t += 30) {
     const ltp = getOptionLtpAt(day, strike, side, t);
     if (ltp == null) continue;
@@ -443,7 +454,25 @@ function simulateTrade(day, decision, entryEpoch) {
     if (ltp >= targetPrice) {
       return _closeTrade('TARGET', entryLtp, ltp, t - entryEpoch, decision);
     }
-    // No-progress: past 70% of hold, peak < 30% of target, current ≤ 1pt up.
+    // Smart-trail (ultra scalp): once we've moved 50% of target up, lock
+    // that level. Any return below the lock = immediate exit.
+    if (lockTriggerPts > 0) {
+      const peakPts = peakLtp - entryLtp;
+      if (lockedFloor == null && peakPts >= lockTriggerPts) {
+        lockedFloor = entryLtp + lockTriggerPts;
+      }
+      if (lockedFloor != null && ltp < lockedFloor) {
+        return _closeTrade('SMART_LOCK', entryLtp, ltp, t - entryEpoch, decision);
+      }
+      // After lock, also exit if price retraces peakGivebackPct from peak
+      if (lockedFloor != null && peakGivebackPct > 0) {
+        const giveback = (peakLtp - entryLtp) * peakGivebackPct;
+        if (peakLtp - ltp >= giveback && (ltp - entryLtp) > 0) {
+          return _closeTrade('SMART_TRAIL', entryLtp, ltp, t - entryEpoch, decision);
+        }
+      }
+    }
+    // No-progress exit (existing): past 70% of hold, peak < 30% target, current ≤ +1pt
     if (t >= noProgressDeadline) {
       const peakPts = peakLtp - entryLtp;
       const curPts = ltp - entryLtp;
