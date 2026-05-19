@@ -160,17 +160,23 @@ class FeedRecorder {
 
       const known = this.knownFutCandleTimes[interval];
       for (const c of candles) {
-        if (!c || !c.time || known.has(c.time)) continue;
+        if (!c || !c.time) continue;
+        // CALIBRATED 2026-05-19: normalise ms→sec to keep dedup robust
+        // across server restarts and provider format changes.
+        let timeSec = Number(c.time);
+        if (!Number.isFinite(timeSec)) continue;
+        if (timeSec >= 1e12) timeSec = Math.floor(timeSec / 1000);
+        if (known.has(timeSec)) continue;
         try {
           stream.write(JSON.stringify({
-            t: c.time,
+            t: timeSec,
             o: c.open,
             h: c.high,
             l: c.low,
             c: c.close,
             v: c.volume || 0,
           }) + '\n');
-          known.add(c.time);
+          known.add(timeSec);
         } catch (e) {
           logger.warn({ err: e.message, interval }, '[feedRecorder] futures candle write failed');
         }
@@ -295,19 +301,27 @@ class FeedRecorder {
 
       const known = this.knownCandleTimes[interval];
       for (const c of candles) {
-        if (!c || !c.time || known.has(c.time)) continue;
+        if (!c || !c.time) continue;
+        // CALIBRATED 2026-05-19: defensively normalise the timestamp to
+        // seconds so the dedup set never sees a 10-digit and 13-digit form
+        // for the same bar. Without this, server restarts and provider
+        // upgrades produced 12 duplicate 5m bars in live-feed/2026-05-19.
+        let timeSec = Number(c.time);
+        if (!Number.isFinite(timeSec)) continue;
+        if (timeSec >= 1e12) timeSec = Math.floor(timeSec / 1000);
+        if (known.has(timeSec)) continue;
         // Only persist candles that have actually closed — not the partial bar
         // (partial = last bar whose start time + interval > now)
         try {
           stream.write(JSON.stringify({
-            t: c.time,
+            t: timeSec,
             o: c.open,
             h: c.high,
             l: c.low,
             c: c.close,
             v: c.volume || 0,
           }) + '\n');
-          known.add(c.time);
+          known.add(timeSec);
         } catch (e) {
           logger.warn({ err: e.message, interval }, '[feedRecorder] candle write failed');
         }
@@ -470,7 +484,13 @@ class FeedRecorder {
         if (!line) return;
         try {
           const row = JSON.parse(line);
-          if (row.t) set.add(row.t);
+          if (!row.t) return;
+          // Normalise to seconds in case the file has mixed ms/sec entries
+          // (legacy data + restart bug — see recordCandles for details).
+          let t = Number(row.t);
+          if (!Number.isFinite(t)) return;
+          if (t >= 1e12) t = Math.floor(t / 1000);
+          set.add(t);
         } catch (_) {}
       });
     } catch (_) {}
