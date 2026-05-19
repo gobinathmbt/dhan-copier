@@ -50,7 +50,12 @@ const STRATEGIES = {
     slPointsRatio:     1.0,
     rrTarget: { min: 1.0, max: 1.5 },
     maxHoldSec: 180,
-    minScore: 68,                    // was 55
+    // CALIBRATED 2026-05-19 cycle 50: per institutional review, drop from
+    // 68 → 62. Playbook engine's elite/standard tier is the real quality
+    // gate; 68 was rejecting valid B-grade scalp setups (gamma-pin
+    // rotations, VAH↔VAL fades) where score ranged 60-67. Playbooks
+    // already block weak conviction trades upstream.
+    minScore: 62,
     utBotRequired: false,
     // Calibrated: scalping LIVES in choppy/ranging/gamma — institutional
     // responsive trading. Only excluded from `exhaustion`.
@@ -63,10 +68,11 @@ const STRATEGIES = {
     slPointsRatio:     1.5,
     rrTarget: { min: 2.0, max: 4.0 },
     maxHoldSec: 15 * 60,
-    // Calibrated 2nd pass: 78 still produced 46% WR on MOMENTUM_CONTINUATION.
-    // The pure entry signal is hard to beat unless score is genuinely elite.
-    // Raise to 80. UT Bot stays optional — confirmation only.
-    minScore: 80,
+    // CALIBRATED cycle 50 (2026-05-19): drop from 80 → 72. The playbook
+    // layer already requires elite conviction (5+ confirmations on VBS,
+    // 4+ on most others). 80 was eliminating true B-grade momentum
+    // continuation setups during gamma-pin trending phases.
+    minScore: 72,
     utBotRequired: false,
     allowedRegimes: ['trending_bullish','trending_bearish'],
   },
@@ -77,7 +83,11 @@ const STRATEGIES = {
     slPointsRatio:     1.0,
     rrTarget: { min: 0.8, max: 1.5 },
     maxHoldSec: 240,
-    minScore: 72,                    // was 58 — gamma-pin fades only
+    // CALIBRATED cycle 50 (2026-05-19): 72 → 66. Mean-reversion fires in
+    // gamma_pin / balanced auctions where structural confluence rarely
+    // pushes scores past 70. Playbook conviction is what matters, not
+    // raw score.
+    minScore: 66,
     utBotRequired: false,
     // CALIBRATED cycle 12: choppy is exactly when mean-reversion shines.
     // Previous allowlist excluded it which caused 77 zero-trade-day blocks.
@@ -94,7 +104,10 @@ const STRATEGIES = {
     slPointsRatio:     1.5,
     rrTarget: { min: 2.5, max: 5.0 },
     maxHoldSec: 20 * 60,
-    minScore: 82,
+    // CALIBRATED cycle 50 (2026-05-19): 82 → 76. Expansion breakouts are
+    // rare and high-edge — 82 was blocking them entirely. 76 still keeps
+    // them A-grade-only but allows more participation.
+    minScore: 76,
     utBotRequired: false,
     allowedRegimes: ['trending_bullish','trending_bearish'],
   },
