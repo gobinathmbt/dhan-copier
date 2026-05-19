@@ -50,16 +50,16 @@ const { calculateUTBot } = require('../algorithms/multiTimeframe.service');
 // ────────────────────────────────────────────────────────────────────────
 const REGIME_PROFILES = {
   expansion: {
-    minScore: 78, flipLimit: 2, slopeMin: 1.2, allowStaleBar: true,
-    maxBarsSinceFlip: 1, atrExpansionMin: 1.05,
+    minScore: 60, flipLimit: 3, slopeMin: 0.9, allowStaleBar: true,
+    maxBarsSinceFlip: 1, atrExpansionMin: 1.0,
   },
   trend: {
-    minScore: 82, flipLimit: 2, slopeMin: 1.3, allowStaleBar: true,
-    maxBarsSinceFlip: 1, atrExpansionMin: 1.05,
+    minScore: 65, flipLimit: 3, slopeMin: 1.0, allowStaleBar: true,
+    maxBarsSinceFlip: 1, atrExpansionMin: 1.0,
   },
   normal: {
-    minScore: 88, flipLimit: 2, slopeMin: 1.4, allowStaleBar: false,
-    maxBarsSinceFlip: 1, atrExpansionMin: 1.10,
+    minScore: 75, flipLimit: 2, slopeMin: 1.1, allowStaleBar: false,
+    maxBarsSinceFlip: 1, atrExpansionMin: 1.05,
   },
   chop: {
     minScore: 99, flipLimit: 0, slopeMin: 2.5, allowStaleBar: false,
@@ -443,7 +443,7 @@ function decide({
   // CALIBRATED v6.15: allow 1m, 3m, 5m triggers but ONLY when the higher
   // TFs already agree (perfect consensus required). 1m gives faster entry
   // timing on already-confirmed multi-TF setups.
-  const allowedTriggerTfs = userCfg.allowedTriggerTfs || ['5m'];
+  const allowedTriggerTfs = userCfg.allowedTriggerTfs || ['3m', '5m'];
   const tfPriority = allowedTriggerTfs.filter(v => tfReads[v]);
   let trigger = null;
   let triggerKind = 'fresh';
@@ -460,11 +460,12 @@ function decide({
     }
   }
 
-  // ── PULLBACK CONTINUATION (CALIBRATED v6.5/v6.16) ───────────────────
-  // Re-enabled in v6.16 with TIGHTER filtering — analysis showed pullback
-  // pure-stagnation entries (peak=0) need futures/delta confirmation.
-  // Now requires 3m+5m+15m all aligned (15m wasn't required before).
-  if (!trigger && userCfg.allowPullbackContinuation !== false
+  // ── PULLBACK CONTINUATION (CALIBRATED v6.5/v6.16/v6.20) ─────────────
+  // DISABLED in v6.20 — analysis showed pullback continuation produces
+  // ~50% WR even with stricter filters. The 5m UT Bot fresh cross is the
+  // edge; pullback entries are statistical noise. Enable via
+  // settings.ultraScalp.allowPullbackContinuation = true.
+  if (!trigger && userCfg.allowPullbackContinuation === true
       && (regime === 'expansion' || regime === 'trend')) {
     const r1 = tfReads['1m']?.read;
     const r3 = tfReads['3m']?.read;
@@ -477,11 +478,9 @@ function decide({
       );
       if (dirAgree) {
         const dPctCheck = _safe(volumeAnalysis?.delta?.cvdPctLong);
-        // STRICTER: delta ≥ 8% (was 5%)
         const deltaAligned = (dirAgree === 'bullish' && dPctCheck >= 8)
                           || (dirAgree === 'bearish' && dPctCheck <= -8);
         const bothExpanding = r3.slopeTrend === 'expanding' && r5.slopeTrend === 'expanding';
-        // NEW: 15m must also agree if available
         const regime15Agrees = !r15 || r15.warmupShort
           || (dirAgree === 'bullish' && r15.streams?.buy?.trend === 'bullish')
           || (dirAgree === 'bearish' && r15.streams?.sell?.trend === 'bearish');
@@ -688,9 +687,10 @@ function decide({
       pillars: { tfReads: exposedReads, regime, triggerTf: trigger.tf, score, scorePct, layerResults },
     };
   }
-  // CALIBRATED v6.9: Require PERFECT consensus (every enabled+warm layer
-  // agrees). Sub-100 consensus dilutes WR. Override via requirePerfectConsensus=false.
-  const requirePerfect = userCfg.requirePerfectConsensus !== false;
+  // CALIBRATED v6.9/v6.23: Require HIGH consensus. Score < 75 dilutes WR
+  // (verified by cycle analysis). Default uses regime minScore which is
+  // already 78-88. Use requirePerfectConsensus=true for 100-only.
+  const requirePerfect = userCfg.requirePerfectConsensus === true;
   if (requirePerfect && scorePct < 100) {
     return {
       fired: false, signal: null, direction,
@@ -793,9 +793,6 @@ function decide({
 
   // ── SIZING ───────────────────────────────────────────────────────────
   const profile = trigger.profile;
-  // CALIBRATED v6.7: smaller target = higher hit rate. NIFTY 5m ATR is
-  // typically 15-25pts; option premium delta-decay over 90-150s captures
-  // 50-70% of that. So target 0.4×ATR not 0.6×ATR.
   let target_pts = Math.max(profile.targetMin, Math.min(profile.targetMax, Math.round(atrPts * 0.4)));
   let sl_pts = profile.slPtsMin + 2;
   if (Number.isFinite(spotPrice) && Number.isFinite(trigger.read.trailingStop)) {

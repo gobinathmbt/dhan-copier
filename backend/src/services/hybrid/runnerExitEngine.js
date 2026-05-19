@@ -144,7 +144,10 @@ function decideRunnerExit({
   // PROACTIVE FADE EXIT (NEW v6.8) — if we're past 50% of max hold and
   // pnlPts is negative, exit now before TIMEOUT eats more. UT Bot signal
   // is invalidating; cut losses early.
-  const fadeAtPct = smartTrail.fadeAtPct ?? 0.50;
+  // CALIBRATED v6.18: DISABLED by default — cycle analysis showed many
+  // PROACTIVE_FADE losses recovered if held to TIMEOUT. Enable via
+  // smartTrail.fadeAtPct > 0.
+  const fadeAtPct = smartTrail.fadeAtPct ?? 0;
   if (fadeAtPct > 0 && phase === 'pre_lock' && heldSec >= maxHoldSec * fadeAtPct) {
     if (pnlPts < -1) {
       return {
