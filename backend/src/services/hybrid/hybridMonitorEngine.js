@@ -147,6 +147,32 @@ function _scalpGates(trade, settings) {
   if (elapsed >= maxHold) {
     return _exit(`Max hold reached ${elapsed}s ≥ ${maxHold}s, P&L ${pnlPts.toFixed(2)}pts`, 'hybrid:scalp_max_hold');
   }
+
+  // 8. CALIBRATED 2026-05-19: no-progress early exit.
+  // Today's live trades sat near zero (P&L between -3 and +1) for 60-80%
+  // of their life and then leaked into a max-hold timeout loss. If the
+  // trade is past 70% of its allocated hold AND the highest unrealized
+  // profit ever seen was less than 30% of target AND we're still flat
+  // or below, the setup is dead — exit now to save rupees vs the
+  // eventual timeout exit. Hard SL still triggers immediately and
+  // trailing SL handles the profitable cases, so this only catches the
+  // slow-leak losers that the timer would otherwise resolve unfavourably.
+  const noProgressDeadline = Math.floor(maxHold * 0.7);
+  if (elapsed >= noProgressDeadline) {
+    const entry = Number(trade.entryPrice) || 0;
+    const peak = Number(trade.maxPriceReached) || entry;
+    const peakPnlPts = peak - entry;
+    const peakAsTargetPct = (peakPnlPts / Math.max(1, targetPts)) * 100;
+    if (peakAsTargetPct < 30 && pnlPts <= 1) {
+      return _exit(
+        `No-progress exit at ${elapsed}s/${maxHold}s: ` +
+        `peak P&L ${peakPnlPts.toFixed(2)}pts (${peakAsTargetPct.toFixed(0)}% of ${targetPts}pt target), ` +
+        `current ${pnlPts.toFixed(2)}pts`,
+        'hybrid:scalp_no_progress'
+      );
+    }
+  }
+
   return null;
 }
 

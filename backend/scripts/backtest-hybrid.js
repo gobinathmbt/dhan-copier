@@ -425,17 +425,32 @@ function simulateTrade(day, decision, entryEpoch) {
   const slPrice     = entryLtp - (decision.sl_points || 15);
   const targetPrice = entryLtp + (decision.target_points || 10);
   const maxHoldSec  = decision.max_hold_seconds || 180;
+  const targetPts   = decision.target_points || 10;
 
   const exitDeadline = entryEpoch + maxHoldSec;
+  // CALIBRATED 2026-05-19: track peak unrealized P&L for the no-progress
+  // early-exit gate (mirrors hybridMonitorEngine._scalpGates step 8).
+  const noProgressDeadline = entryEpoch + Math.floor(maxHoldSec * 0.7);
+  let peakLtp = entryLtp;
   // Walk forward in 30-second steps
   for (let t = entryEpoch + 30; t <= exitDeadline; t += 30) {
     const ltp = getOptionLtpAt(day, strike, side, t);
     if (ltp == null) continue;
+    if (ltp > peakLtp) peakLtp = ltp;
     if (ltp <= slPrice) {
       return _closeTrade('SL', entryLtp, ltp, t - entryEpoch, decision);
     }
     if (ltp >= targetPrice) {
       return _closeTrade('TARGET', entryLtp, ltp, t - entryEpoch, decision);
+    }
+    // No-progress: past 70% of hold, peak < 30% of target, current ≤ 1pt up.
+    if (t >= noProgressDeadline) {
+      const peakPts = peakLtp - entryLtp;
+      const curPts = ltp - entryLtp;
+      const peakPctTarget = (peakPts / Math.max(1, targetPts)) * 100;
+      if (peakPctTarget < 30 && curPts <= 1) {
+        return _closeTrade('NO_PROGRESS', entryLtp, ltp, t - entryEpoch, decision);
+      }
     }
   }
   // Max hold reached -> exit at last available LTP

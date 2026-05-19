@@ -772,6 +772,59 @@ async function decide({
     data: { direction, source: directionSource },
   });
 
+  // ── CALIBRATED 2026-05-19: microstructure contradiction veto ─────────
+  // Today's live session caught us long-PE while the order book showed a
+  // bullish absorption pattern (49–52% bid-heavy, sells absorbing, price
+  // flat) AND spoof risk was elevated. The hybrid score still passed
+  // because tier-2 had decent volume / vwap reads, but the trade leaked
+  // for 200s and timed out. When microstructure clearly says the OTHER
+  // side is being defended, do not enter — the path of least resistance
+  // is against us at the granular level even if the macro frame agrees.
+  //
+  // Veto fires only when ALL of:
+  //   - micro engine is available with a strong reading
+  //   - micro state explicitly contradicts our direction (long-bias state
+  //     while we want to short, or short-bias state while we want long)
+  //   - imbalance magnitude ≥ 30% (clear, not noise)
+  //   - direction was NOT resolved from microstructure itself (which
+  //     would mean the read agrees with us already)
+  if (microRead?.available && !directionSource.startsWith('micro_')) {
+    const microState = microRead.state;
+    const imbAbs = Math.abs(Number(microRead.imbalance) || 0);
+    const longSideStates = new Set([
+      'absorption_long', 'iceberg_support', 'liquidity_pull_up',
+    ]);
+    const shortSideStates = new Set([
+      'absorption_short', 'iceberg_resistance', 'liquidity_pull_down',
+    ]);
+    let contradicts = false;
+    if (direction === 'bearish' && longSideStates.has(microState) && microRead.imbalance > 0.30) {
+      contradicts = true;
+    } else if (direction === 'bullish' && shortSideStates.has(microState) && microRead.imbalance < -0.30) {
+      contradicts = true;
+    }
+    if (contradicts) {
+      hybridLogger.warn({
+        sessionId, event: 'microstructure_veto',
+        message: `microstructure contradicts ${direction}: state=${microState} imb=${microRead.imbalance.toFixed(2)} (need < ±0.30 to allow)`,
+        data: {
+          direction, microState,
+          imbalance: microRead.imbalance,
+          imbalanceVelocity: microRead.imbalanceVelocity,
+          spoofRisk: microRead.spoofRisk,
+          absorption: microRead.absorption,
+          iceberg: microRead.iceberg,
+        },
+      });
+      return _noTrade(
+        `Microstructure veto: ${microState} contradicts ${direction} ` +
+        `(imb=${microRead.imbalance.toFixed(2)}, vel=${microRead.imbalanceVelocity?.toFixed?.(2)})`,
+        { session: sessionPhase, volatilityRegime, marketRegime, liquidity, derivatives, risk,
+          microstructure: microRead, direction, directionSource }
+      );
+    }
+  }
+
   // ── PE-side enhanced filter (calibration: BUY_PE win rate was 38.3%) ──
   // Bearish trades fail more in NIFTY because of bullish drift bias and
   // gamma suppression. CALIBRATED 2026-05-18 cycle 12-14: 470+ zero-trade-day
@@ -1758,7 +1811,30 @@ async function decide({
     : targetOut;
   // Meta-regime stretches/compresses hold time per institutional state
   const baseHold = strategy.maxHoldSec;
-  const maxHoldSeconds = Math.max(60, Math.round(baseHold * (metaRegime?.holdMultiplier || 1)));
+  let maxHoldSeconds = Math.max(60, Math.round(baseHold * (metaRegime?.holdMultiplier || 1)));
+
+  // CALIBRATED 2026-05-19: regime-aware floor for SCALP holds.
+  // Today's live session showed 3 of 4 trades timed out at 200-300s with
+  // P&L hovering around 0 in choppy/midday_chop conditions. The backtest
+  // walks LTP in 30s steps so it gets lucky on the timeout exit; live
+  // ticks are noisier and routinely die in micro-leakage before reaching
+  // the target. Force a minimum 300s hold for SCALPs when regime is
+  // choppy or session is midday_chop, so the trade has more chances to
+  // resolve. Hard SL still triggers an immediate exit, so this only
+  // affects max-hold timeouts.
+  if (strategy.tradeType === 'SCALP') {
+    const isChoppy = marketRegime.regime === 'choppy';
+    const isMiddayChop = sessionPhase.phase === 'midday_chop';
+    if ((isChoppy || isMiddayChop) && maxHoldSeconds < 300) {
+      const orig = maxHoldSeconds;
+      maxHoldSeconds = 300;
+      hybridLogger.info({
+        sessionId, event: 'hold_floor_applied',
+        message: `SCALP hold floored at 300s (was ${orig}s) for ${isChoppy ? 'choppy' : 'midday_chop'}`,
+        data: { original: orig, floored: maxHoldSeconds, regime: marketRegime.regime, phase: sessionPhase.phase },
+      });
+    }
+  }
 
   // Snapshot — saved on the trade for monitor's decay engine
   const hybridSnapshot = {
