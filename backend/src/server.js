@@ -342,6 +342,15 @@ async function start() {
     // every 3 seconds and synthesizes missing 5m/15m candles so the hybrid
     // engine always has full ATR/volume-profile history from session start.
     candleSynthesizer.start();
+    // CALIBRATED 2026-05-19: live-feed integrity guardian — dedupe + synth
+    // missing higher-TF candles. Runs every 60s while market is open.
+    // Independent of scalping session so duplicates from previous server
+    // runs are cleaned up on boot regardless.
+    try {
+      require('./services/liveFeedIntegrity.service').start({ intervalMs: 60_000 });
+    } catch (e) {
+      logger.warn({ err: e.message }, '[server] liveFeedIntegrity start failed');
+    }
     // Start the tick-level UP/DOWN classifier BEFORE we connect, so it sees
     // every tick from the very first packet. Listening is event-driven and
     // adds zero latency to the feed parser.
@@ -387,6 +396,7 @@ process.on('SIGTERM', () => {
   logger.info('SIGTERM received, closing server gracefully');
   hybridLiveFeedService.disconnect();
   try { require('./services/candleSynthesizer.service').stop(); } catch (_) {}
+  try { require('./services/liveFeedIntegrity.service').stop(); } catch (_) {}
   try { require('./services/hybrid/tickDeltaClassifier').instance.stop(); } catch (_) {}
   try { require('./services/hybrid/microstructureEngine').stop(); } catch (_) {}
   try { require('./services/dhanLiveFeedProd.service').instance.disconnect(); } catch (_) {}
@@ -401,6 +411,7 @@ process.on('SIGINT', () => {
   logger.info('SIGINT received, closing server gracefully');
   hybridLiveFeedService.disconnect();
   try { require('./services/candleSynthesizer.service').stop(); } catch (_) {}
+  try { require('./services/liveFeedIntegrity.service').stop(); } catch (_) {}
   try { require('./services/hybrid/tickDeltaClassifier').instance.stop(); } catch (_) {}
   try { require('./services/hybrid/microstructureEngine').stop(); } catch (_) {}
   try { require('./services/dhanLiveFeedProd.service').instance.disconnect(); } catch (_) {}

@@ -6,6 +6,11 @@ const ScalpingSession = require('../models/ScalpingSession');
 const ScalpingTrade = require('../models/ScalpingTrade');
 const aggregator = require('./scalpingDataAggregator.service');
 const { isMarketOpen } = require('./marketHours.service');
+// CALIBRATED 2026-05-19: live-feed integrity guardian — runs every 60s
+// while the session is live, dedupes candle JSONLs and synthesises any
+// missing 5m/15m/30m candles from 1m. Prevents the duplicate-candle and
+// missing-bar issues observed in earlier live sessions.
+const liveFeedIntegrity = require('./liveFeedIntegrity.service');
 const logger = require('../utils/logger');
 const engineLogger = require('./engineLogger.service');
 const jsonEventLogger = require('../utils/jsonEventLogger');
@@ -177,6 +182,16 @@ async function start({ authKey, settings, aiModel }) {
   // Set session ID for JSON logger
   jsonEventLogger.setSessionId(session._id.toString());
 
+  // CALIBRATED 2026-05-19: start the live-feed integrity guardian — runs
+  // an immediate sweep (dedupe + synth missing higher-TF candles) and
+  // then every 60s while the session is live. Solves the duplicate-candle
+  // and missing-5m/15m issues observed in earlier live sessions.
+  try {
+    liveFeedIntegrity.start({ intervalMs: 60_000 });
+  } catch (e) {
+    logger.warn({ err: e.message }, '[engine] liveFeedIntegrity start failed');
+  }
+
   logger.info({ sessionId: session._id }, '[engine] started');
   
   // Log engine start event
@@ -230,6 +245,10 @@ async function stop({ reason = 'Stopped by user' } = {}) {
   state.predictionTimer = null;
   state.monitorTimer = null;
   state.priceUpdateTimer = null;
+
+  // CALIBRATED 2026-05-19: stop the live-feed integrity guardian when
+  // the session ends.
+  try { liveFeedIntegrity.stop(); } catch (_) {}
 
   if (state.session) {
     // Close any open trades at last known price
