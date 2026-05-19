@@ -1283,7 +1283,8 @@ function _vwapBounceScalp(ctx) {
   // CALIBRATED cycle 41 (2026-05-19): bump elite to 5+ confirmations to drop
   // borderline 'elite-by-default' trades. 17 of 20 cycle-38 losses were VBS
   // and most showed 4 confirmations exactly — dropping the long tail.
-  const conviction = confirmations.length >= 5 ? 'elite' :
+  // CALIBRATED cycle 43 (2026-05-19): try 6+ for elite to push WR further.
+  const conviction = confirmations.length >= 6 ? 'elite' :
                      confirmations.length >= 3 ? 'standard' : 'weak';
   return {
     name: 'VWAP_BOUNCE_SCALP',
