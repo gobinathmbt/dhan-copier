@@ -96,14 +96,22 @@ function _scalpGates(trade, settings) {
   const targetPct = (pnlPts / Math.max(1, targetPts)) * 100;
   const slPct     = pnlPts < 0 ? (Math.abs(pnlPts) / Math.max(1, slPts)) * 100 : 0;
 
+  // CALIBRATED 2026-05-19: align live monitor gates with backtest simulator.
+  // The backtest only checks: (a) hard SL, (b) hard target, (c) max hold.
+  // It does NOT check sl_proximity, sustained_loss, or severe_quick_loss.
+  // Live monitor previously had all three extra gates → exited many trades
+  // that would have recovered in backtest. We disable sl_proximity (gate 2)
+  // and sustained_loss (gate 6) outright, and only retain severe_quick_loss
+  // as a true-emergency safety net.
+
   // 1. Hard SL
   if (trade.sl && trade.currentPrice <= trade.sl) {
     return _exit(`SL hit (${trade.currentPrice} ≤ ${trade.sl}) at ${elapsed}s`, 'hybrid:scalp_sl');
   }
-  // 2. SL proximity ≥ 80%
-  if (pnlPts < 0 && slPct >= 80) {
-    return _exit(`Approaching SL: ${pnlPts.toFixed(2)}pts (${slPct.toFixed(1)}% of ${slPts}pt SL)`, 'hybrid:sl_proximity');
-  }
+  // 2. SL proximity ≥ 80% — DISABLED 2026-05-19 (not in backtest)
+  // if (pnlPts < 0 && slPct >= 80) {
+  //   return _exit(`Approaching SL: ${pnlPts.toFixed(2)}pts (${slPct.toFixed(1)}% of ${slPts}pt SL)`, 'hybrid:sl_proximity');
+  // }
   // 3. Target hit
   if (targetPct >= 100) {
     return _exit(`Target hit: ${pnlPts.toFixed(2)}pts (${targetPct.toFixed(1)}%)`, 'hybrid:target_hit');
@@ -113,16 +121,29 @@ function _scalpGates(trade, settings) {
   if (elapsed < minHold) {
     return _hold(`Min hold ${elapsed}s/${minHold}s`, 'hybrid:min_hold');
   }
-  // 5. Severe quick loss in 30..60s
+  // 5. Severe quick loss in 30..60s — KEEP as emergency safety net only.
+  //    A -10pt move in <60s is structural, not noise.
   if (elapsed >= 30 && elapsed < 60 && pnlPts <= -10) {
     return _exit(`Severe quick loss ${pnlPts.toFixed(2)}pts at ${elapsed}s`, 'hybrid:scalp_fast_loss');
   }
-  // 6. Sustained loss after 60s ≥ 60% of SL
-  if (elapsed >= 60 && slPct >= 60) {
-    return _exit(`Sustained loss ${pnlPts.toFixed(2)}pts (${slPct.toFixed(1)}% of SL)`, 'hybrid:scalp_sustained_loss');
-  }
+  // 6. Sustained loss after 60s ≥ 60% of SL — DISABLED 2026-05-19.
+  //    This was forcing exits at -3 to -4pts when SL was capped to 6pts,
+  //    well before the trade had a fair chance to recover. Backtest holds
+  //    until either hard SL or max hold without this gate, and shows 81% WR.
+  // if (elapsed >= 60 && slPct >= 60) {
+  //   return _exit(`Sustained loss ${pnlPts.toFixed(2)}pts (${slPct.toFixed(1)}% of SL)`, 'hybrid:scalp_sustained_loss');
+  // }
   // 7. Max hold time
-  const maxHold = Number(settings?.maxHoldTimeSeconds) || (Number(trade.maxHoldSeconds) || 180);
+  // CALIBRATED 2026-05-19: prefer the trade-specific maxHoldSeconds set by
+  // the entry engine (sourced from strategy.maxHoldSec / playbook.holdProfile)
+  // over the static settings.maxHoldTimeSeconds. Live sessions previously
+  // used 300s for every trade because settings was checked FIRST — but the
+  // backtest sim respects the engine's per-trade hold (180-240s typically),
+  // so live and backtest were exiting at very different times.
+  // Falls back to settings.maxHoldTimeSeconds if the trade doesn't carry one.
+  const maxHold = Number(trade.maxHoldSeconds)
+                || Number(settings?.maxHoldTimeSeconds)
+                || 180;
   if (elapsed >= maxHold) {
     return _exit(`Max hold reached ${elapsed}s ≥ ${maxHold}s, P&L ${pnlPts.toFixed(2)}pts`, 'hybrid:scalp_max_hold');
   }
