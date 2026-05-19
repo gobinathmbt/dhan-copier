@@ -1,17 +1,22 @@
 /**
- * Ultra Scalp Engine (v2 — multi-timeframe, dynamic config)
+ * Ultra Scalp Engine (v3 — asymmetric UT Bot, multi-timeframe)
  * =========================================================
  * Dedicated 5-20 point scalping signal generator that mirrors the user's
  * TradingView "UT Bot Alerts" indicator EXACTLY.
  *
- * v2 IMPROVEMENTS (2026-05-19):
- *   - DYNAMIC config — settings.ultraScalp.{keyValue, atrPeriod, timeframes,
- *     vwapStrict, requireBarColor, minConfirmations} all overrideable
- *   - MULTI-TF — runs UT Bot on 1m + 3m + 5m simultaneously, fires when
- *     ANY timeframe crosses (with appropriate confirmation per TF)
- *   - SOFTER GATES — 5m bar agreement is no longer hard if 1m + VWAP confirm
+ * v3 IMPROVEMENTS (2026-05-19):
+ *   - ASYMMETRIC config — separate BUY-only and SELL-only UT Bot configs
+ *     per TF. NIFTY crashes fast (sensitive ATR=1 catches many sells)
+ *     but rallies slow (smooth ATR=300 only catches strongest buys).
+ *     Default: Key=2/ATR=1 for SELL, Key=2/ATR=300 for BUY (user spec)
+ *   - DUAL UT BOT per TF — two trailing-stop streams run in parallel,
+ *     sell stream filters to sell-only signals, buy stream to buy-only
+ *
+ * v2 INHERITED:
+ *   - DYNAMIC config — settings.ultraScalp.{...} all overrideable
+ *   - MULTI-TF — runs UT Bot on 1m + 3m + 5m simultaneously
+ *   - SOFT GATES — 5m bar agreement is no longer hard if 1m + VWAP confirm
  *   - SECONDARY SIGNALS — also fires on 1m UT Bot cross with stricter gates
- *     for ultra-fast scalps (30-60s holds)
  *
  * Detection rules (matching Pine Script):
  *   1. UT Bot trailing stop computed on each TF's close stream
@@ -23,23 +28,37 @@
  *   - At least 1m candle in direction (the cross bar should be confirming)
  *   - NOT in expansion vol with delta strongly against direction (false break)
  *   - NOT VSA strong opposition
- *
- * The whole point is to catch the EXACT signals the user sees on their chart.
  */
 
 const { calculateUTBot } = require('../algorithms/multiTimeframe.service');
 
-// Default config — matches user's TradingView screenshot (Key=2, ATR=1)
-const ULTRA_UT_BOT_CONFIG_DEFAULT = { keyValue: 2, atrPeriod: 1 };
+// ASYMMETRIC default — user spec 2026-05-19:
+//   SELL stream: Key=2, ATR=1   (sensitive — fast moves trigger)
+//   BUY stream:  Key=2, ATR=300 (smooth — only strongest reversals trigger)
+const SELL_CONFIG_DEFAULT = { keyValue: 2, atrPeriod: 1   };
+const BUY_CONFIG_DEFAULT  = { keyValue: 2, atrPeriod: 300 };
 
-// Per-timeframe defaults — different scalp profiles
+// Per-timeframe default profiles. `buyConfig` and `sellConfig` apply the
+// asymmetric setup; setting them to the same values is symmetric (legacy).
 const TF_PROFILES_DEFAULT = {
-  '1m':  { keyValue: 1, atrPeriod: 5,  maxHoldSec:  90, slPtsMin: 4, slPtsMax: 8,  targetMin: 5,  targetMax: 12, sizingFactor: 0.5,
-           description: 'Ultra-fast intraday scalp — 1 minute UT Bot cross, tight stops' },
-  '3m':  { keyValue: 1, atrPeriod: 3,  maxHoldSec: 120, slPtsMin: 5, slPtsMax: 10, targetMin: 6,  targetMax: 15, sizingFactor: 0.6,
-           description: 'Mid-frequency scalp — 3 minute UT Bot, balanced edge' },
-  '5m':  { keyValue: 2, atrPeriod: 1,  maxHoldSec: 150, slPtsMin: 6, slPtsMax: 12, targetMin: 8,  targetMax: 20, sizingFactor: 0.7,
-           description: 'Primary 5m UT Bot scalp — matches user TradingView setup exactly' },
+  '1m':  {
+    buyConfig:  { keyValue: 2, atrPeriod: 300 },
+    sellConfig: { keyValue: 2, atrPeriod: 1   },
+    maxHoldSec:  90, slPtsMin: 4, slPtsMax: 8,  targetMin: 5,  targetMax: 12, sizingFactor: 0.5,
+    description: 'Ultra-fast scalp — asymmetric UT Bot (sell sensitive, buy smooth)',
+  },
+  '3m':  {
+    buyConfig:  { keyValue: 2, atrPeriod: 300 },
+    sellConfig: { keyValue: 2, atrPeriod: 1   },
+    maxHoldSec: 120, slPtsMin: 5, slPtsMax: 10, targetMin: 6,  targetMax: 15, sizingFactor: 0.6,
+    description: '3m UT Bot — asymmetric (sell sensitive, buy smooth)',
+  },
+  '5m':  {
+    buyConfig:  { keyValue: 2, atrPeriod: 300 },
+    sellConfig: { keyValue: 2, atrPeriod: 1   },
+    maxHoldSec: 150, slPtsMin: 6, slPtsMax: 12, targetMin: 8,  targetMax: 20, sizingFactor: 0.7,
+    description: 'Primary 5m UT Bot scalp — matches user TradingView setup',
+  },
 };
 
 function _safe(n) { const x = Number(n); return Number.isFinite(x) ? x : 0; }
@@ -136,6 +155,65 @@ function _utBotRead(candles, config) {
 }
 
 /**
+ * ASYMMETRIC dual-config UT Bot read. Runs the engine twice per TF —
+ * once with the BUY config and once with the SELL config — then selects
+ * whichever stream actually crossed within the last bar in its allowed
+ * direction. Returns the chosen read plus both raw streams for telemetry.
+ *
+ * Rationale: NIFTY trends asymmetrically. The user's setup uses a fast
+ * sensitive ATR for SELL signals (catches the quick crashes) and a smooth
+ * 300-period ATR for BUY signals (only triggers on the strongest reversals).
+ * A single config can't do both.
+ *
+ * If a stream's ATR period exceeds the available candle count by too much
+ * (warmup unmet), that stream is silently disabled rather than producing
+ * misleading early signals.
+ */
+function _dualUtBotRead(candles, profile) {
+  const buyCfg  = profile.buyConfig  || profile;
+  const sellCfg = profile.sellConfig || profile;
+  const utbCandles = _toUtBotCandles(candles);
+  const buyWarm  = utbCandles.length >= (buyCfg.atrPeriod  + 5);
+  const sellWarm = utbCandles.length >= (sellCfg.atrPeriod + 5);
+  const buyRead  = buyWarm  ? _utBotRead(candles, buyCfg)  : { signalNow: 'none', signalBar: 'none', trend: 'neutral', trailingStop: null, barsSinceFlip: null, warmupShort: true };
+  const sellRead = sellWarm ? _utBotRead(candles, sellCfg) : { signalNow: 'none', signalBar: 'none', trend: 'neutral', trailingStop: null, barsSinceFlip: null, warmupShort: true };
+
+  // Filter — buy stream only emits buys, sell stream only emits sells.
+  const buySignal  = (buyWarm  && buyRead.signalBar  === 'buy')  ? 'buy'  : 'none';
+  const sellSignal = (sellWarm && sellRead.signalBar === 'sell') ? 'sell' : 'none';
+
+  // Pick the freshest cross. If both fired, prefer the one whose bars-since-
+  // flip is smaller. Tie → prefer sell (the sensitive stream is intentionally
+  // more aggressive, so when both fire we honour the rapid-move side).
+  let chosenSignal = 'none';
+  let chosenRead   = buyRead;
+  let chosenStream = 'buy';
+  if (buySignal !== 'none' && sellSignal !== 'none') {
+    const bAge = buyRead.barsSinceFlip ?? Infinity;
+    const sAge = sellRead.barsSinceFlip ?? Infinity;
+    if (sAge <= bAge) { chosenSignal = 'sell'; chosenRead = sellRead; chosenStream = 'sell'; }
+    else              { chosenSignal = 'buy';  chosenRead = buyRead;  chosenStream = 'buy';  }
+  } else if (buySignal !== 'none') {
+    chosenSignal = 'buy';  chosenRead = buyRead;  chosenStream = 'buy';
+  } else if (sellSignal !== 'none') {
+    chosenSignal = 'sell'; chosenRead = sellRead; chosenStream = 'sell';
+  }
+
+  return {
+    signalNow:    chosenRead.signalNow,
+    signalBar:    chosenSignal,
+    trend:        chosenRead.trend,
+    trailingStop: chosenRead.trailingStop,
+    barsSinceFlip: chosenRead.barsSinceFlip,
+    chosenStream,                         // 'buy' | 'sell'
+    streams: {
+      buy:  { config: buyCfg,  ...buyRead  },
+      sell: { config: sellCfg, ...sellRead },
+    },
+  };
+}
+
+/**
  * Decide whether to scalp on this cycle. Tries 5m → 3m → 1m UT Bot and
  * picks the strongest signal. Fires when any TF crosses with adequate
  * confirmation.
@@ -154,10 +232,27 @@ function decide({
 } = {}) {
   // Resolve user config — settings.ultraScalp can override per-TF and global
   const userCfg = settings?.ultraScalp || {};
+  // Each TF profile MUST have buyConfig + sellConfig (asymmetric default).
+  // Legacy single-config callers can still pass `keyValue` + `atrPeriod`
+  // at the top level; if buy/sellConfig are not provided, fall back to the
+  // legacy single config for both (i.e. symmetric).
+  function _resolveProfile(tfKey) {
+    const dflt = TF_PROFILES_DEFAULT[tfKey];
+    const userTf = userCfg[`tf${tfKey.replace('m', 'm')}`] || userCfg[tfKey] || {};
+    const profile = { ...dflt, ...userTf };
+    // If user supplied buy/sellConfig, those take precedence over global
+    profile.buyConfig  = profile.buyConfig  || (userTf.keyValue != null && userTf.atrPeriod != null
+      ? { keyValue: userTf.keyValue, atrPeriod: userTf.atrPeriod }
+      : dflt.buyConfig);
+    profile.sellConfig = profile.sellConfig || (userTf.keyValue != null && userTf.atrPeriod != null
+      ? { keyValue: userTf.keyValue, atrPeriod: userTf.atrPeriod }
+      : dflt.sellConfig);
+    return profile;
+  }
   const tfProfiles = {
-    '1m': { ...TF_PROFILES_DEFAULT['1m'], ...(userCfg.tf1m || {}) },
-    '3m': { ...TF_PROFILES_DEFAULT['3m'], ...(userCfg.tf3m || {}) },
-    '5m': { ...TF_PROFILES_DEFAULT['5m'], ...(userCfg.tf5m || {}) },
+    '1m': _resolveProfile('1m'),
+    '3m': _resolveProfile('3m'),
+    '5m': _resolveProfile('5m'),
   };
   // Allow disabling specific timeframes (defaults: 1m + 3m + 5m all ON
   // for maximum scalp opportunities — user spec 2026-05-19)
@@ -170,16 +265,25 @@ function decide({
   const requireBarColor = userCfg.requireBarColor !== false;  // default ON
   const allowStaleBar = userCfg.allowStaleBar === true;       // default OFF
 
-  // Run UT Bot on enabled TFs
+  // Run dual UT Bot (asymmetric BUY+SELL configs) on enabled TFs.
+  // We require enough candles for the SHORTER ATR stream to warm up; the
+  // longer stream may stay cold (legitimate behaviour — no signal until
+  // enough history accrues). Inside _dualUtBotRead each stream is
+  // independently warm-checked.
+  function _minCandles(profile) {
+    const buy  = profile.buyConfig?.atrPeriod  ?? 1;
+    const sell = profile.sellConfig?.atrPeriod ?? 1;
+    return Math.min(buy, sell) + 5;
+  }
   const tfReads = {};
-  if (enable['5m'] && candles5m && candles5m.length >= tfProfiles['5m'].atrPeriod + 5) {
-    tfReads['5m'] = { read: _utBotRead(candles5m, tfProfiles['5m']), profile: tfProfiles['5m'] };
+  if (enable['5m'] && candles5m && candles5m.length >= _minCandles(tfProfiles['5m'])) {
+    tfReads['5m'] = { read: _dualUtBotRead(candles5m, tfProfiles['5m']), profile: tfProfiles['5m'] };
   }
-  if (enable['3m'] && candles3m && candles3m.length >= tfProfiles['3m'].atrPeriod + 5) {
-    tfReads['3m'] = { read: _utBotRead(candles3m, tfProfiles['3m']), profile: tfProfiles['3m'] };
+  if (enable['3m'] && candles3m && candles3m.length >= _minCandles(tfProfiles['3m'])) {
+    tfReads['3m'] = { read: _dualUtBotRead(candles3m, tfProfiles['3m']), profile: tfProfiles['3m'] };
   }
-  if (enable['1m'] && candles1m && candles1m.length >= tfProfiles['1m'].atrPeriod + 5) {
-    tfReads['1m'] = { read: _utBotRead(candles1m, tfProfiles['1m']), profile: tfProfiles['1m'] };
+  if (enable['1m'] && candles1m && candles1m.length >= _minCandles(tfProfiles['1m'])) {
+    tfReads['1m'] = { read: _dualUtBotRead(candles1m, tfProfiles['1m']), profile: tfProfiles['1m'] };
   }
 
   // Pick the best signal across enabled TFs (priority: 5m > 3m > 1m)
@@ -202,8 +306,10 @@ function decide({
 
   const direction = chosen.signal === 'buy' ? 'bullish' : 'bearish';
   const signal    = chosen.signal === 'buy' ? 'BUY'     : 'SELL';
+  // Pick the actual config used for this signal (asymmetric streams)
+  const usedCfg = chosen.signal === 'buy' ? chosen.profile.buyConfig : chosen.profile.sellConfig;
   const reasons = [
-    `UT Bot ${chosen.tf} ${chosen.signal.toUpperCase()} (Key=${chosen.profile.keyValue} ATR=${chosen.profile.atrPeriod})`,
+    `UT Bot ${chosen.tf} ${chosen.signal.toUpperCase()} (Key=${usedCfg.keyValue} ATR=${usedCfg.atrPeriod})`,
   ];
   const blockers = [];
   const pillars = {
@@ -295,8 +401,19 @@ function decide({
   if (pillars.vwap === 'aligned')   confidence += 10;
   if (pillars.last1mAgrees)         confidence += 8;
   if (pillars.last5mAgrees)         confidence += 6;
-  // MTF agreement bonus — when 5m AND 3m both signal the same way
-  if (tfReads['5m']?.read?.trend === direction && tfReads['3m']?.read?.trend === direction) {
+  // MTF agreement bonus — when 5m AND 3m both have a UT Bot trend in
+  // our direction (using whichever stream — buy or sell — that matches).
+  function _streamTrendMatches(read, dir) {
+    if (!read) return false;
+    if (read.trend === dir) return true;
+    // Asymmetric streams may disagree; check the side that matches our
+    // direction explicitly.
+    if (dir === 'bullish' && read.streams?.buy?.trend === 'bullish')  return true;
+    if (dir === 'bearish' && read.streams?.sell?.trend === 'bearish') return true;
+    return false;
+  }
+  if (_streamTrendMatches(tfReads['5m']?.read, direction)
+      && _streamTrendMatches(tfReads['3m']?.read, direction)) {
     confidence += 8; reasons.push('5m+3m UT Bot trend aligned');
   }
   // Delta in direction
@@ -331,6 +448,7 @@ function decide({
 
 module.exports = {
   decide,
-  ULTRA_UT_BOT_CONFIG: ULTRA_UT_BOT_CONFIG_DEFAULT,
+  SELL_CONFIG_DEFAULT,
+  BUY_CONFIG_DEFAULT,
   TF_PROFILES_DEFAULT,
 };
