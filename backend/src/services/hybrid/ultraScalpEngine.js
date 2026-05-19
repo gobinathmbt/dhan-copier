@@ -356,6 +356,7 @@ function decide({
   volumeAnalysis = null,
   volatilityRegime = null,
   marketRegime = null,
+  futuresData = null,
   spotPrice = null,
   atr = null,
   settings = {},
@@ -760,22 +761,34 @@ function decide({
 
   // Volatility / orderflow safety
   const dPct = _safe(volumeAnalysis?.delta?.cvdPctLong);
-  // CALIBRATED v6.12: STRICT delta-direction gate. Delta must MATERIALLY
-  // agree with our direction (not just neutral). This eliminates the
-  // PROACTIVE_FADE bucket entries where price went against signal.
+  // CALIBRATED v6.25: Asymmetric delta gate. NIFTY's bullish drift makes
+  // bearish entries more vulnerable — PE side requires stronger delta
+  // confirmation than CE.
   const requireDeltaAlign = userCfg.requireDeltaAlign !== false;
-  const deltaAlignThreshold = userCfg.deltaAlignThreshold ?? 8;     // % bias minimum
+  const ceMinDelta = userCfg.ceMinDelta ??  6;
+  const peMinDelta = userCfg.peMinDelta ?? 12;
   if (requireDeltaAlign) {
-    const deltaAgrees = (direction === 'bullish' && dPct >=  deltaAlignThreshold)
-                     || (direction === 'bearish' && dPct <= -deltaAlignThreshold);
+    const need = direction === 'bullish' ? ceMinDelta : peMinDelta;
+    const deltaAgrees = (direction === 'bullish' && dPct >=  need)
+                     || (direction === 'bearish' && dPct <= -need);
     if (!deltaAgrees) {
-      blockers.push(`delta ${dPct.toFixed(1)}% not aligned (need ≥ ±${deltaAlignThreshold}% in ${direction})`);
+      blockers.push(`delta ${dPct.toFixed(1)}% not aligned (need ≥ ±${need}% in ${direction})`);
     }
   }
   if (regime === 'expansion') {
     const deltaAgainst2 = (direction === 'bullish' && dPct < -10)
                        || (direction === 'bearish' && dPct >  10);
     if (deltaAgainst2) blockers.push(`expansion + delta ${dPct}% strongly against`);
+  }
+  // FUTURES ALIGNMENT (NEW v6.28) — futures lead spot by 2-5pts; require
+  // futures direction to NOT be against our trade direction.
+  const requireFuturesAlign = userCfg.requireFuturesAlign !== false;
+  if (requireFuturesAlign && futuresData) {
+    const fDir = futuresData.direction;
+    if ((direction === 'bullish' && fDir === 'bearish')
+     || (direction === 'bearish' && fDir === 'bullish')) {
+      blockers.push(`futures ${fDir} against ${direction} (5m change ${futuresData.change_5m})`);
+    }
   }
   const vsa = volumeAnalysis?.vsa;
   if (vsa?.bias && vsa.bias !== 'neutral' && vsa.bias !== direction

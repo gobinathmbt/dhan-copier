@@ -110,9 +110,9 @@ const ROUND_TRIP_BROKERAGE = 60;
 const SETTINGS = {
   cooldownSec: Number(userOpts.cooldown) || 180,         // 3 min between trades
   maxTradesPerDay: Number(userOpts.maxTradesPerDay) || 12,
-  cycleStepSec: Number(userOpts.cycleStep) || 60,        // walk every 60s
+  cycleStepSec: Number(userOpts.cycleStep) || 30,        // walk every 30s — catch all fresh flips
   windowStartHhmm: Number(userOpts.windowStart) || 920,
-  windowEndHhmm:   Number(userOpts.windowEnd)   || 1500,
+  windowEndHhmm:   Number(userOpts.windowEnd)   || 1245,        // CALIBRATED v6.29: cut afternoon — chop kills WR
   ultraScalp: {
     // NOTE: with v6 regime adaptation, the engine derives minScore /
     // flipLimit / slope / barsSinceFlip / atrExpansion from the live
@@ -254,6 +254,21 @@ function buildContext(day, cycleEpoch) {
     bias: tailUps > tailDowns ? 'bullish' : tailDowns > tailUps ? 'bearish' : 'neutral',
   };
 
+  // Futures direction — derived from 5m futures candles. NIFTY futures lead
+  // spot by 2-5pts; if futures direction agrees with our trade direction,
+  // it's a much stronger setup.
+  const f5m = (day.futures5m || []).filter(c => c.t <= cycleEpoch);
+  let futuresDirection = 'neutral';
+  let futuresChange5m = 0;
+  if (f5m.length >= 6) {
+    const lastFut = f5m[f5m.length - 1];
+    const prevFut = f5m[f5m.length - 6];     // 25min ago
+    futuresChange5m = lastFut.c - prevFut.c;
+    futuresDirection = futuresChange5m > 5 ? 'bullish'
+                     : futuresChange5m < -5 ? 'bearish'
+                     : 'neutral';
+  }
+
   return {
     candles1m: c1m,
     candles3m: _build3mFromOneMin(c1m),
@@ -264,6 +279,7 @@ function buildContext(day, cycleEpoch) {
     volumeAnalysis,
     volatilityRegime,
     marketRegime,
+    futuresData: { direction: futuresDirection, change_5m: futuresChange5m },
     optionChain: oc,
   };
 }
@@ -426,11 +442,12 @@ async function backtestDay(dayLabel) {
   const candles1m  = readJsonl(path.join(folder, 'candles-1m.jsonl')).map(normCandle);
   const candles5m  = readJsonl(path.join(folder, 'candles-5m.jsonl')).map(normCandle);
   const candles15m = readJsonl(path.join(folder, 'candles-15m.jsonl')).map(normCandle);
+  const futures5m  = readJsonl(path.join(folder, 'futures-5m.jsonl')).map(normCandle);
   const optionChain = readJsonl(path.join(folder, 'option-chain.jsonl'));
   if (!candles5m.length || !optionChain.length) {
     return { dayLabel, skipped: true, reason: 'insufficient data' };
   }
-  const day = { dayLabel, meta, candles1m, candles5m, candles15m, optionChain };
+  const day = { dayLabel, meta, candles1m, candles5m, candles15m, futures5m, optionChain };
 
   // Build cycles every cycleStepSec from windowStart to windowEnd
   const firstEpoch = candles1m[0]?.t || candles5m[0].t;
@@ -465,6 +482,7 @@ async function backtestDay(dayLabel) {
       volumeAnalysis: ctx.volumeAnalysis,
       volatilityRegime: ctx.volatilityRegime,
       marketRegime: ctx.marketRegime,
+      futuresData: ctx.futuresData,
       spotPrice: ctx.spotPrice,
       atr: { atr_5m: ctx.volatilityRegime.atr5m },
       settings: { ultraScalp: SETTINGS.ultraScalp },

@@ -38,7 +38,8 @@ const TIER_PROFILES = {
     deltaMin: 0.42, deltaMax: 0.58,
     deltaHardMax: 0.65,
     minPremium: 25,
-    maxPremium: 250,                      // CALIBRATED v6.5: tighter — option elasticity drops above ~250
+    maxPremium: 250,
+    maxPremiumPe: 180,                    // CALIBRATED v6.25: PE side stricter — high-premium PE under bullish drift takes huge SL hits
     moneynessBonus: { OTM: 16, ATM: 10, ITM: 0 },
     distMaxFromAtm: 100,
   },
@@ -47,6 +48,7 @@ const TIER_PROFILES = {
     deltaHardMax: 0.60,
     minPremium: 25,
     maxPremium: 180,
+    maxPremiumPe: 140,
     moneynessBonus: { OTM: 8, ATM: 14, ITM: 0 },
     distMaxFromAtm: 100,
   },
@@ -55,6 +57,7 @@ const TIER_PROFILES = {
     deltaHardMax: 0.55,
     minPremium: 30,
     maxPremium: 120,
+    maxPremiumPe: 100,
     moneynessBonus: { OTM: 2, ATM: 12, ITM: -10 },
     distMaxFromAtm: 50,
   },
@@ -142,14 +145,18 @@ function select({
       const reasons = [];
       let score = 50;
 
+      // Tier-aware premium cap (PE stricter)
+      const isPe = direction !== 'bullish';
+      const effectiveMax = (isPe && Number.isFinite(profile.maxPremiumPe))
+        ? profile.maxPremiumPe : profile.maxPremium;
       // Hard premium gates
       if (ltp < profile.minPremium) {
         score = 0;
         reasons.push(`ltp ${ltp} < min ${profile.minPremium}`);
       }
-      if (ltp > profile.maxPremium) {
+      if (ltp > effectiveMax) {
         score = Math.min(score, 5);
-        reasons.push(`ltp ${ltp} > max ${profile.maxPremium} (premium cap)`);
+        reasons.push(`ltp ${ltp} > ${isPe ? 'PE' : 'CE'} max ${effectiveMax} (premium cap)`);
       }
       if (oi < 1000) {
         score = Math.min(score, 10);
