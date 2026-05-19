@@ -554,6 +554,69 @@ async function decide({
     });
   }
 
+  // ── CALIBRATED 2026-05-19: ULTRA-SCALP PRIORITY TRACK ──────────────────
+  // Run the UT Bot scalper EARLY — before direction resolution — so that
+  // when the chart-level UT Bot fires a clean cross with VWAP + 1m bar
+  // agreement, we anchor `direction` to it directly. This is the simple
+  // indicator the user trusts on TradingView; it should NOT be gated
+  // behind a multi-pillar institutional confidence engine.
+  //
+  // The rest of the pipeline (microstructure veto, playbook, scoring,
+  // sizing, strike selection) still runs and can still block — but the
+  // direction is now fixed by UT Bot, so we stop missing the obvious
+  // chart-level scalps.
+  //
+  // If this track does not fire, direction resolution proceeds as before
+  // and the LATER fallback branch (after playbook eval) is kept as a
+  // belt-and-braces safety net.
+  let ultraScalpEarly = null;
+  if (settings?.disableUltraScalp !== true) {
+    const _build3mEarly = (c1m) => {
+      if (!Array.isArray(c1m) || c1m.length < 3) return [];
+      const out = [];
+      for (let i = 0; i < c1m.length; i += 3) {
+        const slice = c1m.slice(i, i + 3);
+        if (slice.length < 1) continue;
+        const o = slice[0].o ?? slice[0].open;
+        const cl = slice[slice.length - 1].c ?? slice[slice.length - 1].close;
+        let h = -Infinity, l = Infinity, v = 0;
+        for (const b of slice) {
+          const bh = b.h ?? b.high; const bl = b.l ?? b.low; const bv = b.v ?? b.volume ?? 0;
+          if (Number.isFinite(bh) && bh > h) h = bh;
+          if (Number.isFinite(bl) && bl < l) l = bl;
+          v += bv;
+        }
+        out.push({ o, h, l, c: cl, v, t: slice[0].t });
+      }
+      return out;
+    };
+    try {
+      ultraScalpEarly = ultraScalpEngine.decide({
+        candles5m,
+        candles3m: _build3mEarly(candles1m),
+        candles1m,
+        vwap: payload?.vwap_analysis,
+        volumeAnalysis,
+        volatilityRegime,
+        sessionPhase,
+        spotPrice,
+        atr: { atr_5m: volatilityRegime?.atr5m },
+        settings,
+      });
+      hybridLogger.info({
+        sessionId, event: 'ultra_scalp_priority',
+        message: ultraScalpEarly.fired
+          ? `[PRIORITY] ${ultraScalpEarly.signal} ${ultraScalpEarly.direction} via ${ultraScalpEarly.timeframe} confidence=${ultraScalpEarly.confidence} ${ultraScalpEarly.reasoning}`
+          : `not fired: ${ultraScalpEarly.reasoning}`,
+        data: ultraScalpEarly,
+      });
+    } catch (e) {
+      hybridLogger.warn({ sessionId, event: 'ultra_scalp_priority_error',
+        message: e.message, data: { err: e.message } });
+      ultraScalpEarly = null;
+    }
+  }
+
   // ── Pipeline step 7c: OI analytics (velocity, accel, migration, absorption) ──
   // Stateful — keeps the previous N snapshots per session so the next call
   // computes Δ velocity & acceleration. Direction is decided below; we run
@@ -683,6 +746,18 @@ async function decide({
   // in the common "balanced derivatives" market state.
   let direction = derivatives.overallBias;
   let directionSource = 'derivatives';
+
+  // CALIBRATED 2026-05-19: ultra-scalp priority short-circuit.
+  // If the UT Bot scalper fired with high confidence (≥70) and clean
+  // confirmations, anchor direction to it directly. This lets the simple
+  // chart-level signal lead — derivatives, regime, OI, futures-lead are
+  // still computed and STILL apply downstream (microstructure veto,
+  // playbook, scoring) but they no longer need to AGREE for the trade
+  // to happen.
+  if (ultraScalpEarly?.fired && ultraScalpEarly.confidence >= 70) {
+    direction = ultraScalpEarly.direction;
+    directionSource = `ultra_scalp_${ultraScalpEarly.timeframe}`;
+  }
   if (direction === 'neutral' && marketRegime.bias !== 'neutral') {
     direction = marketRegime.bias;
     directionSource = 'marketRegime';
@@ -1205,46 +1280,54 @@ async function decide({
     if (Number.isFinite(playbook.bestPlaybook.minScoreOverride)) {
       strategy.minScore = Math.min(strategy.minScore, playbook.bestPlaybook.minScoreOverride);
     }
-  } else if (!entryType.bestType || entryType.bestType === 'GENERIC_SCALP') {
-    // CALIBRATED 2026-05-19: before declaring NO_TRADE, run the dedicated
-    // ultra-aggressive scalp engine. This mirrors the user's TradingView
-    // UT Bot indicator (Key=2, ATR=1) and produces 5-20pt scalp entries
-    // on the EXACT bar the chart shows the BUY/SELL label. Designed to
-    // catch the obvious chart-level scalps the institutional playbook
-    // layer over-filters away.
-    // Build 3m candles from 1m for the multi-TF UT Bot scalper.
-    const _build3m = (c1m) => {
-      if (!Array.isArray(c1m) || c1m.length < 3) return [];
-      const out = [];
-      for (let i = 0; i < c1m.length; i += 3) {
-        const slice = c1m.slice(i, i + 3);
-        if (slice.length < 1) continue;
-        const o = slice[0].o ?? slice[0].open;
-        const c = slice[slice.length - 1].c ?? slice[slice.length - 1].close;
-        let h = -Infinity, l = Infinity, v = 0;
-        for (const b of slice) {
-          const bh = b.h ?? b.high; const bl = b.l ?? b.low; const bv = b.v ?? b.volume ?? 0;
-          if (Number.isFinite(bh) && bh > h) h = bh;
-          if (Number.isFinite(bl) && bl < l) l = bl;
-          v += bv;
+  } else {
+    // CALIBRATED 2026-05-19: ultra-scalp fallback / direction-anchor.
+    // Three cases enter this branch:
+    //   (a) No playbook AND no entry type (or GENERIC_SCALP)
+    //   (b) Direction was anchored by the ultra-scalp PRIORITY track
+    //       above, but no institutional playbook qualified for it
+    //   (c) Entry type exists but no playbook fired
+    //
+    // In all cases, if the ultra-scalp engine has a clean signal that
+    // matches our direction, use it directly. The institutional pipeline
+    // would otherwise reject the cycle even though the chart-level signal
+    // is obvious.
+    let ultra = ultraScalpEarly;
+    if (!ultra) {
+      // PRIORITY track was disabled or errored — re-run the engine here so
+      // the fallback path still has a chance.
+      const _build3m = (c1m) => {
+        if (!Array.isArray(c1m) || c1m.length < 3) return [];
+        const out = [];
+        for (let i = 0; i < c1m.length; i += 3) {
+          const slice = c1m.slice(i, i + 3);
+          if (slice.length < 1) continue;
+          const o = slice[0].o ?? slice[0].open;
+          const c = slice[slice.length - 1].c ?? slice[slice.length - 1].close;
+          let h = -Infinity, l = Infinity, v = 0;
+          for (const b of slice) {
+            const bh = b.h ?? b.high; const bl = b.l ?? b.low; const bv = b.v ?? b.volume ?? 0;
+            if (Number.isFinite(bh) && bh > h) h = bh;
+            if (Number.isFinite(bl) && bl < l) l = bl;
+            v += bv;
+          }
+          out.push({ o, h, l, c, v, t: slice[0].t });
         }
-        out.push({ o, h, l, c, v, t: slice[0].t });
-      }
-      return out;
-    };
-    const candles3m = _build3m(candles1m);
-    const ultra = ultraScalpEngine.decide({
-      candles5m,
-      candles3m,
-      candles1m,
-      vwap: payload?.vwap_analysis,
-      volumeAnalysis,
-      volatilityRegime,
-      sessionPhase,
-      spotPrice,
-      atr: { atr_5m: volatilityRegime?.atr5m },
-      settings,
-    });
+        return out;
+      };
+      ultra = ultraScalpEngine.decide({
+        candles5m,
+        candles3m: _build3m(candles1m),
+        candles1m,
+        vwap: payload?.vwap_analysis,
+        volumeAnalysis,
+        volatilityRegime,
+        sessionPhase,
+        spotPrice,
+        atr: { atr_5m: volatilityRegime?.atr5m },
+        settings,
+      });
+    }
     hybridLogger.info({
       sessionId, event: 'ultra_scalp',
       message: ultra.fired
@@ -1277,9 +1360,8 @@ async function decide({
       // Lower the strategy minScore for ultra-scalp — the bar is the
       // UT Bot cross, not the 12-pillar institutional score.
       strategy.minScore = Math.min(strategy.minScore, 55);
-    } else {
-      // CALIBRATED: no playbook AND no legacy entry-type AND no ultra-scalp
-      // → don't trade. (Generic scalp fallback was the lowest-edge bucket.)
+    } else if (!entryType.bestType || entryType.bestType === 'GENERIC_SCALP') {
+      // No playbook AND no legacy entry-type AND no ultra-scalp → no trade.
       return _noTrade(
         `No playbook, entry type, or ultra-scalp signal for ${metaRegime.state} ` +
         `(${playbook.allPlaybooks.filter(p => p.valid).length} playbooks valid, ` +
@@ -1288,6 +1370,7 @@ async function decide({
         { metaRegime, playbook, entryType, ultraScalp: ultra }
       );
     }
+    // else: no playbook AND no ultra, but legacy entry-type exists — fall through and proceed with that
   }
   // else: no playbook matched but legacy entry-type did — proceed with that
   // Stash playbook on entryType so downstream snapshot carries it
