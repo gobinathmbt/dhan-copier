@@ -1159,8 +1159,30 @@ async function decide({
     // on the EXACT bar the chart shows the BUY/SELL label. Designed to
     // catch the obvious chart-level scalps the institutional playbook
     // layer over-filters away.
+    // Build 3m candles from 1m for the multi-TF UT Bot scalper.
+    const _build3m = (c1m) => {
+      if (!Array.isArray(c1m) || c1m.length < 3) return [];
+      const out = [];
+      for (let i = 0; i < c1m.length; i += 3) {
+        const slice = c1m.slice(i, i + 3);
+        if (slice.length < 1) continue;
+        const o = slice[0].o ?? slice[0].open;
+        const c = slice[slice.length - 1].c ?? slice[slice.length - 1].close;
+        let h = -Infinity, l = Infinity, v = 0;
+        for (const b of slice) {
+          const bh = b.h ?? b.high; const bl = b.l ?? b.low; const bv = b.v ?? b.volume ?? 0;
+          if (Number.isFinite(bh) && bh > h) h = bh;
+          if (Number.isFinite(bl) && bl < l) l = bl;
+          v += bv;
+        }
+        out.push({ o, h, l, c, v, t: slice[0].t });
+      }
+      return out;
+    };
+    const candles3m = _build3m(candles1m);
     const ultra = ultraScalpEngine.decide({
       candles5m,
+      candles3m,
       candles1m,
       vwap: payload?.vwap_analysis,
       volumeAnalysis,

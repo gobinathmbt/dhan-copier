@@ -4264,6 +4264,360 @@ function _vahValFadeScalp(ctx) {
   };
 }
 
+// ─── PLAYBOOK 40: RSI_DIVERGENCE_SCALP ─────────────────────────────────────
+// One of the highest-WR scalp setups: classical RSI bullish/bearish
+// divergence on the 5m timeframe. When price makes a new low but RSI
+// makes a higher low (or new high but RSI lower high), the move is losing
+// momentum and the next 5-15pt move is typically the reversion.
+//
+// CALIBRATION 2026-05-19: chart-trader staple. Common setup on NIFTY 5m
+// during midday/quiet sessions where momentum oscillators identify
+// exhaustion that pure orderflow doesn't catch.
+//
+// Detection:
+//   1. Last 10 5m candles
+//   2. For BUY: latest low < earlier low BUT latest RSI > earlier RSI
+//      For SELL: latest high > earlier high BUT latest RSI < earlier RSI
+//   3. RSI must be in oversold (<35) or overbought (>65) zone for the
+//      divergence to be high-quality
+//   4. Direction confirms with VWAP (light) and last 5m bar in direction
+//   5. Block on expansion + delta strongly with the trend
+function _rsiDivergenceScalp(ctx) {
+  const reasons = [];
+  let score = 0;
+  const required = [];
+  const confirmations = [];
+
+  const c5 = ctx.candles5m || [];
+  if (c5.length < 16) {
+    required.push(`insufficient 5m candles (${c5.length}/16)`);
+  }
+
+  // Compute RSI(14) on the close series
+  const _rsi = (closes, period = 14) => {
+    if (closes.length <= period) return [];
+    let gain = 0, loss = 0;
+    for (let i = 1; i <= period; i++) {
+      const d = closes[i] - closes[i - 1];
+      if (d > 0) gain += d; else loss -= d;
+    }
+    let avgGain = gain / period;
+    let avgLoss = loss / period;
+    const out = [];
+    for (let i = period + 1; i < closes.length; i++) {
+      const d = closes[i] - closes[i - 1];
+      const g = d > 0 ? d : 0;
+      const l = d < 0 ? -d : 0;
+      avgGain = (avgGain * (period - 1) + g) / period;
+      avgLoss = (avgLoss * (period - 1) + l) / period;
+      const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+      out.push({ idx: i, rsi: 100 - 100 / (1 + rs) });
+    }
+    return out;
+  };
+
+  const closes = c5.map(b => b.c ?? b.close);
+  const lows   = c5.map(b => b.l ?? b.low);
+  const highs  = c5.map(b => b.h ?? b.high);
+  const rsiSeq = _rsi(closes, 14);
+  if (rsiSeq.length < 6) {
+    required.push('RSI series too short');
+  }
+
+  // Look in last 10 bars for divergence
+  let divDir = null;     // 'bullish' or 'bearish'
+  let lastRsi = null;
+  if (rsiSeq.length >= 6) {
+    lastRsi = rsiSeq[rsiSeq.length - 1].rsi;
+    const recent = rsiSeq.slice(-10);
+    // Find lowest low and lowest RSI within window
+    let minLowIdx = recent[0].idx, minLow = lows[minLowIdx];
+    let prevMinLowIdx = null, prevMinLow = Infinity;
+    for (const r of recent) {
+      if (lows[r.idx] < minLow) { prevMinLowIdx = minLowIdx; prevMinLow = minLow; minLowIdx = r.idx; minLow = lows[r.idx]; }
+    }
+    if (prevMinLowIdx !== null) {
+      const minRsi = rsiSeq.find(x => x.idx === minLowIdx)?.rsi;
+      const prevRsi = rsiSeq.find(x => x.idx === prevMinLowIdx)?.rsi;
+      // Bullish divergence: new low in price, higher low in RSI
+      if (Number.isFinite(minRsi) && Number.isFinite(prevRsi)
+          && minLow < prevMinLow && minRsi > prevRsi
+          && lastRsi < 45) {
+        divDir = 'bullish';
+        reasons.push(`bullish div (low ${prevMinLow.toFixed(1)}→${minLow.toFixed(1)}, RSI ${prevRsi.toFixed(1)}→${minRsi.toFixed(1)})`);
+      }
+    }
+    // Bearish divergence
+    let maxHighIdx = recent[0].idx, maxHigh = highs[maxHighIdx];
+    let prevMaxHighIdx = null, prevMaxHigh = -Infinity;
+    for (const r of recent) {
+      if (highs[r.idx] > maxHigh) { prevMaxHighIdx = maxHighIdx; prevMaxHigh = maxHigh; maxHighIdx = r.idx; maxHigh = highs[r.idx]; }
+    }
+    if (prevMaxHighIdx !== null && !divDir) {
+      const maxRsi = rsiSeq.find(x => x.idx === maxHighIdx)?.rsi;
+      const prevRsiH = rsiSeq.find(x => x.idx === prevMaxHighIdx)?.rsi;
+      if (Number.isFinite(maxRsi) && Number.isFinite(prevRsiH)
+          && maxHigh > prevMaxHigh && maxRsi < prevRsiH
+          && lastRsi > 55) {
+        divDir = 'bearish';
+        reasons.push(`bearish div (high ${prevMaxHigh.toFixed(1)}→${maxHigh.toFixed(1)}, RSI ${prevRsiH.toFixed(1)}→${maxRsi.toFixed(1)})`);
+      }
+    }
+  }
+
+  if (!divDir) required.push('no RSI divergence detected');
+  if (divDir && divDir !== ctx.direction) required.push(`divergence ${divDir} != direction ${ctx.direction}`);
+
+  // VWAP soft-check: divergence FADES move so VWAP can be on either side
+  // but block extreme stretches (price 0.6%+ from VWAP)
+  const vwapDist = Math.abs(_safe(ctx.vwap?.distance_pct));
+  if (vwapDist > 0.7) required.push(`stretched VWAP ${vwapDist.toFixed(2)}%`);
+
+  // Block expansion + strong delta in direction (real trend, not divergence)
+  const dPct = _safe(ctx.volumeAnalysis?.delta?.cvdPctLong);
+  if (ctx.volatilityRegime?.state === 'expansion') {
+    const deltaWithTrend = (ctx.direction === 'bullish' && dPct >  10)
+                        || (ctx.direction === 'bearish' && dPct < -10);
+    if (deltaWithTrend) required.push(`expansion + delta ${dPct}% with trend (real momentum)`);
+  }
+  if (ctx.sessionPhase?.isExpiryDay && ctx.sessionPhase?.hhmm >= 1430) {
+    required.push('expiry afternoon');
+  }
+  if ((ctx.trap?.trapScore || 0) >= 60) required.push(`trap ${ctx.trap.trapScore}`);
+
+  const valid = required.length === 0;
+  if (!valid) {
+    return { name: 'RSI_DIVERGENCE_SCALP', family: 'reversal',
+             valid: false, score: 0, conviction: 'weak', missing: required,
+             reasoning: `missing: ${required.join(', ')}` };
+  }
+  score += 35;
+
+  // Confirmations
+  // 1. RSI in extreme zone (true exhaustion)
+  if (divDir === 'bullish' && lastRsi < 35) { score += 10; confirmations.push(`RSI ${lastRsi.toFixed(1)} oversold`); }
+  if (divDir === 'bearish' && lastRsi > 65) { score += 10; confirmations.push(`RSI ${lastRsi.toFixed(1)} overbought`); }
+  // 2. Last 5m bar in fade direction
+  const last5 = c5[c5.length - 1];
+  if (last5) {
+    const lc = last5.c ?? last5.close;
+    const lo = last5.o ?? last5.open;
+    const dirOk = (ctx.direction === 'bullish' && lc > lo)
+              || (ctx.direction === 'bearish' && lc < lo);
+    if (dirOk) { score += 8; confirmations.push('last 5m bar in fade direction'); }
+  }
+  // 3. VSA absorption / spring / upthrust supports
+  const vsa = ctx.volumeAnalysis?.vsa;
+  if ((ctx.direction === 'bullish' && (vsa?.pattern === 'spring' || vsa?.pattern === 'absorption'))
+   || (ctx.direction === 'bearish' && (vsa?.pattern === 'upthrust' || vsa?.pattern === 'absorption'))) {
+    score += 10; confirmations.push(`VSA ${vsa.pattern}`);
+  }
+  // 4. Volume drying (loss of momentum confirms divergence)
+  if (ctx.volumeAnalysis?.timeVolume?.state === 'dry_up') {
+    score += 5; confirmations.push('volume dry-up');
+  }
+  // 5. Liquidity good
+  if (ctx.liquidity?.health === 'good' || ctx.liquidity?.health === 'excellent') {
+    score += 4; confirmations.push(`liq ${ctx.liquidity.health}`);
+  }
+  // 6. OI not aggressively against the fade
+  const oiR = ctx.oiAnalytics?.regime || '';
+  const oiAgainst = (ctx.direction === 'bullish' && (oiR === 'aggressive_short_buildup' || oiR === 'long_unwinding_collapse'))
+                || (ctx.direction === 'bearish' && (oiR === 'aggressive_long_buildup' || oiR === 'violent_short_covering'));
+  if (!oiAgainst) {
+    score += 4; confirmations.push(`OI ${oiR || 'neutral'} not against`);
+  }
+
+  const conviction = confirmations.length >= 4 ? 'elite' :
+                     confirmations.length >= 3 ? 'standard' : 'weak';
+
+  return {
+    name: 'RSI_DIVERGENCE_SCALP',
+    family: 'reversal',
+    valid: conviction !== 'weak' && score >= 50,
+    score: _clamp(score),
+    conviction,
+    holdProfile: { tradeType: 'SCALP', maxHoldSec: 180, rrTarget: 1.4 },
+    riskProfile: { slPct: 0.08, sizingFactor: conviction === 'elite' ? 0.7 : 0.5 },
+    minScoreOverride: 60,
+    // CALIBRATED 2026-05-19: fallback — institutional reversal playbooks
+    // (FAILED_AUCTION_REVERSAL, EXHAUSTION_REVERSAL, ABSORPTION_REVERSAL)
+    // already cover most reversal opportunities with stronger structural
+    // signals. RSI divergence is a chart-trader fallback for cases where
+    // none of those qualify but the indicator agrees.
+    isFallback: true,
+    allowedDirections: ['bullish', 'bearish'],
+    preconditions: ['rsi_div', 'rsi_extreme', 'last_bar_aligned', 'no_expansion_with_trend'],
+    confirmations,
+    reasoning: `${conviction.toUpperCase()} | RSI=${lastRsi?.toFixed(1)} | ${reasons.join(' | ')} | ${confirmations.join(' | ')}`,
+  };
+}
+
+// ─── PLAYBOOK 41: EMA_PULLBACK_SCALP ───────────────────────────────────────
+// Classic chart-trader pullback continuation: in an established trend,
+// price pulls back to the 9-EMA or 20-EMA on 5m, the EMA holds (rejection
+// candle), and momentum resumes. 5-15pt scalp.
+//
+// CALIBRATION 2026-05-19: complement to UT Bot scalp — captures continuation
+// rather than initial cross signals.
+//
+// Detection:
+//   1. 5m trend established (last 6 5m bars majority in direction)
+//   2. Spot pulled back to within 0.15% of the 9-EMA
+//   3. Last 5m bar shows rejection from EMA (closes back in trend direction)
+//   4. VWAP aligned with trend (HARD)
+//   5. NOT in expansion vol with delta against trend
+function _emaPullbackScalp(ctx) {
+  const reasons = [];
+  let score = 0;
+  const required = [];
+  const confirmations = [];
+
+  const c5 = ctx.candles5m || [];
+  if (c5.length < 12) required.push(`insufficient 5m candles (${c5.length}/12)`);
+  const closes = c5.map(b => b.c ?? b.close);
+
+  // EMA(9) and EMA(20)
+  const _ema = (arr, p) => {
+    if (arr.length < p) return null;
+    const k = 2 / (p + 1);
+    let e = arr.slice(0, p).reduce((a, b) => a + b, 0) / p;
+    for (let i = p; i < arr.length; i++) e = arr[i] * k + e * (1 - k);
+    return e;
+  };
+  const ema9  = _ema(closes, 9);
+  const ema20 = _ema(closes, 20);
+  const spot = Number(ctx.spotPrice);
+  if (!Number.isFinite(ema9) || !Number.isFinite(spot)) required.push('no EMA9 / spot');
+
+  // Trend: last 6 bars majority in direction
+  const last6 = c5.slice(-6);
+  const dirBars = last6.filter(b => {
+    const o = b.o ?? b.open; const cc = b.c ?? b.close;
+    return ctx.direction === 'bullish' ? cc > o : cc < o;
+  }).length;
+  if (dirBars < 4) required.push(`only ${dirBars}/6 5m bars in direction`);
+
+  // Pullback proximity — within 0.15% of EMA9
+  if (Number.isFinite(ema9) && Number.isFinite(spot)) {
+    const dist = Math.abs(spot - ema9) / ema9 * 100;
+    if (dist > 0.20) required.push(`spot ${dist.toFixed(2)}% > 0.20% from EMA9`);
+    else reasons.push(`spot ${dist.toFixed(2)}% from EMA9`);
+  }
+
+  // Spot must be on the right side of the EMA in trend direction
+  if (Number.isFinite(ema9) && Number.isFinite(spot)) {
+    if (ctx.direction === 'bullish' && spot < ema9) required.push(`bullish spot ${spot} < EMA9 ${ema9.toFixed(1)}`);
+    if (ctx.direction === 'bearish' && spot > ema9) required.push(`bearish spot ${spot} > EMA9 ${ema9.toFixed(1)}`);
+  }
+
+  // VWAP aligned (HARD)
+  const vwapPos = ctx.vwap?.position;
+  if ((ctx.direction === 'bullish' && vwapPos !== 'above')
+   || (ctx.direction === 'bearish' && vwapPos !== 'below')) {
+    required.push(`VWAP wrong side (${vwapPos})`);
+  }
+
+  // Last 5m bar must close in trend direction (rejection)
+  const last5 = c5[c5.length - 1];
+  if (last5) {
+    const lc = last5.c ?? last5.close;
+    const lo = last5.o ?? last5.open;
+    const dirOk = (ctx.direction === 'bullish' && lc > lo)
+              || (ctx.direction === 'bearish' && lc < lo);
+    if (!dirOk) required.push('last 5m bar against direction');
+  }
+
+  // Block expansion with delta against direction (false breakout)
+  const dPct = _safe(ctx.volumeAnalysis?.delta?.cvdPctLong);
+  if (ctx.volatilityRegime?.state === 'expansion') {
+    const deltaAgainst = (ctx.direction === 'bullish' && dPct < -8)
+                      || (ctx.direction === 'bearish' && dPct >  8);
+    if (deltaAgainst) required.push(`expansion + delta ${dPct}% against`);
+  }
+
+  // Block traps
+  if ((ctx.trap?.trapScore || 0) >= 65) required.push(`trap ${ctx.trap.trapScore}`);
+  if (ctx.sessionPhase?.isExpiryDay && ctx.sessionPhase?.hhmm >= 1430) {
+    required.push('expiry afternoon');
+  }
+
+  const valid = required.length === 0;
+  if (!valid) {
+    return { name: 'EMA_PULLBACK_SCALP', family: 'pullback',
+             valid: false, score: 0, conviction: 'weak', missing: required,
+             reasoning: `missing: ${required.join(', ')}` };
+  }
+  score += 35;
+  reasons.push(`${dirBars}/6 5m bars in dir + EMA9 pullback`);
+
+  // Confirmations
+  // 1. EMA9 above EMA20 in bullish (or below in bearish)
+  if (Number.isFinite(ema20)) {
+    if ((ctx.direction === 'bullish' && ema9 > ema20)
+     || (ctx.direction === 'bearish' && ema9 < ema20)) {
+      score += 10; confirmations.push('EMA9/EMA20 stack');
+    }
+  }
+  // 2. Delta with direction
+  if ((ctx.direction === 'bullish' && dPct >= 4)
+   || (ctx.direction === 'bearish' && dPct <= -4)) {
+    score += 8; confirmations.push(`delta ${dPct}%`);
+  }
+  // 3. Futures aligned
+  if (ctx.futuresData?.direction === ctx.direction) {
+    score += 6; confirmations.push('futures aligned');
+  }
+  // 4. OI in direction
+  const oiR = ctx.oiAnalytics?.regime || '';
+  const oiAligned = (ctx.direction === 'bullish' && (oiR === 'aggressive_long_buildup' || oiR === 'violent_short_covering'))
+                || (ctx.direction === 'bearish' && (oiR === 'aggressive_short_buildup' || oiR === 'long_unwinding_collapse'));
+  if (oiAligned) { score += 8; confirmations.push(`OI ${oiR}`); }
+  // 5. MTF aligned
+  if (ctx.mtfStructure?.alignment === 'full') { score += 8; confirmations.push('MTF full'); }
+  else if (ctx.mtfStructure?.alignment === 'partial') { score += 4; confirmations.push('MTF partial'); }
+  // 6. Liquidity good
+  if (ctx.liquidity?.health === 'good' || ctx.liquidity?.health === 'excellent') {
+    score += 4; confirmations.push(`liq ${ctx.liquidity.health}`);
+  }
+  // 7. Lower wick on the pullback bar (rejection signature)
+  if (last5) {
+    const o = last5.o ?? last5.open; const c = last5.c ?? last5.close;
+    const h = last5.h ?? last5.high; const l = last5.l ?? last5.low;
+    const rng = h - l;
+    const lowerWick = Math.min(o, c) - l;
+    const upperWick = h - Math.max(o, c);
+    if (ctx.direction === 'bullish' && rng > 0 && lowerWick / rng > 0.35) {
+      score += 6; confirmations.push(`lower wick ${(lowerWick/rng*100).toFixed(0)}%`);
+    }
+    if (ctx.direction === 'bearish' && rng > 0 && upperWick / rng > 0.35) {
+      score += 6; confirmations.push(`upper wick ${(upperWick/rng*100).toFixed(0)}%`);
+    }
+  }
+
+  const conviction = confirmations.length >= 5 ? 'elite' :
+                     confirmations.length >= 4 ? 'standard' : 'weak';
+
+  return {
+    name: 'EMA_PULLBACK_SCALP',
+    family: 'pullback',
+    valid: conviction !== 'weak' && score >= 50,
+    score: _clamp(score),
+    conviction,
+    holdProfile: { tradeType: 'SCALP', maxHoldSec: 180, rrTarget: 1.5 },
+    riskProfile: { slPct: 0.08, sizingFactor: conviction === 'elite' ? 0.75 : 0.55 },
+    minScoreOverride: 60,
+    // CALIBRATED 2026-05-19: fallback so it only fires when no elite
+    // institutional playbook qualifies. Without this, EMA pullback
+    // outranks VWAP_BOUNCE_SCALP and degrades aggregate WR.
+    isFallback: true,
+    allowedDirections: ['bullish', 'bearish'],
+    preconditions: ['trend_bars', 'pullback_to_ema9', 'rejection_bar', 'vwap_aligned'],
+    confirmations,
+    reasoning: `${conviction.toUpperCase()} | ${reasons.join(' | ')} | ${confirmations.join(' | ')}`,
+  };
+}
+
 // ─── REGIME → PLAYBOOK ELIGIBILITY MAP (institutional spec) ────────────────
 // This is the orchestrator's "permission map". Even if a playbook scores
 // high, it must match the current meta-regime to be eligible.
@@ -4279,16 +4633,16 @@ function _vahValFadeScalp(ctx) {
 // its strict preconditions (typically dead-vol drift). Conservative
 // management (200s/1.2RR/0.5 sizing) keeps the win-rate impact minimal.
 const REGIME_PLAYBOOKS = {
-  trend_auction:    ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'OPENING_DRIVE_CONTINUATION', 'OPENING_DRIVE_FAILURE', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP', 'DELTA_VELOCITY_BREAKOUT', 'PDH_PDL_SWEEP_REVERSAL', 'DOUBLE_DISTRIBUTION_TREND', 'OVERNIGHT_OI_SHIFT_FOLLOW'],
-  short_covering:   ['SHORT_COVERING_SQUEEZE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'SWEEP_RECLAIM_SCALP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP', 'DELTA_VELOCITY_BREAKOUT', 'OVERNIGHT_OI_SHIFT_FOLLOW'],
-  long_liquidation: ['LONG_LIQUIDATION_CASCADE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'SWEEP_RECLAIM_SCALP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP', 'DELTA_VELOCITY_BREAKOUT', 'OVERNIGHT_OI_SHIFT_FOLLOW'],
-  gamma_pin:        ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'FAILED_AUCTION_REVERSAL', 'EXHAUSTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'SWEEP_RECLAIM_SCALP', 'PDH_PDL_SWEEP_REVERSAL', 'ABSORPTION_REVERSAL', 'MICRO_POC_MAGNET', 'VAH_VAL_FADE_SCALP'],
-  balanced_auction: ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'SWEEP_RECLAIM_SCALP', 'OPENING_DRIVE_FAILURE', 'PDH_PDL_SWEEP_REVERSAL', 'ABSORPTION_REVERSAL', 'MICRO_POC_MAGNET', 'VAH_VAL_FADE_SCALP'],
-  slow_grind:       ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'PULLBACK_CONTINUATION', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'LIGHT_TREND_DRIFT_SCALP', 'ABSORPTION_REVERSAL', 'MICRO_POC_MAGNET', 'VAH_VAL_FADE_SCALP'],
-  dealer_hedging:   ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP', 'DELTA_VELOCITY_BREAKOUT'],
-  expiry_expansion: ['WEEKLY_EXPIRY_DEALER_UNWIND', 'INITIATIVE_MOMENTUM_EXPANSION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'DELTA_DRIVE_SCALP', 'PIN_REVERSION', 'SWEEP_RECLAIM_SCALP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP', 'DELTA_VELOCITY_BREAKOUT', 'PDH_PDL_SWEEP_REVERSAL'],
-  panic:            ['EXHAUSTION_REVERSAL', 'FAILED_AUCTION_REVERSAL', 'SWEEP_RECLAIM_SCALP', 'PDH_PDL_SWEEP_REVERSAL', 'ABSORPTION_REVERSAL'],
-  unknown:          ['GAMMA_PIN_MEAN_REVERSION', 'VWAP_RECLAIM_CLEAN', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'VWAP_BOUNCE_SCALP', 'DELTA_DRIVE_SCALP', 'VALUE_AREA_ROTATION', 'VWAP_OSCILLATION_SCALP', 'LVN_REJECTION_SCALP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP', 'PDH_PDL_SWEEP_REVERSAL'],
+  trend_auction:    ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'OPENING_DRIVE_CONTINUATION', 'OPENING_DRIVE_FAILURE', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP', 'DELTA_VELOCITY_BREAKOUT', 'PDH_PDL_SWEEP_REVERSAL', 'DOUBLE_DISTRIBUTION_TREND', 'OVERNIGHT_OI_SHIFT_FOLLOW', 'EMA_PULLBACK_SCALP', 'RSI_DIVERGENCE_SCALP'],
+  short_covering:   ['SHORT_COVERING_SQUEEZE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'SWEEP_RECLAIM_SCALP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP', 'DELTA_VELOCITY_BREAKOUT', 'OVERNIGHT_OI_SHIFT_FOLLOW', 'EMA_PULLBACK_SCALP', 'RSI_DIVERGENCE_SCALP'],
+  long_liquidation: ['LONG_LIQUIDATION_CASCADE', 'INITIATIVE_MOMENTUM_EXPANSION', 'VWAP_RECLAIM_CLEAN', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'SWEEP_RECLAIM_SCALP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP', 'DELTA_VELOCITY_BREAKOUT', 'OVERNIGHT_OI_SHIFT_FOLLOW', 'EMA_PULLBACK_SCALP', 'RSI_DIVERGENCE_SCALP'],
+  gamma_pin:        ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'FAILED_AUCTION_REVERSAL', 'EXHAUSTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'SWEEP_RECLAIM_SCALP', 'PDH_PDL_SWEEP_REVERSAL', 'ABSORPTION_REVERSAL', 'MICRO_POC_MAGNET', 'VAH_VAL_FADE_SCALP', 'RSI_DIVERGENCE_SCALP'],
+  balanced_auction: ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'SWEEP_RECLAIM_SCALP', 'OPENING_DRIVE_FAILURE', 'PDH_PDL_SWEEP_REVERSAL', 'ABSORPTION_REVERSAL', 'MICRO_POC_MAGNET', 'VAH_VAL_FADE_SCALP', 'RSI_DIVERGENCE_SCALP'],
+  slow_grind:       ['GAMMA_PIN_MEAN_REVERSION', 'HVN_REJECTION_ROTATION', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'PULLBACK_CONTINUATION', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'VALUE_AREA_ROTATION', 'PIN_REVERSION', 'LVN_REJECTION_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'LIGHT_TREND_DRIFT_SCALP', 'ABSORPTION_REVERSAL', 'MICRO_POC_MAGNET', 'VAH_VAL_FADE_SCALP', 'RSI_DIVERGENCE_SCALP'],
+  dealer_hedging:   ['INITIATIVE_MOMENTUM_EXPANSION', 'PULLBACK_CONTINUATION', 'VWAP_RECLAIM_CLEAN', 'VOLATILITY_COMPRESSION_SQUEEZE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'COUNTER_TREND_REVERSAL', 'DELTA_DRIVE_SCALP', 'VWAP_OSCILLATION_SCALP', 'MICRO_DELTA_FLIP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP', 'DELTA_VELOCITY_BREAKOUT', 'EMA_PULLBACK_SCALP', 'RSI_DIVERGENCE_SCALP'],
+  expiry_expansion: ['WEEKLY_EXPIRY_DEALER_UNWIND', 'INITIATIVE_MOMENTUM_EXPANSION', 'FAILED_AUCTION_REVERSAL', 'IV_CRUSH_FADE', 'VWAP_BOUNCE_SCALP', 'TREND_VWAP_FOLLOW', 'DELTA_DRIVE_SCALP', 'PIN_REVERSION', 'SWEEP_RECLAIM_SCALP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP', 'DELTA_VELOCITY_BREAKOUT', 'PDH_PDL_SWEEP_REVERSAL', 'EMA_PULLBACK_SCALP'],
+  panic:            ['EXHAUSTION_REVERSAL', 'FAILED_AUCTION_REVERSAL', 'SWEEP_RECLAIM_SCALP', 'PDH_PDL_SWEEP_REVERSAL', 'ABSORPTION_REVERSAL', 'RSI_DIVERGENCE_SCALP'],
+  unknown:          ['GAMMA_PIN_MEAN_REVERSION', 'VWAP_RECLAIM_CLEAN', 'COMPOSITE_PROFILE_EDGE_REJECTION', 'VWAP_BOUNCE_SCALP', 'DELTA_DRIVE_SCALP', 'VALUE_AREA_ROTATION', 'VWAP_OSCILLATION_SCALP', 'LVN_REJECTION_SCALP', 'UT_BOT_FAST_SCALP', 'TREND_RIDE_NO_CONFIRMATION', 'LIGHT_TREND_DRIFT_SCALP', 'PDH_PDL_SWEEP_REVERSAL', 'EMA_PULLBACK_SCALP', 'RSI_DIVERGENCE_SCALP'],
 };
 
 const ALL_PLAYBOOKS = [
@@ -4338,6 +4692,12 @@ const ALL_PLAYBOOKS = [
   // the gap on 8-9 zero/sub-3-trade days where elite setups don't qualify.
   _microPocMagnet,
   _vahValFadeScalp,
+  // Phase 8 chart-trader scalps 2026-05-19 — RSI divergence + EMA pullback.
+  // Common discretionary setups that the orderflow/structural playbooks
+  // don't catch. Ultra scalp engine runs in parallel as the UT Bot
+  // chart-mirror engine.
+  _rsiDivergenceScalp,
+  _emaPullbackScalp,
 ];
 
 /**
