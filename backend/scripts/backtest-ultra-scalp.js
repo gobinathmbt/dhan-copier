@@ -43,7 +43,10 @@ const LOG_DIR = path.resolve(__dirname, '../logs');
 if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
 const _runStamp = new Date().toISOString().replace(/[:.]/g, '-');
 const LOG_FILE = path.join(LOG_DIR, `backtest-ultra-${_runStamp}.log`);
-const _logStream = fs.createWriteStream(LOG_FILE, { flags: 'a' });
+// Open a synchronous file descriptor — guarantees every write is flushed
+// to disk before process.exit() is called. The previous WriteStream-based
+// approach was async and lost all buffered output on exit.
+const _logFd = fs.openSync(LOG_FILE, 'a');
 function _log(level, source, message, data) {
   const ts = new Date().toISOString();
   let safeData = null;
@@ -52,7 +55,6 @@ function _log(level, source, message, data) {
       safeData = JSON.parse(JSON.stringify(data, (k, v) => {
         if (k === 'tfReads' || k === 'streams') {
           if (Array.isArray(v) && v.length > 8) return v.slice(0, 8);
-          // Keep these but strip nested posSeq/stopSeq if present
           if (v && typeof v === 'object') {
             const o = {};
             for (const kk of Object.keys(v)) {
@@ -68,9 +70,13 @@ function _log(level, source, message, data) {
       }));
     } catch (_) { safeData = String(data).slice(0, 800); }
   }
-  _logStream.write(JSON.stringify({ ts, level, source, message, data: safeData }) + '\n');
+  try {
+    fs.writeSync(_logFd, JSON.stringify({ ts, level, source, message, data: safeData }) + '\n');
+  } catch (_) { /* never block the run on a log error */ }
 }
-process.on('exit', () => { try { _logStream.end(); } catch (_) {} });
+function _closeLog() { try { fs.closeSync(_logFd); } catch (_) {} }
+process.on('exit', _closeLog);
+process.on('SIGINT', () => { _closeLog(); process.exit(130); });
 
 // ────────────────────────────────────────────────────────────────────────
 // Stub config/env so requires don't blow up
@@ -403,6 +409,10 @@ async function backtestDay(dayLabel) {
   for (let t = firstEpoch; t <= lastEpoch; t += SETTINGS.cycleStepSec) cycles.push(t);
 
   let signalsGenerated = 0;
+  let cyclesWithDecision = 0;
+
+  _log('info', 'day_start', `${dayLabel}: ${cycles.length} cycles, candles1m=${candles1m.length} candles5m=${candles5m.length} candles15m=${candles15m.length} chain=${optionChain.length}`,
+    { dayLabel, cycles: cycles.length, candles1m: candles1m.length, candles5m: candles5m.length, candles15m: candles15m.length, chain: optionChain.length });
 
   for (const cycleEpoch of cycles) {
     if (trades.length >= SETTINGS.maxTradesPerDay) break;
@@ -412,6 +422,7 @@ async function backtestDay(dayLabel) {
 
     const ctx = buildContext(day, cycleEpoch);
     if (!ctx) continue;
+    cyclesWithDecision++;
 
     const ultra = ultraScalpEngine.decide({
       candles1m: ctx.candles1m,
@@ -427,7 +438,8 @@ async function backtestDay(dayLabel) {
     });
 
     if (!ultra.fired) {
-      _log('debug', 'ultra', `not fired @ ${hhmm}: ${ultra.reasoning}`, ultra);
+      _log('debug', 'no_fire', `[${dayLabel} ${hhmm}] ${ultra.reasoning}`,
+        { dayLabel, hhmm, spot: ctx.spotPrice, vol: ctx.volatilityRegime.state, reasoning: ultra.reasoning });
       continue;
     }
 
@@ -494,6 +506,16 @@ async function backtestDay(dayLabel) {
   const netPnl = trades.reduce((s, t) => s + t.netPnl, 0);
   const grossPnl = trades.reduce((s, t) => s + t.grossPnl, 0);
   const totalCycles = cycles.length;
+
+  _log('info', 'day_summary',
+    `${dayLabel}: cycles=${totalCycles} active=${cyclesWithDecision} signals=${signalsGenerated} trades=${trades.length} W=${wins} L=${losses} netPnl=Rs.${netPnl.toFixed(0)}`,
+    { dayLabel, totalCycles, cyclesWithDecision, signalsGenerated, trades: trades.length, wins, losses, netPnl, grossPnl,
+      tradeRows: trades.map(t => ({
+        entryHhmm: t.entryHhmm, exitHhmm: t.exitHhmm, signal: t.signal, strike: t.strike, optionType: t.optionType,
+        entry: t.entry, exit: t.exit, pts: t.pts, peakPts: t.peakPts, heldSec: t.heldSec, reason: t.reason, result: t.result,
+        netPnl: t.netPnl, tier: t.confluenceTier, score: t.consensusScore, triggerTf: t.triggerTf, smartTrailMode: t.smartTrailMode,
+      })),
+    });
 
   return {
     dayLabel,
@@ -627,6 +649,14 @@ async function backtestDay(dayLabel) {
   console.log(`FINAL: ${wins}/${totalTrades} wins (${winRate.toFixed(2)}%) -- Net Rs.${netPnl.toFixed(2)} over ${totalDays} days`);
   console.log('='.repeat(78));
   console.log(`\nFull debug log: ${LOG_FILE}`);
+
+  // Persist the aggregate summary at the end of the log file
+  _log('info', 'aggregate_summary', `FINAL ${wins}/${totalTrades} (${winRate.toFixed(2)}%) Net=Rs.${netPnl.toFixed(2)} PF=${profitFactor.toFixed(2)}`, {
+    totalDays, profitableDays, totalCycles, totalSignals, totalTrades, wins, losses,
+    winRate, grossPnl, netPnl, avgWin, avgLoss, expectancy, avgHold, profitFactor,
+    settings: SETTINGS,
+  });
+
   process.exit(0);
 })().catch(err => {
   console.error('Backtest failed:', err);
