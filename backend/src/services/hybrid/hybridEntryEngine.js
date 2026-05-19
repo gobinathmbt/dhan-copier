@@ -142,6 +142,36 @@ async function _consecutiveLosses(sessionId) {
 }
 
 function _noTrade(reason, extras = {}) {
+  // CALIBRATED 2026-05-19: emit a structured no_trade event so live sessions
+  // are debuggable. Without this, the user sees `signal: NO_TRADE` from the
+  // scalping engine but cannot trace WHICH gate inside the hybrid pipeline
+  // blocked the trade. This is purely a logging hook — no behaviour change.
+  try {
+    const _sessionId = extras?.sessionId || extras?.session?._id || null;
+    hybridLogger.warn({
+      sessionId: _sessionId,
+      event: 'no_trade',
+      message: String(reason || 'no trade').slice(0, 500),
+      data: {
+        // Strip large fields from extras to keep the log compact
+        ...(extras && {
+          strategy: extras.strategy?.strategy,
+          entryType: extras.entryType,
+          metaRegime: extras.metaRegime?.state,
+          confidence: extras.confidence?.score,
+          confidenceTier: extras.confidence?.tier,
+          confidenceThreshold: extras.strategy?.minScore,
+          hybridScore: extras.hybridScore?.score,
+          gammaRegime: extras.gammaRegime?.regime || extras.gammaRegime,
+          mtfStructure: extras.mtfStructure?.alignment,
+          trapScore: extras.trap?.trapScore,
+          playbookBest: extras.playbook?.bestName,
+          playbookConv: extras.playbook?.bestConviction,
+        }),
+      },
+    });
+  } catch (_) { /* never block the trade decision on a log error */ }
+
   return {
     signal: 'NO_TRADE',
     trade_type: 'NONE',
@@ -1185,17 +1215,32 @@ async function decide({
     noTradeReasons.push(`positive gamma pin within 8pts (${gammaRegime.spotVsPin}pts) — dealer suppression`);
   }
   // (d) OI velocity weak (both CE & PE velocity < 50k abs) + dead vol = no flow
+  // EXCEPT: dead-vol fallback playbooks are designed exactly for this profile.
   const ceVel = Math.abs(oiAnalytics0?.diff?.ceVelocity || 0);
   const peVel = Math.abs(oiAnalytics0?.diff?.peVelocity || 0);
+  const deadVolFallbackTypes = new Set([
+    'MEAN_REVERSION', 'LIGHT_TREND_DRIFT_SCALP',
+    'MICRO_POC_MAGNET', 'VAH_VAL_FADE_SCALP',
+    'GAMMA_PIN_MEAN_REVERSION', 'PIN_REVERSION', 'VALUE_AREA_ROTATION',
+    'VWAP_OSCILLATION_SCALP', 'COMPOSITE_PROFILE_EDGE_REJECTION',
+    'HVN_REJECTION_ROTATION', 'LVN_REJECTION_SCALP',
+  ]);
   if (ceVel < 50_000 && peVel < 50_000 && volatilityRegime?.state === 'dead'
-      && entryType.bestType !== 'MEAN_REVERSION') {
+      && !deadVolFallbackTypes.has(entryType.bestType)) {
     noTradeReasons.push(`OI velocity weak (ce ${ceVel.toFixed(0)} pe ${peVel.toFixed(0)}) + dead vol`);
   }
   // (e) Dead volatility + gamma_pin = pure dealer chop. 47% WR in backtest.
-  //     Only allow REVERSAL or VWAP_RECLAIM (which catch the rare break of pin).
+  //     Only allow REVERSAL or VWAP_RECLAIM (which catch the rare break of pin)
+  //     OR institutional rotational scalps designed for this exact regime.
+  const gammaPinAllowedTypes = new Set([
+    'REVERSAL', 'VWAP_RECLAIM', 'VWAP_RECLAIM_CLEAN',
+    'GAMMA_PIN_MEAN_REVERSION', 'MEAN_REVERSION',
+    'MICRO_POC_MAGNET', 'VAH_VAL_FADE_SCALP', 'PIN_REVERSION',
+    'COMPOSITE_PROFILE_EDGE_REJECTION', 'HVN_REJECTION_ROTATION',
+  ]);
   if (volatilityRegime?.state === 'dead' && metaRegime?.state === 'gamma_pin'
-      && entryType.bestType !== 'REVERSAL' && entryType.bestType !== 'VWAP_RECLAIM') {
-    noTradeReasons.push(`dead vol + gamma_pin: only reversal/vwap_reclaim (got ${entryType.bestType})`);
+      && !gammaPinAllowedTypes.has(entryType.bestType)) {
+    noTradeReasons.push(`dead vol + gamma_pin: only reversal/vwap_reclaim/rotational (got ${entryType.bestType})`);
   }
   // (f) Dealer-hedging (negative gamma) but ATR percentile < 30 = stall zone
   //     before the next big move. Skip until volatility expands.
