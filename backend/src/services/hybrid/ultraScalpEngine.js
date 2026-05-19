@@ -166,9 +166,19 @@ function decide({
     '3m': userCfg.enable3m !== false,    // default ON
     '5m': userCfg.enable5m !== false,    // default ON
   };
-  const vwapStrict = userCfg.vwapStrict !== false;     // default ON
-  const requireBarColor = userCfg.requireBarColor !== false;  // default ON
-  const allowStaleBar = userCfg.allowStaleBar === true;       // default OFF
+  // CALIBRATED 2026-05-19 v3: gate defaults softened to match the
+  // TradingView UT Bot indicator's behaviour. Prior live session blocked
+  // 100% of UT Bot crosses (105/105) because BOTH vwapStrict and
+  // requireBarColor were ON — but UT Bot crosses BY DEFINITION happen at
+  // direction changes when the prior bar is against the new direction.
+  // Defaults now:
+  //   vwapStrict       = false   (advisory; reflected in confidence)
+  //   requireBarColor  = false   (1m bar is informational only)
+  //   allowStaleBar    = false   (still drop signals > 1 bar old)
+  // User can re-tighten via settings.ultraScalp.{vwapStrict,requireBarColor}.
+  const vwapStrict = userCfg.vwapStrict === true;
+  const requireBarColor = userCfg.requireBarColor === true;
+  const allowStaleBar = userCfg.allowStaleBar === true;
 
   // Run UT Bot on enabled TFs
   const tfReads = {};
