@@ -440,9 +440,9 @@ function decide({
   );
 
   // ── TRIGGER detection (with stale-bar tolerance) ─────────────────────
-  // CALIBRATED v6.11: ONLY 5m triggers by default. The 5m UT Bot cross
-  // is the most reliable — 1m/3m fire on micro-noise. User can override
-  // via settings.ultraScalp.allowedTriggerTfs.
+  // CALIBRATED v6.15: allow 1m, 3m, 5m triggers but ONLY when the higher
+  // TFs already agree (perfect consensus required). 1m gives faster entry
+  // timing on already-confirmed multi-TF setups.
   const allowedTriggerTfs = userCfg.allowedTriggerTfs || ['5m'];
   const tfPriority = allowedTriggerTfs.filter(v => tfReads[v]);
   let trigger = null;
@@ -460,30 +460,32 @@ function decide({
     }
   }
 
-  // ── PULLBACK CONTINUATION (CALIBRATED v6.5) ─────────────────────────
-  // Stricter validation than before: require ALL of:
-  //   - 3m + 5m trend agree
-  //   - 1m stream in same direction
-  //   - slope on 3m AND 5m expanding
-  //   - ATR expansion ≥ 1.05× (already healthy expansion regime)
-  //   - delta in direction (>= 5% bias)
-  if (!trigger && (regime === 'expansion' || regime === 'trend')) {
+  // ── PULLBACK CONTINUATION (CALIBRATED v6.5/v6.16) ───────────────────
+  // Re-enabled in v6.16 with TIGHTER filtering — analysis showed pullback
+  // pure-stagnation entries (peak=0) need futures/delta confirmation.
+  // Now requires 3m+5m+15m all aligned (15m wasn't required before).
+  if (!trigger && userCfg.allowPullbackContinuation !== false
+      && (regime === 'expansion' || regime === 'trend')) {
     const r1 = tfReads['1m']?.read;
     const r3 = tfReads['3m']?.read;
     const r5 = tfReads['5m']?.read;
+    const r15 = tfReads['15m']?.read;
     if (r1 && r3 && r5 && !r1.warmupShort && !r3.warmupShort && !r5.warmupShort) {
       const dirAgree = ['bullish', 'bearish'].find(d =>
         r3.trend === d && r5.trend === d
         && (r1.streams?.buy?.trend === d || r1.streams?.sell?.trend === d)
       );
       if (dirAgree) {
-        // Check delta agrees with direction (>= 5% bias)
         const dPctCheck = _safe(volumeAnalysis?.delta?.cvdPctLong);
-        const deltaAligned = (dirAgree === 'bullish' && dPctCheck >= 5)
-                          || (dirAgree === 'bearish' && dPctCheck <= -5);
-        // Both 3m AND 5m slope must be expanding
+        // STRICTER: delta ≥ 8% (was 5%)
+        const deltaAligned = (dirAgree === 'bullish' && dPctCheck >= 8)
+                          || (dirAgree === 'bearish' && dPctCheck <= -8);
         const bothExpanding = r3.slopeTrend === 'expanding' && r5.slopeTrend === 'expanding';
-        if (deltaAligned && bothExpanding && r3.slopeStrength >= slopeMin) {
+        // NEW: 15m must also agree if available
+        const regime15Agrees = !r15 || r15.warmupShort
+          || (dirAgree === 'bullish' && r15.streams?.buy?.trend === 'bullish')
+          || (dirAgree === 'bearish' && r15.streams?.sell?.trend === 'bearish');
+        if (deltaAligned && bothExpanding && r3.slopeStrength >= slopeMin && regime15Agrees) {
           trigger = {
             tf: '3m', signal: dirAgree === 'bullish' ? 'buy' : 'sell',
             read: r3, profile: tfReads['3m'].profile, candles: tfReads['3m'].candles,
