@@ -223,20 +223,20 @@ function calculateATR(candles, period) {
  * UT Bot ATR Trailing Stop Calculation
  * Based on TradingView's UT Bot Alerts indicator
  */
-function calculateUTBot(candles) {
-  if (candles.length < UT_BOT_CONFIG.atrPeriod + 5) {
+function calculateUTBot(candles, config = UT_BOT_CONFIG) {
+  if (candles.length < config.atrPeriod + 5) {
     return { trend: 'neutral', signal: 'none', trailingStop: 0 };
   }
   
   const closes = candles.map(c => c.close);
-  const atr = calculateATR(candles, UT_BOT_CONFIG.atrPeriod);
+  const atr = calculateATR(candles, config.atrPeriod);
   
   // Calculate trailing stop
   const xATRTrailingStop = [];
   const pos = [];
   
   for (let i = 0; i < closes.length; i++) {
-    const nLoss = UT_BOT_CONFIG.keyValue * (atr[i] || atr[atr.length - 1] || 0);
+    const nLoss = config.keyValue * (atr[i] || atr[atr.length - 1] || 0);
     const src = closes[i];
     
     let stop = 0;
@@ -654,5 +654,10 @@ function calculateMultiTimeframeScore(mtfData, direction) {
 
 module.exports = {
   analyzeMultiTimeframe,
-  calculateMultiTimeframeScore
+  calculateMultiTimeframeScore,
+  // CALIBRATED 2026-05-19: expose calculator + config so the dedicated
+  // ultra-scalp engine can run UT Bot with TradingView-matching params
+  // (keyValue=2, atrPeriod=1) on raw 1m/3m/5m candles.
+  calculateUTBot,
+  UT_BOT_CONFIG,
 };

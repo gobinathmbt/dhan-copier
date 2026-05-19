@@ -65,6 +65,11 @@ const ivVelocityTracker        = require('./ivVelocityTracker');
 const microstructureEngine     = require('./microstructureEngine');
 const futuresLeadershipEngine  = require('./futuresLeadershipEngine');
 const deltaVelocityEngine      = require('./deltaVelocityEngine');
+// CALIBRATED 2026-05-19: dedicated ultra-aggressive 5-20pt scalp engine
+// that mirrors the user's TradingView UT Bot indicator (Key=2, ATR=1).
+// Sits alongside the playbook layer — fires when no institutional
+// playbook fires but the chart-level UT Bot signal is clear.
+const ultraScalpEngine         = require('./ultraScalpEngine');
 
 const atrService               = require('../atr.service');
 const historicalContext        = require('../historicalContextLoader.service');
@@ -1148,14 +1153,66 @@ async function decide({
       strategy.minScore = Math.min(strategy.minScore, playbook.bestPlaybook.minScoreOverride);
     }
   } else if (!entryType.bestType || entryType.bestType === 'GENERIC_SCALP') {
-    // CALIBRATED: no playbook AND no legacy entry-type → don't trade.
-    // (Generic scalp fallback was the lowest-edge bucket in the backtest.)
-    return _noTrade(
-      `No playbook or entry type for ${metaRegime.state} ` +
-      `(${playbook.allPlaybooks.filter(p => p.valid).length} playbooks valid, ` +
-      `${entryType.allEvaluations.filter(e => e.valid).length} entry-types valid)`,
-      { metaRegime, playbook, entryType }
-    );
+    // CALIBRATED 2026-05-19: before declaring NO_TRADE, run the dedicated
+    // ultra-aggressive scalp engine. This mirrors the user's TradingView
+    // UT Bot indicator (Key=2, ATR=1) and produces 5-20pt scalp entries
+    // on the EXACT bar the chart shows the BUY/SELL label. Designed to
+    // catch the obvious chart-level scalps the institutional playbook
+    // layer over-filters away.
+    const ultra = ultraScalpEngine.decide({
+      candles5m,
+      candles1m,
+      vwap: payload?.vwap_analysis,
+      volumeAnalysis,
+      volatilityRegime,
+      sessionPhase,
+      spotPrice,
+      atr: { atr_5m: volatilityRegime?.atr5m },
+      settings,
+    });
+    hybridLogger.info({
+      sessionId, event: 'ultra_scalp',
+      message: ultra.fired
+        ? `${ultra.signal} ${ultra.direction} target=${ultra.target_pts}pt sl=${ultra.sl_pts}pt rr=${ultra.rrTarget} stop=${ultra.trailingStop} ${ultra.reasoning}`
+        : `not fired: ${ultra.reasoning}`,
+      data: ultra,
+    });
+    if (ultra.fired
+        && (ultra.direction === direction)
+        && settings?.disableUltraScalp !== true) {
+      // Override entry type with the synthetic ultra-scalp playbook
+      entryType.bestType        = ultra.name;
+      entryType.bestProfile     = ultra.holdProfile;
+      entryType.bestExitStyle   = 'ultra_scalp_managed';
+      entryType.bestScore       = ultra.confidence;
+      entryType.bestReasoning   = `[ultra_scalp/${ultra.confidence}] ${ultra.reasoning}`;
+      entryType.playbook = {
+        name: ultra.name,
+        family: ultra.family,
+        conviction: ultra.confidence >= 80 ? 'elite' : ultra.confidence >= 65 ? 'standard' : 'weak',
+        score: ultra.confidence,
+        risk: ultra.riskProfile,
+        confirmations: Object.entries(ultra.pillars).map(([k, v]) => `${k}:${typeof v === 'object' ? JSON.stringify(v).slice(0, 30) : v}`),
+        preconditions: ['ut_bot_5m_cross'],
+        ultra: true,
+      };
+      // Stamp ultra-scalp hold/RR onto the strategy
+      strategy.tradeType  = 'SCALP';
+      strategy.maxHoldSec = ultra.maxHoldSec;
+      // Lower the strategy minScore for ultra-scalp — the bar is the
+      // UT Bot cross, not the 12-pillar institutional score.
+      strategy.minScore = Math.min(strategy.minScore, 55);
+    } else {
+      // CALIBRATED: no playbook AND no legacy entry-type AND no ultra-scalp
+      // → don't trade. (Generic scalp fallback was the lowest-edge bucket.)
+      return _noTrade(
+        `No playbook, entry type, or ultra-scalp signal for ${metaRegime.state} ` +
+        `(${playbook.allPlaybooks.filter(p => p.valid).length} playbooks valid, ` +
+        `${entryType.allEvaluations.filter(e => e.valid).length} entry-types valid, ` +
+        `ultra=${ultra.fired ? 'fired-but-direction-mismatch' : 'no-signal'})`,
+        { metaRegime, playbook, entryType, ultraScalp: ultra }
+      );
+    }
   }
   // else: no playbook matched but legacy entry-type did — proceed with that
   // Stash playbook on entryType so downstream snapshot carries it
@@ -1224,6 +1281,9 @@ async function decide({
     'GAMMA_PIN_MEAN_REVERSION', 'PIN_REVERSION', 'VALUE_AREA_ROTATION',
     'VWAP_OSCILLATION_SCALP', 'COMPOSITE_PROFILE_EDGE_REJECTION',
     'HVN_REJECTION_ROTATION', 'LVN_REJECTION_SCALP',
+    // Ultra scalp engine — its own UT-Bot signal is the gate, OI velocity
+    // doesn't apply (the indicator works in low-flow markets too).
+    'ULTRA_SCALP_UT_BOT',
   ]);
   if (ceVel < 50_000 && peVel < 50_000 && volatilityRegime?.state === 'dead'
       && !deadVolFallbackTypes.has(entryType.bestType)) {
@@ -1237,6 +1297,7 @@ async function decide({
     'GAMMA_PIN_MEAN_REVERSION', 'MEAN_REVERSION',
     'MICRO_POC_MAGNET', 'VAH_VAL_FADE_SCALP', 'PIN_REVERSION',
     'COMPOSITE_PROFILE_EDGE_REJECTION', 'HVN_REJECTION_ROTATION',
+    'ULTRA_SCALP_UT_BOT',
   ]);
   if (volatilityRegime?.state === 'dead' && metaRegime?.state === 'gamma_pin'
       && !gammaPinAllowedTypes.has(entryType.bestType)) {
