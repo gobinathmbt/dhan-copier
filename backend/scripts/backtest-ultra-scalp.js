@@ -108,13 +108,13 @@ const SETTINGS = {
   windowStartHhmm: Number(userOpts.windowStart) || 920,
   windowEndHhmm:   Number(userOpts.windowEnd)   || 1500,
   ultraScalp: {
-    preset: userOpts.preset || 'best_practical',
-    minScore: Number(userOpts.minScore) || 70,
+    preset: userOpts.preset || 'high_accuracy',
+    minScore: Number(userOpts.minScore) || 80,
     requireRegime: userOpts.requireRegime !== 'false',
     flipWindowMin: Number(userOpts.flipWindowMin) || 10,
-    flipLimit: Number(userOpts.flipLimit) || 3,
+    flipLimit: Number(userOpts.flipLimit) || 2,
     atrExpansionMin: Number(userOpts.atrExpansionMin) || 0.85,
-    slopeMin: Number(userOpts.slopeMin) || 0.5,
+    slopeMin: Number(userOpts.slopeMin) || 1.0,
   },
 };
 

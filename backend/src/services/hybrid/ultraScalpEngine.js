@@ -111,10 +111,10 @@ const PRESETS = {
   },
 };
 
-const DEFAULT_PRESET = 'best_practical';
-const DEFAULT_MIN_SCORE = 70;
+const DEFAULT_PRESET = 'high_accuracy';
+const DEFAULT_MIN_SCORE = 80;
 const DEFAULT_FLIP_WINDOW_MIN = 10;
-const DEFAULT_FLIP_LIMIT = 3;
+const DEFAULT_FLIP_LIMIT = 2;
 
 // ────────────────────────────────────────────────────────────────────────
 // HELPERS
@@ -338,7 +338,7 @@ function decide({
   const flipLimit        = Number(userCfg.flipLimit)     || DEFAULT_FLIP_LIMIT;
   const requireRegime    = userCfg.requireRegime !== false;     // 15m must agree if enabled
   const atrExpansionMin  = Number(userCfg.atrExpansionMin) || 0.85; // current ATR ≥ 0.85× recent avg
-  const slopeMin         = Number(userCfg.slopeMin) || 0.5;      // trigger slope ≥ 0.5×ATR
+  const slopeMin         = Number(userCfg.slopeMin) || 1.0;      // trigger slope ≥ 1.0×ATR (calibrated)
 
   // ── Run dual UT Bot per enabled TF ───────────────────────────────────
   const tfReads = {};
