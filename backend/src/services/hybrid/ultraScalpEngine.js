@@ -51,23 +51,25 @@ const { calculateUTBot } = require('../algorithms/multiTimeframe.service');
 const REGIME_PROFILES = {
   expansion: {
     minScore: 65, flipLimit: 3, slopeMin: 0.8, allowStaleBar: true,
-    maxBarsSinceFlip: 2, atrExpansionMin: 0.85,
+    maxBarsSinceFlip: 2, atrExpansionMin: 0.95,
   },
   trend: {
     minScore: 70, flipLimit: 3, slopeMin: 0.9, allowStaleBar: true,
-    maxBarsSinceFlip: 2, atrExpansionMin: 0.85,
+    maxBarsSinceFlip: 2, atrExpansionMin: 0.95,
   },
   normal: {
     minScore: 78, flipLimit: 2, slopeMin: 1.0, allowStaleBar: true,
-    maxBarsSinceFlip: 1, atrExpansionMin: 0.90,
-  },
-  chop: {
-    minScore: 85, flipLimit: 2, slopeMin: 1.1, allowStaleBar: false,
     maxBarsSinceFlip: 1, atrExpansionMin: 0.95,
   },
+  chop: {
+    minScore: 95, flipLimit: 1, slopeMin: 1.5, allowStaleBar: false,
+    maxBarsSinceFlip: 1, atrExpansionMin: 1.05,
+    disabled: true,
+  },
   dead: {
-    minScore: 90, flipLimit: 1, slopeMin: 1.3, allowStaleBar: false,
-    maxBarsSinceFlip: 1, atrExpansionMin: 1.0,
+    minScore: 99, flipLimit: 0, slopeMin: 2.0, allowStaleBar: false,
+    maxBarsSinceFlip: 0, atrExpansionMin: 1.15,
+    disabled: true,
   },
 };
 
@@ -350,6 +352,17 @@ function decide({
   const regime = userCfg.forceRegime || _classifyRegime(volatilityRegime?.state, marketRegime);
   const regimeProfile = REGIME_PROFILES[regime] || REGIME_PROFILES.normal;
 
+  // CALIBRATED v6.5: chop / dead regimes contribute mediocre wins that drag
+  // profit factor. Disable trading in those regimes by default. User can
+  // override via settings.ultraScalp.allowChopRegime = true.
+  if (regimeProfile.disabled && !userCfg.allowChopRegime) {
+    return {
+      fired: false,
+      reasoning: `regime=${regime} disabled (chop/dead) — set allowChopRegime=true to override`,
+      pillars: { regime, regimeProfile },
+    };
+  }
+
   // ── PRESETS — UT Bot configs adapt to regime ─────────────────────────
   const baseProfiles = PRESETS[regime] || PRESETS.trend;
   function _resolveProfile(tf) {
@@ -431,10 +444,13 @@ function decide({
     }
   }
 
-  // ── PULLBACK CONTINUATION — when no fresh trigger fires but a strong
-  // multi-TF trend is intact + 1m UT trail is being respected, accept
-  // a continuation entry. Only in expansion/trend regimes.
-  // ─────────────────────────────────────────────────────────────────────
+  // ── PULLBACK CONTINUATION (CALIBRATED v6.5) ─────────────────────────
+  // Stricter validation than before: require ALL of:
+  //   - 3m + 5m trend agree
+  //   - 1m stream in same direction
+  //   - slope on 3m AND 5m expanding
+  //   - ATR expansion ≥ 1.05× (already healthy expansion regime)
+  //   - delta in direction (>= 5% bias)
   if (!trigger && (regime === 'expansion' || regime === 'trend')) {
     const r1 = tfReads['1m']?.read;
     const r3 = tfReads['3m']?.read;
@@ -445,10 +461,13 @@ function decide({
         && (r1.streams?.buy?.trend === d || r1.streams?.sell?.trend === d)
       );
       if (dirAgree) {
-        const directionStream = dirAgree === 'bullish' ? r1.streams?.buy : r1.streams?.sell;
-        // Slope on 3m must be expanding for valid continuation
-        if (r3.slopeStrength >= slopeMin
-            && (r3.slopeTrend === 'expanding' || r5.slopeTrend === 'expanding')) {
+        // Check delta agrees with direction (>= 5% bias)
+        const dPctCheck = _safe(volumeAnalysis?.delta?.cvdPctLong);
+        const deltaAligned = (dirAgree === 'bullish' && dPctCheck >= 5)
+                          || (dirAgree === 'bearish' && dPctCheck <= -5);
+        // Both 3m AND 5m slope must be expanding
+        const bothExpanding = r3.slopeTrend === 'expanding' && r5.slopeTrend === 'expanding';
+        if (deltaAligned && bothExpanding && r3.slopeStrength >= slopeMin) {
           trigger = {
             tf: '3m', signal: dirAgree === 'bullish' ? 'buy' : 'sell',
             read: r3, profile: tfReads['3m'].profile, candles: tfReads['3m'].candles,
@@ -536,17 +555,30 @@ function decide({
     };
   }
 
-  // ── MOMENTUM EXHAUSTION FILTER ───────────────────────────────────────
-  // Block entry if recent 8-bar move > 2.5×ATR AND slope is compressing
-  // (late-continuation chase after the move is done).
+  // ── MOMENTUM EXHAUSTION FILTER (CALIBRATED v6.5) ─────────────────────
+  // Block entry if recent 8-bar move is large AND momentum isn't actively
+  // expanding. Late-continuation chases after the move is done are the
+  // largest source of low-quality entries.
   const recentMove = _recentMoveSize(candles5m, 8);
   const atrPts = _safe(atr?.atr_5m) || _safe(volatilityRegime?.atr5m) || 12;
   const moveRatio = recentMove / Math.max(0.0001, atrPts);
-  if (moveRatio > 2.5 && trigger.read.slopeTrend === 'compressing') {
+  // Tier-1 exhaustion: huge move + slope not expanding
+  if (moveRatio > 2.2 && trigger.read.slopeTrend !== 'expanding') {
     return {
       fired: false, signal: null, direction,
-      reasoning: `[regime=${regime}] exhaustion: 8-bar move ${recentMove.toFixed(1)}pts (${moveRatio.toFixed(1)}×ATR) + slope compressing`,
+      reasoning: `[regime=${regime}] exhaustion: 8-bar move ${recentMove.toFixed(1)}pts (${moveRatio.toFixed(1)}×ATR) + slope=${trigger.read.slopeTrend}`,
       pillars: { tfReads: exposedReads, regime, recentMove, moveRatio, slopeTrend: trigger.read.slopeTrend },
+    };
+  }
+  // Tier-2 exhaustion: very huge move + delta against direction
+  const dPctEarly = _safe(volumeAnalysis?.delta?.cvdPctLong);
+  const deltaWeak = (direction === 'bullish' && dPctEarly < 5)
+                 || (direction === 'bearish' && dPctEarly > -5);
+  if (moveRatio > 3.0 && deltaWeak) {
+    return {
+      fired: false, signal: null, direction,
+      reasoning: `[regime=${regime}] strong exhaustion: ${moveRatio.toFixed(1)}×ATR + delta ${dPctEarly.toFixed(1)}% weak`,
+      pillars: { tfReads: exposedReads, regime, recentMove, moveRatio, dPct: dPctEarly },
     };
   }
 
@@ -701,12 +733,29 @@ function decide({
       : tier === 'standard' ? 'hybrid'
       :                       'fixed');
 
+  // CALIBRATED v6.5: regime-adaptive lockTriggerPct so fast-burst regimes
+  // lock profit earlier (preventing decay reversal of small bursts) while
+  // calmer regimes give the trade more room.
+  const lockByRegime = {
+    expansion: 0.35,    // burst regimes — lock fast
+    trend:     0.40,
+    normal:    0.50,
+    chop:      0.60,    // (mostly disabled but if forced, give room)
+    dead:      0.60,
+  };
+  const lockTriggerPct = userCfg.lockTriggerPct ?? lockByRegime[regime] ?? 0.50;
+
   const smartTrail = {
     mode:             exitMode,
-    lockTriggerPct:   userCfg.lockTriggerPct  ?? 0.50,
+    lockTriggerPct,
     peakGivebackPct:  userCfg.peakGivebackPct ?? null,
     slopeExitMin:     userCfg.slopeExitMin    ?? 0.30,
     earlyFailureCheck: userCfg.earlyFailureCheck ?? true,
+    // NEW v6.5: anti-mediocre filter — exit if peak < (target × pct)
+    // and held > minHeldSec. Default thresholds tuned to remove the
+    // "tiny TIMEOUT win" pattern (peak 0.3-1.8pts after 100s hold).
+    minEfficiencyPct:    userCfg.minEfficiencyPct    ?? 0.30,   // peak must be ≥ 30% of target
+    minEfficiencyHeldSec: userCfg.minEfficiencyHeldSec ?? 60,
   };
 
   return {

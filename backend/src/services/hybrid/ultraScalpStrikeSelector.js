@@ -38,23 +38,23 @@ const TIER_PROFILES = {
     deltaMin: 0.42, deltaMax: 0.58,
     deltaHardMax: 0.65,
     minPremium: 25,
-    maxPremium: 400,                      // widened — runner mode benefits from rich premium
+    maxPremium: 250,                      // CALIBRATED v6.5: tighter — option elasticity drops above ~250
     moneynessBonus: { OTM: 16, ATM: 10, ITM: 0 },
     distMaxFromAtm: 100,
   },
   standard: {
     deltaMin: 0.40, deltaMax: 0.55,
-    deltaHardMax: 0.62,
+    deltaHardMax: 0.60,
     minPremium: 25,
-    maxPremium: 250,
+    maxPremium: 180,
     moneynessBonus: { OTM: 8, ATM: 14, ITM: 0 },
     distMaxFromAtm: 100,
   },
   weak: {
     deltaMin: 0.40, deltaMax: 0.50,
-    deltaHardMax: 0.58,
+    deltaHardMax: 0.55,
     minPremium: 30,
-    maxPremium: 150,
+    maxPremium: 120,
     moneynessBonus: { OTM: 2, ATM: 12, ITM: -10 },
     distMaxFromAtm: 50,
   },

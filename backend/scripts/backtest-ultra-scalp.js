@@ -360,6 +360,8 @@ function simulateTrade(day, decision, entryEpoch) {
                    : er.reason.startsWith('Adaptive')      ? 'SMART_TRAIL'
                    : er.reason.startsWith('Runner end')    ? 'RUNNER_END'
                    : er.reason.startsWith('Early failure') ? 'EARLY_FAIL'
+                   : er.reason.startsWith('Anti-mediocre') ? 'ANTI_MEDIOCRE'
+                   : er.reason.startsWith('Velocity decay')? 'VELOCITY_DECAY'
                    :                                          'EXIT';
         return _close(code, entryLtp, ltp, t - entryEpoch, decision, peakLtp);
       }

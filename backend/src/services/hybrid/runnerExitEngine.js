@@ -124,6 +124,32 @@ function decideRunnerExit({
     }
   }
 
+  // ANTI-MEDIOCRE FILTER (NEW v6.5) — kill stagnant trades early so we
+  // don't wait for TIMEOUT exits at +0.3 / +1.8pts that get eaten by
+  // brokerage. Fires when:
+  //   - heldSec >= minEfficiencyHeldSec (default 60)
+  //   - peak P&L is below minEfficiencyPct × target (default 30%)
+  //   - we're not already managing a runner that crossed the lock
+  //   - AND current is not above peak (price stagnant or falling)
+  // The exit price will likely be near peak (small win) or break-even —
+  // either way better than waiting for timeout decay.
+  const minEffPct  = smartTrail.minEfficiencyPct  ?? 0.30;
+  const minEffHeld = smartTrail.minEfficiencyHeldSec ?? 60;
+  if (minEffPct > 0 && heldSec >= minEffHeld && phase === 'pre_lock') {
+    const peakPctTarget = (peakPts / Math.max(1, targetPts)) * 100;
+    // Only fire when the trade is BOTH below efficiency AND stagnant —
+    // current ≤ peak * 0.5 means price has already retraced significantly.
+    // This avoids killing trades that are still slowly climbing.
+    const stagnant = current <= peak * 0.7;
+    if (peakPctTarget < (minEffPct * 100) && stagnant) {
+      return {
+        action: 'EXIT',
+        reason: `Anti-mediocre: peak +${peakPts.toFixed(2)}pts (${peakPctTarget.toFixed(0)}% of ${targetPts}pt target) after ${heldSec}s — efficient capital recycle`,
+        phase: 'anti_mediocre',
+      };
+    }
+  }
+
   if (phase === 'pre_lock') return { action: 'HOLD', phase };
 
   // PHASE 2 (locked): floor breach
@@ -169,6 +195,16 @@ function decideRunnerExit({
       return {
         action: 'EXIT',
         reason: `Runner end: ATR contracting (peak +${peakPts.toFixed(2)}pts, now ${pnlPts.toFixed(2)}pts)`,
+        phase,
+      };
+    }
+    // VELOCITY DECAY (NEW v6.5) — protect burst scalps that already booked
+    // a respectable peak. If price has stopped advancing AND slope is
+    // compressing, exit before the retrace eats the gain.
+    if (peakPts >= 5 && momentum.slopeTrend === 'compressing' && pnlPts < peakPts * 0.85) {
+      return {
+        action: 'EXIT',
+        reason: `Velocity decay: peak +${peakPts.toFixed(2)}pts, now ${pnlPts.toFixed(2)}pts, slope compressing — bank before retrace`,
         phase,
       };
     }
