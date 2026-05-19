@@ -2138,16 +2138,31 @@ async function runPredictionCycle() {
     
     // ============================================================
     // MINIMUM PREMIUM CHECK - Avoid low-premium entries
+    // CALIBRATED 2026-05-19: lowered fallback default from 80 to 30 so OTM
+    // strikes with premium 33-79 (very common when spot is mid-range) can
+    // enter. Live session 2026-05-19 had 6 valid LIGHT_TREND_DRIFT_SCALP
+    // elite playbook firings blocked silently here despite confidence>=8.
     // ============================================================
-    const minEntryPremium = Number(settings.minEntryPremium) || 80; // Default to 80, not 200
+    const minEntryPremium = Number(settings.minEntryPremium) || 30;
     if (premium < minEntryPremium) {
-      logger.warn({ 
-        premium, 
+      logger.warn({
+        premium,
         minEntryPremium,
         settingsValue: settings.minEntryPremium,
-        selectedStrike, 
-        isCE 
+        selectedStrike,
+        isCE
       }, '[engine] Premium too low — skipping entry (below minimum threshold)');
+      // Also log to engine event stream so it shows up in the structured
+      // session log (premium block is the most common silent skip).
+      try {
+        await engineLogger.logEvent({
+          sessionId: state.session._id,
+          eventType: 'engine_no_trade',
+          level: 'warn',
+          message: `Premium too low — skipping entry (premium=${premium} < min=${minEntryPremium})`,
+          data: { premium, minEntryPremium, settingsValue: settings.minEntryPremium, selectedStrike, isCE },
+        });
+      } catch (_) {}
       return;
     }
     

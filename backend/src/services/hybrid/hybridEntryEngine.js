@@ -1364,6 +1364,34 @@ async function decide({
     return _noTrade(`Session phase ${sessionPhase.phase} disallows entries`);
   }
 
+  // ── Pipeline step 10b: Custom user trade-window (institutional spec) ──
+  // Per user request 2026-05-19: restrict NEW entries to a configurable
+  // hh:mm window. Default: 09:20 → 15:00 IST so we participate from after
+  // the 5-min opening absorption through to 30 min before NSE close. The
+  // engine's session phase already allows 09:15-15:15; this is the user
+  // override for live trading hygiene.
+  //
+  // Configure via settings.tradeWindowStart / settings.tradeWindowEnd
+  // (numbers in HHMM format, e.g. 920 or 1500). When unset, defaults are
+  // used. To disable the window entirely, set both to null.
+  const _winStartRaw = settings?.tradeWindowStart;
+  const _winEndRaw   = settings?.tradeWindowEnd;
+  const tradeWindowStart = (_winStartRaw === null || _winStartRaw === undefined)
+    ? 920  : Number(_winStartRaw);
+  const tradeWindowEnd   = (_winEndRaw === null || _winEndRaw === undefined)
+    ? 1500 : Number(_winEndRaw);
+  const _hhmm = sessionPhase?.hhmm;
+  if (Number.isFinite(_hhmm) && Number.isFinite(tradeWindowStart) && Number.isFinite(tradeWindowEnd)) {
+    if (_hhmm < tradeWindowStart) {
+      return _noTrade(`Trade window not open yet (hhmm=${_hhmm} < ${tradeWindowStart})`,
+        { sessionId, sessionPhase });
+    }
+    if (_hhmm >= tradeWindowEnd) {
+      return _noTrade(`Trade window closed (hhmm=${_hhmm} >= ${tradeWindowEnd})`,
+        { sessionId, sessionPhase });
+    }
+  }
+
   // ── Pipeline step 11: Strike selection ───────────────────────────────
   // Trade type comes from the strategy; opening strike (if known) anchors the
   // selection within ±6 strikes of the day's institutional reference.
