@@ -592,6 +592,15 @@ async function backtestDay(dayLabel) {
     aggressionMode: 'institutional',
     maxTradesPerDay: 8,                           // institutional spec daily cap
     maxLossesPerDay: 2,                           // halt after 2 losses today (was 3)
+    // ── ENGINE ROUTING (NEW 2026-05-19) ──
+    // For backtest verification: enable all 3 engines so we can see the
+    // full router behaviour. Override via env if needed.
+    ultraScalpingEngine: true,
+    supportScalpEngine:  true,
+    coreEngine:          true,
+    tradingSymbols: ['NIFTY_50'],
+    // Allow chop regime so the master can fire in low-vol days too
+    ultraScalp: { allowChopRegime: true },
   };
 
   const session = {

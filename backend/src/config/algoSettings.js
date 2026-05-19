@@ -201,6 +201,59 @@ const ALGO_SETTINGS = {
   // Hard kill-switch for ultra scalp (if you want pure institutional only)
   disableUltraScalp: false,
 
+  // ════════════════════════════════════════════════════════════════════
+  // ENGINE ROUTING — three independent engines, each with its own entry
+  // and monitor logic. The master engine reads these flags and routes
+  // every cycle to the active engine(s).
+  //
+  //   ultraScalpingEngine  — pure UT Bot multi-timeframe + dedicated
+  //                          ultra strike selector. (5-20pt scalps)
+  //   supportScalpEngine   — confluence: UT Bot + Supertrend + VWAP +
+  //                          EMA9/20 + RSI. Slower, higher-quality.
+  //                          (8-20pt entries)
+  //   coreEngine           — full institutional hybrid pipeline (all
+  //                          24+ playbooks, microstructure, futures
+  //                          leadership, OI analytics, etc.)
+  //
+  // When ALL three are false, the engine produces NO_TRADE every cycle.
+  // When multiple are true, the master engine takes the first valid
+  // signal in priority order: ultraScalp > supportScalp > core.
+  //
+  // Each engine has its OWN entry logic AND monitor logic — exits never
+  // mix between engines.
+  // ════════════════════════════════════════════════════════════════════
+  ultraScalpingEngine: true,    // User spec 2026-05-19: ON for tomorrow's live
+  supportScalpEngine:  true,    // User spec 2026-05-19: ON for tomorrow's live
+  coreEngine:          false,   // User spec 2026-05-19: OFF for tomorrow's live
+
+  // ── Support Scalp Engine config (UT Bot + Supertrend + VWAP + EMA + RSI) ──
+  // 5-confluence engine for higher-quality intraday scalps. All 5 must
+  // align in trade direction. Defaults match user spec.
+  supportScalp: {
+    primaryTf:        '3m',     // Trigger TF — 3m for balance
+    confirmationTf:   '15m',    // Higher TF must agree
+    utBot: { keyValue: 1.5, atrPeriod: 10 },  // User spec: balanced 3m setup
+    supertrend: { atrPeriod: 10, multiplier: 2.5 },
+    ema:   { fastPeriod: 9, slowPeriod: 20 },
+    rsi:   { period: 14, longMin: 55, shortMax: 45 },
+    requireVwap:    true,
+    requireSupertrend: true,
+    requireEmaAlignment: true,
+    requireRsiFilter: true,
+    maxHoldSec: 240,
+    slPtsMin: 6, slPtsMax: 14,
+    targetMin: 8, targetMax: 20,
+    sizingFactor: 0.7,
+  },
+
+  // ── Trading symbols (for multi-symbol routing) ─────────────────────────
+  // Each entry routes the engine pipeline against that symbol. Default is
+  // NIFTY_50 only. Adding 'SENSEX' here will wire the engines to also run
+  // on Sensex (requires Sensex live feed wiring in feedRecorder).
+  // Live UI displays the market column from the active trade.symbol.
+  tradingSymbols: ['NIFTY_50'],   // ['NIFTY_50', 'SENSEX']
+
+
   // ============================================================
   // STRATEGY & EXECUTION MODE
   // ============================================================

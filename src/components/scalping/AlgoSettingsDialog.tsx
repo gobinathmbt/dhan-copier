@@ -41,6 +41,12 @@ export interface ScalpingSettings {
   enableBrokerageCalculation: boolean;
   enableFuturesConfirmation: boolean;
   ultraScalping: boolean;
+  // ── Engine routing (NEW 2026-05-19) ──
+  ultraScalpingEngine?: boolean;
+  supportScalpEngine?: boolean;
+  coreEngine?: boolean;
+  // Trading symbols
+  tradingSymbols?: string[];
   useMasterSignalWhenNeutral: boolean;
   masterMinScore: number;
   masterMinConfidence: number;
@@ -244,6 +250,40 @@ export function AlgoSettingsDialog({ open, onOpenChange }: Props) {
               ))}
             </div>
           </div>
+
+          <div className="space-y-2">
+            <h3 className="font-semibold text-sm">Engine Routing</h3>
+            <div className="flex flex-wrap gap-2 text-xs">
+              {s.ultraScalpingEngine !== false && (
+                <span className="bg-purple-500/10 text-purple-600 px-2 py-1 rounded font-mono">
+                  ULTRA_SCALP {s.ultraScalpingEngine === false ? '✗' : '✓'}
+                </span>
+              )}
+              {s.supportScalpEngine && (
+                <span className="bg-cyan-500/10 text-cyan-600 px-2 py-1 rounded font-mono">
+                  SUPPORT_SCALP ✓
+                </span>
+              )}
+              {s.coreEngine && (
+                <span className="bg-slate-500/10 text-slate-600 px-2 py-1 rounded font-mono">
+                  CORE ✓
+                </span>
+              )}
+            </div>
+          </div>
+
+          {s.tradingSymbols && s.tradingSymbols.length > 0 && (
+            <div className="space-y-2">
+              <h3 className="font-semibold text-sm">Trading Symbols</h3>
+              <div className="flex flex-wrap gap-2 text-xs">
+                {s.tradingSymbols.map(sym => (
+                  <span key={sym} className="bg-amber-500/10 text-amber-600 px-2 py-1 rounded font-mono">
+                    {sym}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="space-y-2">
             <h3 className="font-semibold text-sm">Feature Toggles</h3>

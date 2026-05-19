@@ -43,6 +43,9 @@ interface ScalpingTrade {
   oiDirection?: string;
   // Trade type
   tradeType?: "SCALP" | "SWING";
+  // Engine routing (NEW 2026-05-19)
+  engineType?: "ULTRA_SCALP" | "SUPPORT_SCALP" | "CORE";
+  market?: string;
   // Brokerage
   brokerageEnabled?: boolean;
   grossPnL?: number;
@@ -366,6 +369,8 @@ function ScalpingPage() {
     <TableRow>
       <TableHead>Time</TableHead>
       <TableHead>Duration</TableHead>
+      <TableHead>Engine</TableHead>
+      <TableHead>Market</TableHead>
       <TableHead>Type</TableHead>
       <TableHead>Signal</TableHead>
       <TableHead>Strike</TableHead>
@@ -441,6 +446,29 @@ function ScalpingPage() {
             <TableCell className="text-xs whitespace-nowrap">
               <Badge variant="outline" className="font-mono text-[10px]">
                 {durationStr}
+              </Badge>
+            </TableCell>
+
+            {/* Engine */}
+            <TableCell>
+              <Badge
+                variant="outline"
+                className={`font-mono text-[10px] ${
+                  t.engineType === "ULTRA_SCALP" ? "border-purple-400 text-purple-700" :
+                  t.engineType === "SUPPORT_SCALP" ? "border-cyan-400 text-cyan-700" :
+                  "border-slate-400 text-slate-700"
+                }`}
+              >
+                {t.engineType
+                  ? t.engineType.replace("_SCALP", "").replace("ULTRA", "ULTRA").replace("SUPPORT", "SUPPORT").replace("CORE", "CORE")
+                  : "—"}
+              </Badge>
+            </TableCell>
+
+            {/* Market */}
+            <TableCell>
+              <Badge variant="secondary" className="font-mono text-[10px]">
+                {t.market || "NIFTY"}
               </Badge>
             </TableCell>
 

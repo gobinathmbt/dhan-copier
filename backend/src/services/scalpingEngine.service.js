@@ -2307,6 +2307,9 @@ async function runPredictionCycle() {
       alternativeStrike: marketSession.openingStrike,
       expectedHoldDuration: isSwingTrade ? '3-15min' : '30-120sec',
       tradeType: tradeType,
+      // ── ENGINE & MARKET (NEW 2026-05-19) ──
+      engineType: institutionalEntryDecision.engineType || 'CORE',
+      market:     institutionalEntryDecision.market     || 'NIFTY_50',
       // Per-trade AI overrides — consumed by monitor engine
       maxHoldSeconds: Number(institutionalEntryDecision.suggested_max_hold_seconds)
         || (isSwingTrade ? (state.session.settings?.swingMaxHoldMinutes || 15) * 60 : state.session.settings?.maxHoldTimeSeconds || 180),

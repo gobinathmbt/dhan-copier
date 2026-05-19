@@ -30,6 +30,14 @@ const ScalpingTradeSchema = new mongoose.Schema(
     expectedHoldDuration: { type: String },
     // Trade type: SCALP (fast, small target) or SWING (hold longer, bigger target)
     tradeType: { type: String, enum: ['SCALP', 'SWING'], default: 'SCALP' },
+    // ── ENGINE & MARKET (NEW 2026-05-19) ──
+    // engineType: which engine produced this trade — surfaced in UI table.
+    // 'ULTRA_SCALP'   — UT Bot multi-timeframe (ultraScalpEngine)
+    // 'SUPPORT_SCALP' — UT+Supertrend+VWAP+EMA+RSI confluence
+    // 'CORE'          — full institutional hybrid pipeline
+    engineType: { type: String, enum: ['ULTRA_SCALP', 'SUPPORT_SCALP', 'CORE'], default: 'CORE', index: true },
+    // market: which symbol this trade was placed on (NIFTY_50 / SENSEX / etc.)
+    market:     { type: String, default: 'NIFTY_50', index: true },
     // Per-trade AI overrides (set at entry by entryEngine)
     maxHoldSeconds: { type: Number, default: 180 },
     aiEntryDecision: { type: mongoose.Schema.Types.Mixed },

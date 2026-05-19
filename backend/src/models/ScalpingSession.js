@@ -114,6 +114,32 @@ const ScalpingSessionSchema = new mongoose.Schema(
       // Hard kill switch
       disableUltraScalp: { type: Boolean, default: false },
 
+      // ── ENGINE ROUTING (NEW 2026-05-19) ──────────────────────────────
+      // Three independent engines, each with its own entry+monitor logic.
+      // The master scalping engine routes every cycle to whichever is enabled.
+      // Priority order when multiple are enabled: ultraScalp > supportScalp > core.
+      ultraScalpingEngine: { type: Boolean, default: true },
+      supportScalpEngine:  { type: Boolean, default: true },
+      coreEngine:          { type: Boolean, default: false },
+
+      // ── SUPPORT SCALP ENGINE (UT+Supertrend+VWAP+EMA+RSI confluence) ─
+      supportScalp: { type: mongoose.Schema.Types.Mixed, default: () => ({
+        primaryTf: '3m', confirmationTf: '15m',
+        utBot: { keyValue: 1.5, atrPeriod: 10 },
+        supertrend: { atrPeriod: 10, multiplier: 2.5 },
+        ema:   { fastPeriod: 9, slowPeriod: 20 },
+        rsi:   { period: 14, longMin: 55, shortMax: 45 },
+        requireVwap: true, requireSupertrend: true,
+        requireEmaAlignment: true, requireRsiFilter: true,
+        maxHoldSec: 240, slPtsMin: 6, slPtsMax: 14,
+        targetMin: 8, targetMax: 20, sizingFactor: 0.7,
+      }) },
+
+      // ── TRADING SYMBOLS (NEW 2026-05-19) ─────────────────────────────
+      // Each symbol routes the engine pipeline against that market.
+      // Default NIFTY_50 only. SENSEX requires Sensex live feed wiring.
+      tradingSymbols: { type: [String], default: ['NIFTY_50'] },
+
       // ── STRATEGY ─────────────────────────────────────────────────────────
       strategyMode: { type: String, default: 'Institutional Multi-Factor' }, // UPDATED name
       executionMode: { type: String, enum: ['simulation', 'live'], default: 'simulation' },
