@@ -168,6 +168,39 @@ const ALGO_SETTINGS = {
   // engine uses a single sizing factor across all tiers (legacy behaviour).
   enableTierSizing: true,
 
+  // ── Trade window (IST HHMM, e.g. 920 = 09:20) ─────────────────────────
+  // Hybrid engine restricts NEW entries to this window. Default 09:20-15:00
+  // per user spec 2026-05-19. Set both to null to disable.
+  tradeWindowStart: 920,
+  tradeWindowEnd:   1500,
+
+  // ── Ultra Scalp Engine (UT Bot mirror) ────────────────────────────────
+  // Dedicated 5-20pt scalp engine that mirrors the user's TradingView
+  // "UT Bot Alerts" indicator. Runs alongside the institutional playbook
+  // layer — fires when no playbook fires but UT Bot 1m/3m/5m crosses
+  // produce a clear chart-level signal.
+  //
+  // Each timeframe has its own UT Bot config (keyValue, atrPeriod) plus
+  // a target/SL profile. The 5m default matches the user's TradingView
+  // screenshot (Key=2, ATR=1).
+  //
+  // To disable a TF: set enable1m/enable3m/enable5m to false.
+  // To use TradingView's exact param on all TFs: set keyValue=2 atrPeriod=1.
+  ultraScalp: {
+    enable1m: true,                       // 1m UT Bot — fastest scalp (90s holds)
+    enable3m: true,                       // 3m UT Bot — balanced (120s)
+    enable5m: true,                       // 5m UT Bot — primary (150s)
+    vwapStrict: true,                     // require spot above/below VWAP in trade direction
+    requireBarColor: true,                // require last 1m candle in direction
+    allowStaleBar: false,                 // only fire on 0-1 bars since flip (no chasing)
+    // Per-TF overrides — leave any field undefined to use defaults
+    tf1m: { keyValue: 1, atrPeriod: 5,  maxHoldSec:  90, slPtsMin: 4, slPtsMax: 8,  targetMin: 5,  targetMax: 12, sizingFactor: 0.5 },
+    tf3m: { keyValue: 1, atrPeriod: 3,  maxHoldSec: 120, slPtsMin: 5, slPtsMax: 10, targetMin: 6,  targetMax: 15, sizingFactor: 0.6 },
+    tf5m: { keyValue: 2, atrPeriod: 1,  maxHoldSec: 150, slPtsMin: 6, slPtsMax: 12, targetMin: 8,  targetMax: 20, sizingFactor: 0.7 },
+  },
+  // Hard kill-switch for ultra scalp (if you want pure institutional only)
+  disableUltraScalp: false,
+
   // ============================================================
   // STRATEGY & EXECUTION MODE
   // ============================================================

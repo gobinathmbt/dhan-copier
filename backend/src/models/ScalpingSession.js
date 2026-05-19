@@ -95,6 +95,25 @@ const ScalpingSessionSchema = new mongoose.Schema(
       // Confidence-tier probe sizing (elite 1.0× / standard 0.6× / probe 0.35×)
       enableTierSizing: { type: Boolean, default: true },
 
+      // ── TRADE WINDOW (IST HHMM) ──────────────────────────────────────────
+      // Hybrid engine restricts NEW entries to this window. 920..1500 default.
+      tradeWindowStart: { type: Number, default: 920 },
+      tradeWindowEnd:   { type: Number, default: 1500 },
+
+      // ── ULTRA SCALP ENGINE (UT Bot mirror, 5-20pt scalps) ────────────────
+      // Mirrors the user's TradingView UT Bot Alerts indicator. Each TF has
+      // its own keyValue/atrPeriod and target/SL profile. mongoose.Mixed so
+      // partial overrides survive without explicit sub-schemas.
+      ultraScalp: { type: mongoose.Schema.Types.Mixed, default: () => ({
+        enable1m: true, enable3m: true, enable5m: true,
+        vwapStrict: true, requireBarColor: true, allowStaleBar: false,
+        tf1m: { keyValue: 1, atrPeriod: 5,  maxHoldSec:  90, slPtsMin: 4, slPtsMax: 8,  targetMin: 5,  targetMax: 12, sizingFactor: 0.5 },
+        tf3m: { keyValue: 1, atrPeriod: 3,  maxHoldSec: 120, slPtsMin: 5, slPtsMax: 10, targetMin: 6,  targetMax: 15, sizingFactor: 0.6 },
+        tf5m: { keyValue: 2, atrPeriod: 1,  maxHoldSec: 150, slPtsMin: 6, slPtsMax: 12, targetMin: 8,  targetMax: 20, sizingFactor: 0.7 },
+      }) },
+      // Hard kill switch
+      disableUltraScalp: { type: Boolean, default: false },
+
       // ── STRATEGY ─────────────────────────────────────────────────────────
       strategyMode: { type: String, default: 'Institutional Multi-Factor' }, // UPDATED name
       executionMode: { type: String, enum: ['simulation', 'live'], default: 'simulation' },
