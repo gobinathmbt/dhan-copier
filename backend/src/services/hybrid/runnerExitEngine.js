@@ -124,29 +124,53 @@ function decideRunnerExit({
     }
   }
 
-  // ANTI-MEDIOCRE FILTER (NEW v6.5) — kill stagnant trades early so we
-  // don't wait for TIMEOUT exits at +0.3 / +1.8pts that get eaten by
-  // brokerage. Fires when:
-  //   - heldSec >= minEfficiencyHeldSec (default 60)
-  //   - peak P&L is below minEfficiencyPct × target (default 30%)
-  //   - we're not already managing a runner that crossed the lock
-  //   - AND current is not above peak (price stagnant or falling)
-  // The exit price will likely be near peak (small win) or break-even —
-  // either way better than waiting for timeout decay.
+  // ANTI-MEDIOCRE FILTER (NEW v6.5, refined v6.7) — kill stagnant trades
+  // early so we don't wait for TIMEOUT exits at +0.3 / +1.8pts that get
+  // eaten by brokerage. Only fires on clear stagnation+retrace.
   const minEffPct  = smartTrail.minEfficiencyPct  ?? 0.30;
   const minEffHeld = smartTrail.minEfficiencyHeldSec ?? 60;
-  if (minEffPct > 0 && heldSec >= minEffHeld && phase === 'pre_lock') {
+  if (minEffPct > 0 && phase === 'pre_lock' && heldSec >= minEffHeld) {
     const peakPctTarget = (peakPts / Math.max(1, targetPts)) * 100;
-    // Only fire when the trade is BOTH below efficiency AND stagnant —
-    // current ≤ peak * 0.5 means price has already retraced significantly.
-    // This avoids killing trades that are still slowly climbing.
     const stagnant = current <= peak * 0.7;
     if (peakPctTarget < (minEffPct * 100) && stagnant) {
       return {
         action: 'EXIT',
-        reason: `Anti-mediocre: peak +${peakPts.toFixed(2)}pts (${peakPctTarget.toFixed(0)}% of ${targetPts}pt target) after ${heldSec}s — efficient capital recycle`,
+        reason: `Anti-mediocre: peak +${peakPts.toFixed(2)}pts (${peakPctTarget.toFixed(0)}% of ${targetPts}pt target) after ${heldSec}s — stagnant + retraced`,
         phase: 'anti_mediocre',
       };
+    }
+  }
+
+  // PROACTIVE FADE EXIT (NEW v6.8) — if we're past 50% of max hold and
+  // pnlPts is negative, exit now before TIMEOUT eats more. UT Bot signal
+  // is invalidating; cut losses early.
+  const fadeAtPct = smartTrail.fadeAtPct ?? 0.50;
+  if (fadeAtPct > 0 && phase === 'pre_lock' && heldSec >= maxHoldSec * fadeAtPct) {
+    if (pnlPts < -1) {
+      return {
+        action: 'EXIT',
+        reason: `Proactive fade: ${pnlPts.toFixed(2)}pts at ${heldSec}s/${maxHoldSec}s (${(fadeAtPct*100).toFixed(0)}%) — UT signal invalidating`,
+        phase: 'proactive_fade',
+      };
+    }
+  }
+
+  // BREAKEVEN PROTECTION (NEW v6.6) — once we're up by ≥30% target, never
+  // let it return to a loss. If price returns below entry+breakevenPct,
+  // exit at small profit. Captures small wins instead of timeout losses.
+  const beTriggerPct = smartTrail.breakevenTriggerPct ?? 0.30;
+  const beFloorPct   = smartTrail.breakevenFloorPct   ?? 0.10;
+  if (beTriggerPct > 0 && phase === 'pre_lock') {
+    const peakPctTarget = (peakPts / Math.max(1, targetPts)) * 100;
+    if (peakPctTarget >= (beTriggerPct * 100)) {
+      const beFloorPrice = entry + (beFloorPct * targetPts);
+      if (current <= beFloorPrice) {
+        return {
+          action: 'EXIT',
+          reason: `BE protection: peak +${peakPts.toFixed(2)}pts (${peakPctTarget.toFixed(0)}%) returned to ${pnlPts.toFixed(2)}pts (≤ floor +${(beFloorPct * targetPts).toFixed(2)})`,
+          phase: 'be_protection',
+        };
+      }
     }
   }
 

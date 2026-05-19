@@ -50,25 +50,25 @@ const { calculateUTBot } = require('../algorithms/multiTimeframe.service');
 // ────────────────────────────────────────────────────────────────────────
 const REGIME_PROFILES = {
   expansion: {
-    minScore: 65, flipLimit: 3, slopeMin: 0.8, allowStaleBar: true,
-    maxBarsSinceFlip: 2, atrExpansionMin: 0.95,
+    minScore: 78, flipLimit: 2, slopeMin: 1.2, allowStaleBar: true,
+    maxBarsSinceFlip: 1, atrExpansionMin: 1.05,
   },
   trend: {
-    minScore: 70, flipLimit: 3, slopeMin: 0.9, allowStaleBar: true,
-    maxBarsSinceFlip: 2, atrExpansionMin: 0.95,
+    minScore: 82, flipLimit: 2, slopeMin: 1.3, allowStaleBar: true,
+    maxBarsSinceFlip: 1, atrExpansionMin: 1.05,
   },
   normal: {
-    minScore: 78, flipLimit: 2, slopeMin: 1.0, allowStaleBar: true,
-    maxBarsSinceFlip: 1, atrExpansionMin: 0.95,
+    minScore: 88, flipLimit: 2, slopeMin: 1.4, allowStaleBar: false,
+    maxBarsSinceFlip: 1, atrExpansionMin: 1.10,
   },
   chop: {
-    minScore: 95, flipLimit: 1, slopeMin: 1.5, allowStaleBar: false,
-    maxBarsSinceFlip: 1, atrExpansionMin: 1.05,
+    minScore: 99, flipLimit: 0, slopeMin: 2.5, allowStaleBar: false,
+    maxBarsSinceFlip: 0, atrExpansionMin: 1.20,
     disabled: true,
   },
   dead: {
-    minScore: 99, flipLimit: 0, slopeMin: 2.0, allowStaleBar: false,
-    maxBarsSinceFlip: 0, atrExpansionMin: 1.15,
+    minScore: 99, flipLimit: 0, slopeMin: 3.0, allowStaleBar: false,
+    maxBarsSinceFlip: 0, atrExpansionMin: 1.30,
     disabled: true,
   },
 };
@@ -329,6 +329,21 @@ function _recentMoveSize(candles, lookback = 8) {
   return high - low;
 }
 
+// CALIBRATED v6.7: directional momentum confirmation. Returns the net
+// directional movement (close[t] - close[t-N]) over the last N bars.
+// Used to pre-filter UT Bot signals: we only enter when the underlying
+// trend has ALREADY been moving in our direction. UT Bot fires on flips,
+// but flips during sideways markets generate 50/50 outcomes. Requiring
+// pre-move ensures momentum is genuinely behind the signal.
+function _netMove(candles, lookback) {
+  if (!Array.isArray(candles) || candles.length < lookback + 1) return 0;
+  const last = candles[candles.length - 1];
+  const ref  = candles[candles.length - 1 - lookback];
+  const lc = last.c ?? last.close;
+  const rc = ref.c  ?? ref.close;
+  return lc - rc;
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // PUBLIC: decide()
 // ────────────────────────────────────────────────────────────────────────
@@ -425,10 +440,11 @@ function decide({
   );
 
   // ── TRIGGER detection (with stale-bar tolerance) ─────────────────────
-  // Try fresh trigger TF first, fallback to other enabled TFs.
-  const tfPriority = [triggerTf, '1m', '3m', '5m'].filter(
-    (v, i, a) => a.indexOf(v) === i && tfReads[v]
-  );
+  // CALIBRATED v6.11: ONLY 5m triggers by default. The 5m UT Bot cross
+  // is the most reliable — 1m/3m fire on micro-noise. User can override
+  // via settings.ultraScalp.allowedTriggerTfs.
+  const allowedTriggerTfs = userCfg.allowedTriggerTfs || ['5m'];
+  const tfPriority = allowedTriggerTfs.filter(v => tfReads[v]);
   let trigger = null;
   let triggerKind = 'fresh';
   for (const tf of tfPriority) {
@@ -486,6 +502,26 @@ function decide({
     };
   }
 
+  // CALIBRATED v6.13: ALL-LAYER SLOPE CONFIRMATION. Require 1m AND 3m
+  // (NOT just trigger TF) to also have slopeTrend === 'expanding' OR
+  // 'flat'. If lower TFs are compressing, momentum is dying.
+  const requireAllSlopesOk = userCfg.requireAllSlopesOk !== false;
+  if (requireAllSlopesOk) {
+    const r1 = tfReads['1m']?.read;
+    const r3 = tfReads['3m']?.read;
+    const checkSlope = (r) => {
+      if (!r || r.warmupShort) return true;     // warmup short = neutral
+      return r.slopeTrend !== 'compressing';
+    };
+    if (!checkSlope(r1) || !checkSlope(r3)) {
+      return {
+        fired: false, signal: null, direction: trigger.signal === 'buy' ? 'bullish' : 'bearish',
+        reasoning: `[regime=${regime}] sub-TF slope compressing (1m=${r1?.slopeTrend} 3m=${r3?.slopeTrend})`,
+        pillars: { tfReads: exposedReads, regime, slope1m: r1?.slopeTrend, slope3m: r3?.slopeTrend },
+      };
+    }
+  }
+
   const direction = trigger.signal === 'buy' ? 'bullish' : 'bearish';
   const signal    = trigger.signal === 'buy' ? 'BUY'     : 'SELL';
 
@@ -536,6 +572,16 @@ function decide({
       pillars: { tfReads: exposedReads, regime, slope: trigger.read.slopeStrength },
     };
   }
+  // CALIBRATED v6.10: trigger slope must be EXPANDING (not compressing/flat).
+  // Fresh flips with compressing slope are the source of PROACTIVE_FADE losses.
+  const requireSlopeExpanding = userCfg.requireSlopeExpanding !== false;
+  if (requireSlopeExpanding && trigger.read.slopeTrend !== 'expanding') {
+    return {
+      fired: false, signal: null, direction,
+      reasoning: `[regime=${regime}] trigger slope ${trigger.read.slopeTrend} (need expanding)`,
+      pillars: { tfReads: exposedReads, regime, slopeTrend: trigger.read.slopeTrend },
+    };
+  }
 
   // ── ATR EXPANSION CONFIRMATION ───────────────────────────────────────
   const atrExpansion = (() => {
@@ -582,6 +628,31 @@ function decide({
     };
   }
 
+  // ── DIRECTIONAL PRE-CONFIRMATION (NEW v6.7) ──────────────────────────
+  // Require the underlying to have ALREADY moved at least netMoveMinPct
+  // of ATR in our direction over the last N bars. UT Bot flips during
+  // pure chop generate 50/50 outcomes; pre-move filter ensures momentum.
+  // PE side gets a stricter requirement (NIFTY's bullish drift makes
+  // bearish entries more vulnerable to mean-reversion).
+  const netMoveMinPct = userCfg.netMoveMinPct ?? 0.5;
+  const peExtraMinPct = userCfg.peExtraMinPct ?? 0;     // disabled by default
+  const requiredMult = direction === 'bearish'
+    ? netMoveMinPct + peExtraMinPct
+    : netMoveMinPct;
+  if (netMoveMinPct > 0) {
+    const net5m = _netMove(candles5m, 8);
+    const required = atrPts * requiredMult;
+    const moveOk = (direction === 'bullish' && net5m >= required)
+                || (direction === 'bearish' && net5m <= -required);
+    if (!moveOk) {
+      return {
+        fired: false, signal: null, direction,
+        reasoning: `[regime=${regime}] no pre-move: 5m net ${net5m.toFixed(1)}pts (need ${(direction === 'bullish' ? '+' : '-')}${required.toFixed(1)}pts in 8 bars)`,
+        pillars: { tfReads: exposedReads, regime, net5m, required, atrPts, requiredMult },
+      };
+    }
+  }
+
   // ── WEIGHTED CONSENSUS SCORE ─────────────────────────────────────────
   let score = 0;
   let totalWeight = 0;
@@ -612,6 +683,16 @@ function decide({
     return {
       fired: false, signal: null, direction,
       reasoning: `[regime=${regime}] consensus ${scorePct}/100 < ${minScore} (${layerResults.map(l => `${l.tf}:${l.agrees ? 'OK' : 'X'}`).join(',')})`,
+      pillars: { tfReads: exposedReads, regime, triggerTf: trigger.tf, score, scorePct, layerResults },
+    };
+  }
+  // CALIBRATED v6.9: Require PERFECT consensus (every enabled+warm layer
+  // agrees). Sub-100 consensus dilutes WR. Override via requirePerfectConsensus=false.
+  const requirePerfect = userCfg.requirePerfectConsensus !== false;
+  if (requirePerfect && scorePct < 100) {
+    return {
+      fired: false, signal: null, direction,
+      reasoning: `[regime=${regime}] consensus ${scorePct}/100 < 100 (perfect required)`,
       pillars: { tfReads: exposedReads, regime, triggerTf: trigger.tf, score, scorePct, layerResults },
     };
   }
@@ -677,10 +758,22 @@ function decide({
 
   // Volatility / orderflow safety
   const dPct = _safe(volumeAnalysis?.delta?.cvdPctLong);
+  // CALIBRATED v6.12: STRICT delta-direction gate. Delta must MATERIALLY
+  // agree with our direction (not just neutral). This eliminates the
+  // PROACTIVE_FADE bucket entries where price went against signal.
+  const requireDeltaAlign = userCfg.requireDeltaAlign !== false;
+  const deltaAlignThreshold = userCfg.deltaAlignThreshold ?? 8;     // % bias minimum
+  if (requireDeltaAlign) {
+    const deltaAgrees = (direction === 'bullish' && dPct >=  deltaAlignThreshold)
+                     || (direction === 'bearish' && dPct <= -deltaAlignThreshold);
+    if (!deltaAgrees) {
+      blockers.push(`delta ${dPct.toFixed(1)}% not aligned (need ≥ ±${deltaAlignThreshold}% in ${direction})`);
+    }
+  }
   if (regime === 'expansion') {
-    const deltaAgainst = (direction === 'bullish' && dPct < -10)
-                      || (direction === 'bearish' && dPct >  10);
-    if (deltaAgainst) blockers.push(`expansion + delta ${dPct}% strongly against`);
+    const deltaAgainst2 = (direction === 'bullish' && dPct < -10)
+                       || (direction === 'bearish' && dPct >  10);
+    if (deltaAgainst2) blockers.push(`expansion + delta ${dPct}% strongly against`);
   }
   const vsa = volumeAnalysis?.vsa;
   if (vsa?.bias && vsa.bias !== 'neutral' && vsa.bias !== direction
@@ -698,7 +791,10 @@ function decide({
 
   // ── SIZING ───────────────────────────────────────────────────────────
   const profile = trigger.profile;
-  let target_pts = Math.max(profile.targetMin, Math.min(profile.targetMax, Math.round(atrPts * 0.6)));
+  // CALIBRATED v6.7: smaller target = higher hit rate. NIFTY 5m ATR is
+  // typically 15-25pts; option premium delta-decay over 90-150s captures
+  // 50-70% of that. So target 0.4×ATR not 0.6×ATR.
+  let target_pts = Math.max(profile.targetMin, Math.min(profile.targetMax, Math.round(atrPts * 0.4)));
   let sl_pts = profile.slPtsMin + 2;
   if (Number.isFinite(spotPrice) && Number.isFinite(trigger.read.trailingStop)) {
     const dist = Math.abs(spotPrice - trigger.read.trailingStop);
