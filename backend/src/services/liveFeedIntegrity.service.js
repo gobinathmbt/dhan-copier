@@ -25,9 +25,12 @@
 const fs = require('fs');
 const path = require('path');
 const logger = require('../utils/logger');
+const symbolRegistry = require('../config/symbolRegistry');
 
 const ROOT_DIR = path.resolve(__dirname, '../../live-feed');
-const UNDERLYING = 'NIFTY_50';
+// Active underlying — driven by `settings.tradingSymbols[0]`. Falls back
+// to NIFTY_50 when no session has been started yet (server boot sweep).
+function _underlying() { return symbolRegistry.getActiveSymbol(); }
 
 // Trading session window in IST minutes-since-midnight
 const SESSION_OPEN_MIN  = 9 * 60 + 15;   // 09:15
@@ -318,7 +321,7 @@ function detectGaps(folder, base = 'candles') {
  */
 async function sweepToday() {
   const dateStr = _todayIstYYYYMMDD();
-  const folder = path.join(ROOT_DIR, `${dateStr}_${UNDERLYING}`);
+  const folder = path.join(ROOT_DIR, `${dateStr}_${_underlying()}`);
   if (!fs.existsSync(folder)) {
     return { skipped: true, reason: 'folder missing' };
   }

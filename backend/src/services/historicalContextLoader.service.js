@@ -21,9 +21,11 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const logger = require('../utils/logger');
+const symbolRegistry = require('../config/symbolRegistry');
 
 const ROOT_DIR = path.resolve(__dirname, '../../live-feed');
-const UNDERLYING = 'NIFTY_50';
+// Active underlying — driven by `settings.tradingSymbols[0]`.
+function _underlying() { return symbolRegistry.getActiveSymbol(); }
 const MAX_BACKFILL_DAYS = 7;
 const STRIKE_WINDOW = 4; // user wants ±4 strikes for the algo
 
@@ -65,8 +67,9 @@ function readJsonSafe(file) {
 
 function listRecordedFolders() {
   if (!fs.existsSync(ROOT_DIR)) return [];
+  const underlying = _underlying();
   return fs.readdirSync(ROOT_DIR, { withFileTypes: true })
-    .filter(e => e.isDirectory() && e.name.endsWith(`_${UNDERLYING}`))
+    .filter(e => e.isDirectory() && e.name.endsWith(`_${underlying}`))
     .map(e => e.name)
     .sort()
     .reverse(); // newest first

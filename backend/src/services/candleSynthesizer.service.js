@@ -28,9 +28,11 @@
 const fs   = require('fs');
 const path = require('path');
 const logger = require('../utils/logger');
+const symbolRegistry = require('../config/symbolRegistry');
 
 const ROOT_DIR   = path.resolve(__dirname, '../../live-feed');
-const UNDERLYING = 'NIFTY_50';
+// Active underlying — driven by `settings.tradingSymbols[0]`.
+function _underlying() { return symbolRegistry.getActiveSymbol(); }
 
 // Market hours in IST (minutes since midnight)
 const MKT_OPEN_MIN  = 9 * 60 + 15;   // 09:15
@@ -137,10 +139,10 @@ function aggregate(candles1m, intervalMin) {
 const writtenTimestamps = new Map();
 
 function getWritten(dateStr, type, interval) {
-  const key = `${dateStr}/${type}/${interval}`;
+  const key = `${dateStr}/${_underlying()}/${type}/${interval}`;
   if (!writtenTimestamps.has(key)) {
     // Load from disk on first access
-    const folder = path.join(ROOT_DIR, `${dateStr}_${UNDERLYING}`);
+    const folder = path.join(ROOT_DIR, `${dateStr}_${_underlying()}`);
     const file   = path.join(folder, `${type}-${interval}m.jsonl`);
     writtenTimestamps.set(key, loadExistingTimestamps(file));
   }
@@ -153,7 +155,7 @@ function getWritten(dateStr, type, interval) {
  * @param {string} type     - "candles" or "futures"
  */
 function synthesizeForType(dateStr, type) {
-  const folder = path.join(ROOT_DIR, `${dateStr}_${UNDERLYING}`);
+  const folder = path.join(ROOT_DIR, `${dateStr}_${_underlying()}`);
   if (!fs.existsSync(folder)) return;
 
   // Read 1m source

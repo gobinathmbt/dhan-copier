@@ -11,8 +11,10 @@
 const fs = require('fs');
 const path = require('path');
 const logger = require('../utils/logger');
+const symbolRegistry = require('../config/symbolRegistry');
 
 const LIVE_FEED_DIR = path.join(__dirname, '../../live-feed');
+function _activeFolderSuffix() { return symbolRegistry.getActiveSymbol(); }
 
 /**
  * Aggregate ticks into candles for a specific interval.
@@ -75,7 +77,7 @@ function aggregateTicks(ticks, intervalMinutes) {
  */
 async function aggregateFuturesCandles(date) {
   try {
-    const ticksFile = path.join(LIVE_FEED_DIR, `${date}_NIFTY_50`, 'futures-ticks.jsonl');
+    const ticksFile = path.join(LIVE_FEED_DIR, `${date}_${_activeFolderSuffix()}`, 'futures-ticks.jsonl');
     
     if (!fs.existsSync(ticksFile)) {
       logger.warn({ date, file: ticksFile }, '[futuresCandleAggregator] Ticks file not found');
@@ -139,7 +141,7 @@ async function aggregateFuturesCandles(date) {
  */
 async function writeCandlesToFiles(date, candles) {
   try {
-    const folder = path.join(LIVE_FEED_DIR, `${date}_NIFTY_50`);
+    const folder = path.join(LIVE_FEED_DIR, `${date}_${_activeFolderSuffix()}`);
     
     if (!fs.existsSync(folder)) {
       fs.mkdirSync(folder, { recursive: true });

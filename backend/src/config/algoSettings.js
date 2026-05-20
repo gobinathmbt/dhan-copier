@@ -251,7 +251,7 @@ const ALGO_SETTINGS = {
   // NIFTY_50 only. Adding 'SENSEX' here will wire the engines to also run
   // on Sensex (requires Sensex live feed wiring in feedRecorder).
   // Live UI displays the market column from the active trade.symbol.
-  tradingSymbols: ['NIFTY_50'],   // ['NIFTY_50', 'SENSEX']
+  tradingSymbols: ['NIFTY_50', 'SENSEX'],   // ['NIFTY_50', 'SENSEX']
 
 
   // ============================================================

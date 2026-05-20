@@ -21,10 +21,18 @@ const path = require('path');
 const logger = require('../utils/logger');
 const { instance: liveFeed } = require('./dhanLiveFeedProd.service');
 const dhanProd = require('./dhanProd.service');
+const symbolRegistry = require('../config/symbolRegistry');
 
 const LIVE_FEED_DIR = path.join(__dirname, '../../live-feed');
-const NIFTY_SECURITY_ID = 13;
-const NIFTY_SEGMENT = 'IDX_I';
+// Active-symbol helpers — resolve segment + security id at call time so
+// the same function works for NIFTY_50 and SENSEX (or whatever symbol
+// the running session has set via symbolRegistry.setActiveSymbols()).
+function _activeSymbol() {
+  return symbolRegistry.getSymbol(symbolRegistry.getActiveSymbol());
+}
+function _activeFolderSuffix() {
+  return symbolRegistry.getActiveSymbol(); // e.g. 'NIFTY_50' or 'SENSEX'
+}
 
 /**
  * Get today's date in YYYY-MM-DD format (IST timezone)
@@ -49,7 +57,7 @@ function getTodayIST() {
  */
 function readCandlesFromFile(date, interval, type = 'candles') {
   try {
-    const folder = path.join(LIVE_FEED_DIR, `${date}_NIFTY_50`);
+    const folder = path.join(LIVE_FEED_DIR, `${date}_${_activeFolderSuffix()}`);
     const file = path.join(folder, `${type}-${interval}.jsonl`);
     
     if (!fs.existsSync(file)) {
@@ -103,8 +111,10 @@ async function getCandles(authKey, params) {
     endTime,
   } = params;
   
-  // Only optimize for NIFTY 50 spot data (most frequently accessed)
-  const isNiftySpot = securityId === NIFTY_SECURITY_ID || securityId === '13';
+  // Only optimize for the ACTIVE underlying's spot data (most frequently accessed).
+  const active = _activeSymbol();
+  const isActiveSpot =
+    Number(securityId) === Number(active.indexSecurityId);
   const today = getTodayIST();
   
   // Check if request is for today's data
@@ -113,8 +123,8 @@ async function getCandles(authKey, params) {
   const todayDate = new Date();
   const isToday = startDate.toDateString() === todayDate.toDateString();
   
-  // Strategy 1: Use live-feed folder for today's NIFTY data
-  if (isNiftySpot && isToday) {
+  // Strategy 1: Use live-feed folder for today's active-symbol spot data
+  if (isActiveSpot && isToday) {
     // Map Dhan API interval string → live-feed folder filename suffix.
     // Both '25' and '30' map to '30m' (different parts of the codebase use
     // different conventions; we accept both).
@@ -150,8 +160,8 @@ async function getCandles(authKey, params) {
   }
   
   // Strategy 2: Use WebSocket snapshot for very recent data (last tick)
-  if (isNiftySpot && isToday) {
-    const tick = liveFeed.getTick(NIFTY_SEGMENT, NIFTY_SECURITY_ID);
+  if (isActiveSpot && isToday) {
+    const tick = liveFeed.getTick(active.indexSegment, active.indexSecurityId);
     if (tick && tick.ltp) {
       // If we have a recent tick (within last 5 seconds), we can construct a partial candle
       const tickAge = Date.now() - (tick.updatedAt || 0);
@@ -173,7 +183,7 @@ async function getCandles(authKey, params) {
     source: 'dhan-api-fallback',
     securityId,
     interval,
-    reason: isNiftySpot ? 'no-local-data' : 'not-nifty-spot',
+    reason: isActiveSpot ? 'no-local-data' : 'not-active-spot',
   }, '[liveFeedDataProvider] Falling back to Dhan API');
   
   return await dhanProd.getDhanBypassData(authKey, params);
@@ -315,7 +325,7 @@ function _apiShapeFromRecorded(row) {
  */
 function readOptionChainFromFile(date, { latest = true } = {}) {
   try {
-    const folder = path.join(LIVE_FEED_DIR, `${date}_NIFTY_50`);
+    const folder = path.join(LIVE_FEED_DIR, `${date}_${_activeFolderSuffix()}`);
     const file = path.join(folder, 'option-chain.jsonl');
     if (!fs.existsSync(file)) return null;
     const content = fs.readFileSync(file, 'utf8');
@@ -448,11 +458,12 @@ async function getExpiryList(authKey, params = {}) {
 }
 
 /**
- * Get current NIFTY spot price from WebSocket (fastest)
+ * Get current spot price for the ACTIVE symbol from the WebSocket snapshot.
  * @returns {number|null} Current LTP or null if not available
  */
 function getCurrentSpotPrice() {
-  const tick = liveFeed.getTick(NIFTY_SEGMENT, NIFTY_SECURITY_ID);
+  const active = _activeSymbol();
+  const tick = liveFeed.getTick(active.indexSegment, active.indexSecurityId);
   return tick?.ltp || null;
 }
 
@@ -517,7 +528,7 @@ function getCurrentFuturesPrice() {
  */
 function getStats() {
   const today = getTodayIST();
-  const folder = path.join(LIVE_FEED_DIR, `${today}_NIFTY_50`);
+  const folder = path.join(LIVE_FEED_DIR, `${today}_${_activeFolderSuffix()}`);
   
   const stats = {
     today,

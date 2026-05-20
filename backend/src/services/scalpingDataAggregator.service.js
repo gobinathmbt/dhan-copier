@@ -6,14 +6,21 @@ const dhanBypass = require('./dhanProd.service');
 const liveFeedProvider = require('./liveFeedDataProvider.service');
 const { instance: liveFeedProd } = require('./dhanLiveFeedProd.service');
 const { instance: feedRecorder } = require('./feedRecorder.service');
+const symbolRegistry = require('../config/symbolRegistry');
 const logger = require('../utils/logger');
 
-const NIFTY_SECURITY_ID = 13;
 const LIVE_TICK_FRESHNESS_MS = 5000; // tick is usable if < 5s old
 
-/** Read latest NIFTY spot LTP from the live feed if fresh, else null. */
+/** Active-symbol helpers — resolved at call time so the aggregator works
+ *  for whichever symbol the running session set in symbolRegistry. */
+function _activeSymbol() {
+  return symbolRegistry.getSymbol(symbolRegistry.getActiveSymbol());
+}
+
+/** Read latest spot LTP for the ACTIVE symbol from the live feed if fresh. */
 function getLiveSpotLtp() {
-  const t = liveFeedProd.getTick('IDX_I', NIFTY_SECURITY_ID);
+  const active = _activeSymbol();
+  const t = liveFeedProd.getTick(active.indexSegment, active.indexSecurityId);
   if (!t || typeof t.ltp !== 'number') return null;
   if (!t.updatedAt || Date.now() - t.updatedAt > LIVE_TICK_FRESHNESS_MS) return null;
   return t.ltp;
@@ -119,9 +126,14 @@ function classifyBuildUp(prevPrice, price, prevOI, oi) {
 }
 
 async function buildPayload(authKey) {
+  const active = _activeSymbol();
   const meta = {
     timestamp: new Date().toISOString(),
-    market: 'NIFTY50',
+    market: active.key,         // e.g. 'NIFTY_50' or 'SENSEX'
+    displayName: active.displayName,
+    indexSegment: active.indexSegment,
+    indexSecurityId: active.indexSecurityId,
+    strikeStep: active.strikeStep,
   };
 
   const now = Math.floor(Date.now() / 1000);
@@ -134,12 +146,17 @@ async function buildPayload(authKey) {
   let candles15m  = [];      // 15m
   let candles30m  = [];      // 30m
 
+  // Map IDX_I → 'IDX'/'I'/'IDX' triplet, BSE_I → 'BSE'/'BSE_I'/'INDEX'
+  const candleExchange   = active.indexSegment === 'BSE_I' ? 'BSE' : 'IDX';
+  const candleSegment    = active.indexSegment === 'BSE_I' ? 'BSE_I' : 'I';
+  const candleInstrument = active.indexSegment === 'BSE_I' ? 'INDEX' : 'IDX';
+
   const fetchCandles = async (interval, minutesBack) => {
     try {
       // Use liveFeedProvider for optimized data access (live-feed folder → API fallback)
       const res = await liveFeedProvider.getCandles(authKey, {
-        securityId: NIFTY_SECURITY_ID,
-        exchange: 'IDX', segment: 'I', instrument: 'IDX',
+        securityId: active.indexSecurityId,
+        exchange: candleExchange, segment: candleSegment, instrument: candleInstrument,
         startTime: now - minutesBack * 60,
         endTime: now,
         interval,
@@ -203,7 +220,10 @@ async function buildPayload(authKey) {
   // 2. Expiry list — use unified provider (API → folder fallback)
   let expiries = [];
   try {
-    const res = await liveFeedProvider.getExpiryList(authKey, {});
+    const res = await liveFeedProvider.getExpiryList(authKey, {
+      securityId: active.indexSecurityId,
+      underlyingSeg: active.indexSegment,
+    });
     if (res.ok) expiries = res.data.expiries || [];
     if (res.data?.meta?.source === 'live-feed-folder') {
       logger.info({ source: 'live-feed-folder' }, '[aggregator] Expiry list served from folder fallback');
@@ -223,7 +243,8 @@ async function buildPayload(authKey) {
       const res = await liveFeedProvider.getOptionChain(authKey, {
         segment: 0,
         expiry: nearestExpiry.exp,
-        securityId: NIFTY_SECURITY_ID,
+        securityId: active.indexSecurityId,
+        underlyingSeg: active.indexSegment,
       });
       if (res.ok) {
         optionChain = res.data;
@@ -259,7 +280,8 @@ async function buildPayload(authKey) {
       
       const oiRes = await dhanBypass.getOIAnalysis(authKey, {
         segment: 0,
-        securityId: NIFTY_SECURITY_ID,
+        securityId: active.indexSecurityId,
+        underlyingSeg: active.indexSegment,
         expiry: nearestExpiry.exp,
         timeframe: '1m',
         strikes: 30,
@@ -276,7 +298,8 @@ async function buildPayload(authKey) {
       // Fetch OI Change (last 15 minutes)
       const oiChangeRes = await dhanBypass.getOIChange(authKey, {
         segment: 0,
-        securityId: NIFTY_SECURITY_ID,
+        securityId: active.indexSecurityId,
+        underlyingSeg: active.indexSegment,
         expiry: nearestExpiry.exp,
         timeframe: '1m',
         strikes: 30,
@@ -416,9 +439,13 @@ async function buildPayload(authKey) {
   };
 
   // ── ACTUAL ATM STRIKE (from real spot price) ──────────────────────────────
-  // Use the actual last close price to compute ATM — not the option chain's guess
+  // Use the actual last close price to compute ATM — not the option chain's guess.
+  // Strike step depends on the active symbol (NIFTY=50, SENSEX=100, BANKNIFTY=100).
   const actualSpot = last.close || 0;
-  const computedAtmStrike = actualSpot > 0 ? Math.round(actualSpot / 50) * 50 : null;
+  const strikeStep = active.strikeStep || 50;
+  const computedAtmStrike = actualSpot > 0
+    ? Math.round(actualSpot / strikeStep) * strikeStep
+    : null;
 
   // Market structure (very simple)
   const recent = spotCandles.slice(-20);

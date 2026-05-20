@@ -5,9 +5,20 @@
 const dhanBypass = require('./dhanProd.service');
 const logger = require('../utils/logger');
 const axios = require('axios');
+const symbolRegistry = require('../config/symbolRegistry');
 
-const NIFTY_SECURITY_ID = 13;
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
+
+/** Active-symbol metadata helper. */
+function _active() {
+  return symbolRegistry.getSymbol(symbolRegistry.getActiveSymbol());
+}
+function _activeApiTriplet() {
+  const s = _active();
+  return s.indexSegment === 'BSE_I'
+    ? { exchange: 'BSE', segment: 'BSE_I', instrument: 'INDEX' }
+    : { exchange: 'IDX', segment: 'I',     instrument: 'IDX' };
+}
 
 const STRIKE_SELECTION_PROMPT = `You are an expert options trader specializing in NIFTY 50 intraday scalping.
 
@@ -55,10 +66,12 @@ Return ONLY valid JSON:
  */
 async function fetchMultiStrikeData(authKey, spotPrice, atmStrike, expiry, direction) {
   try {
-    // Generate strikes: ATM ± 3 strikes (50 point intervals)
+    // Generate strikes: ATM ± 3 strikes — step depends on active symbol
+    const active = _active();
+    const step = active.strikeStep || 50;
     const strikes = [];
     for (let i = -3; i <= 3; i++) {
-      strikes.push(atmStrike + (i * 50));
+      strikes.push(atmStrike + (i * step));
     }
 
     logger.info({ 
@@ -72,7 +85,8 @@ async function fetchMultiStrikeData(authKey, spotPrice, atmStrike, expiry, direc
     const optionChainRes = await dhanBypass.getOptionChainBypass(authKey, {
       segment: 0,
       expiry: expiry,
-      securityId: NIFTY_SECURITY_ID,
+      securityId: active.indexSecurityId,
+      underlyingSeg: active.indexSegment,
     });
 
     if (!optionChainRes.ok) {
@@ -118,12 +132,13 @@ async function fetchMultiStrikeData(authKey, spotPrice, atmStrike, expiry, direc
     // Fetch 1-week historical data for pattern analysis
     const now = Math.floor(Date.now() / 1000);
     const oneWeekAgo = now - (7 * 24 * 60 * 60);
-    
+    const triplet = _activeApiTriplet();
+
     const historicalRes = await dhanBypass.getDhanBypassData(authKey, {
-      securityId: NIFTY_SECURITY_ID,
-      exchange: 'IDX',
-      segment: 'I',
-      instrument: 'IDX',
+      securityId: active.indexSecurityId,
+      exchange: triplet.exchange,
+      segment: triplet.segment,
+      instrument: triplet.instrument,
       startTime: oneWeekAgo,
       endTime: now,
       interval: '5', // 5-minute candles for 1 week

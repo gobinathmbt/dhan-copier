@@ -4,7 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
-const { instance: recorder, ROOT_DIR, UNDERLYING } = require('../services/feedRecorder.service');
+const { instance: recorder, ROOT_DIR, getUnderlying } = require('../services/feedRecorder.service');
 const asyncHandler = require('../utils/asyncHandler');
 const HttpError = require('../utils/HttpError');
 
@@ -18,8 +18,11 @@ exports.listDays = asyncHandler(async (_req, res) => {
   const entries = fs.existsSync(ROOT_DIR)
     ? fs.readdirSync(ROOT_DIR, { withFileTypes: true })
     : [];
+  // List folders for whichever symbol the active session is recording.
+  // Falls back to NIFTY_50 when no session is live.
+  const underlying = getUnderlying();
   const days = entries
-    .filter(e => e.isDirectory() && e.name.includes(`_${UNDERLYING}`))
+    .filter(e => e.isDirectory() && e.name.includes(`_${underlying}`))
     .map(e => {
       const folder = path.join(ROOT_DIR, e.name);
       const metaPath = path.join(folder, 'metadata.json');
@@ -52,7 +55,7 @@ exports.listDays = asyncHandler(async (_req, res) => {
 exports.getSpot = asyncHandler(async (req, res) => {
   const { date, limit = '500', from, to } = req.query;
   if (!date) throw new HttpError(400, 'date is required (YYYY-MM-DD)');
-  const file = path.join(ROOT_DIR, `${date}_${UNDERLYING}`, 'spot.jsonl');
+  const file = path.join(ROOT_DIR, `${date}_${getUnderlying()}`, 'spot.jsonl');
   if (!fs.existsSync(file)) return res.json({ count: 0, ticks: [] });
   const max = Math.max(1, Math.min(5000, parseInt(limit, 10) || 500));
   const rows = await _readJsonl(file, max, from ? Number(from) : null, to ? Number(to) : null);
@@ -66,7 +69,7 @@ exports.getSpot = asyncHandler(async (req, res) => {
 exports.getOptionChain = asyncHandler(async (req, res) => {
   const { date, limit = '120', from, to } = req.query;
   if (!date) throw new HttpError(400, 'date is required (YYYY-MM-DD)');
-  const file = path.join(ROOT_DIR, `${date}_${UNDERLYING}`, 'option-chain.jsonl');
+  const file = path.join(ROOT_DIR, `${date}_${getUnderlying()}`, 'option-chain.jsonl');
   if (!fs.existsSync(file)) return res.json({ count: 0, snapshots: [] });
   const max = Math.max(1, Math.min(2000, parseInt(limit, 10) || 120));
   const rows = await _readJsonl(file, max, from ? Number(from) : null, to ? Number(to) : null);
@@ -77,7 +80,7 @@ exports.getOptionChain = asyncHandler(async (req, res) => {
 exports.getMetadata = asyncHandler(async (req, res) => {
   const { date } = req.query;
   if (!date) throw new HttpError(400, 'date is required (YYYY-MM-DD)');
-  const file = path.join(ROOT_DIR, `${date}_${UNDERLYING}`, 'metadata.json');
+  const file = path.join(ROOT_DIR, `${date}_${getUnderlying()}`, 'metadata.json');
   if (!fs.existsSync(file)) return res.status(404).json({ error: 'Not found' });
   res.sendFile(file);
 });

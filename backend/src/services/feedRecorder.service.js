@@ -19,9 +19,14 @@
 const fs = require('fs');
 const path = require('path');
 const logger = require('../utils/logger');
+const symbolRegistry = require('../config/symbolRegistry');
 
 const ROOT_DIR = path.resolve(__dirname, '../../live-feed');
-const UNDERLYING = 'NIFTY_50';          // user request — only NIFTY 50 for now
+// Active underlying — driven by `settings.tradingSymbols[0]` via
+// symbolRegistry.setActiveSymbols(). Defaults to NIFTY_50 so that anything
+// that runs before a session is started (server boot prune, controller
+// list endpoints, etc.) keeps the old behaviour.
+function _underlying() { return symbolRegistry.getActiveSymbol(); }
 const NIFTY_SECURITY_ID = 13;
 const OPTION_STRIKE_WINDOW = 6;         // ± 6 strikes around ATM
 const OPTION_CHAIN_FLUSH_MS = 60 * 1000; // 1-min OI cadence (matches Dhan refresh)
@@ -69,7 +74,7 @@ class FeedRecorder {
       this.dayGuardTimer = setInterval(() => this._checkRollover(), 30 * 1000);
     }
     this._checkRollover();
-    logger.info({ root: ROOT_DIR, underlying: UNDERLYING, retentionDays: RETENTION_DAYS }, '[feedRecorder] initialised');
+    logger.info({ root: ROOT_DIR, underlying: _underlying(), retentionDays: RETENTION_DAYS }, '[feedRecorder] initialised');
   }
 
   /** Called by the live feed service for every NIFTY spot tick. */
@@ -339,7 +344,7 @@ class FeedRecorder {
       lastSpotAt: this.lastSpotAt ? new Date(this.lastSpotAt).toISOString() : null,
       lastChainFlushAt: this.lastChainFlushAt ? new Date(this.lastChainFlushAt).toISOString() : null,
       rootDir: ROOT_DIR,
-      underlying: UNDERLYING,
+      underlying: _underlying(),
       strikeWindow: OPTION_STRIKE_WINDOW,
       retentionDays: RETENTION_DAYS,
     };
@@ -389,15 +394,17 @@ class FeedRecorder {
 
   _checkRollover() {
     const { dateStr } = this._istNow();
-    if (this.currentDay && this.currentDay !== dateStr) {
-      logger.info({ from: this.currentDay, to: dateStr }, '[feedRecorder] day rollover');
+    const underlying = _underlying();
+    const wantedFolder = path.join(ROOT_DIR, `${dateStr}_${underlying}`);
+    if (this.currentDay && (this.currentDay !== dateStr || this.dayFolder !== wantedFolder)) {
+      logger.info({ from: this.currentDay, to: dateStr, fromFolder: this.dayFolder, toFolder: wantedFolder }, '[feedRecorder] day/symbol rollover');
       this._closeStreams();
       this._pruneOldFolders();
     }
     // Ensure folder exists for today (even if not market hours — cheap)
-    if (this.currentDay !== dateStr) {
+    if (this.currentDay !== dateStr || this.dayFolder !== wantedFolder) {
       this.currentDay = dateStr;
-      this.dayFolder = path.join(ROOT_DIR, `${dateStr}_${UNDERLYING}`);
+      this.dayFolder = wantedFolder;
       try { fs.mkdirSync(this.dayFolder, { recursive: true }); } catch (_) {}
       this.metadataPath = path.join(this.dayFolder, 'metadata.json');
       this._loadMetadata(dateStr);
@@ -498,13 +505,14 @@ class FeedRecorder {
   }
 
   _loadMetadata(dateStr) {
+    const underlying = _underlying();
     try {
       if (fs.existsSync(this.metadataPath)) {
         this.metadata = JSON.parse(fs.readFileSync(this.metadataPath, 'utf8'));
       } else {
         this.metadata = {
           date: dateStr,
-          underlying: UNDERLYING,
+          underlying,
           securityId: NIFTY_SECURITY_ID,
           createdAt: Date.now(),
           firstTickAt: null,
@@ -518,7 +526,7 @@ class FeedRecorder {
       }
     } catch (e) {
       logger.warn({ err: e.message }, '[feedRecorder] metadata load failed');
-      this.metadata = { date: dateStr, underlying: UNDERLYING, createdAt: Date.now() };
+      this.metadata = { date: dateStr, underlying, createdAt: Date.now() };
     }
   }
 
@@ -556,10 +564,16 @@ class FeedRecorder {
 
 const instance = new FeedRecorder();
 
+// Backwards-compat:
+//   UNDERLYING — kept as the legacy default ('NIFTY_50'). Anything that
+//                destructures this at module load gets the safe default.
+//   getUnderlying() — call at request time to resolve the symbol the
+//                     active session is recording.
 module.exports = {
   instance,
   ROOT_DIR,
-  UNDERLYING,
+  UNDERLYING: 'NIFTY_50',
+  getUnderlying: _underlying,
   NIFTY_SECURITY_ID,
   OPTION_STRIKE_WINDOW,
 };

@@ -11,8 +11,18 @@
  */
 const logger = require('../../utils/logger');
 const dhanBypass = require('../dhanProd.service');
+const symbolRegistry = require('../../config/symbolRegistry');
 
-const NIFTY_SECURITY_ID = 13;
+function _active() {
+  return symbolRegistry.getSymbol(symbolRegistry.getActiveSymbol());
+}
+function _activeApiTriplet() {
+  const s = _active();
+  return s.indexSegment === 'BSE_I'
+    ? { exchange: 'BSE', segment: 'BSE_I', instrument: 'INDEX' }
+    : { exchange: 'IDX', segment: 'I',     instrument: 'IDX' };
+}
+
 const DEMA_PERIOD = 20; // 20 periods
 const CANDLE_INTERVAL = '15'; // 15-minute candles
 
@@ -96,11 +106,13 @@ async function analyzeDEMA(authKey, spotPrice, previousDEMAData = null) {
     const now = Math.floor(Date.now() / 1000);
     const hoursAgo = now - (10 * 60 * 60); // 10 hours of data (40 x 15min candles)
     
+    const active = _active();
+    const triplet = _activeApiTriplet();
     const res = await dhanBypass.getDhanBypassData(authKey, {
-      securityId: NIFTY_SECURITY_ID,
-      exchange: 'IDX',
-      segment: 'I',
-      instrument: 'IDX',
+      securityId: active.indexSecurityId,
+      exchange: triplet.exchange,
+      segment: triplet.segment,
+      instrument: triplet.instrument,
       startTime: hoursAgo,
       endTime: now,
       interval: CANDLE_INTERVAL, // 15-minute candles

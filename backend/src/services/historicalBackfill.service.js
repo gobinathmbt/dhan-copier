@@ -26,10 +26,13 @@ const dhanProd = require('./dhanProd.service');
 const logger = require('../utils/logger');
 const axios = require('axios');
 const env = require('../config/env');
+const symbolRegistry = require('../config/symbolRegistry');
 
 const ROOT_DIR = path.resolve(__dirname, '../../live-feed');
 const NIFTY_SECURITY_ID = 13;
-const UNDERLYING = 'NIFTY_50';
+// Active underlying — driven by `settings.tradingSymbols[0]`. Defaults
+// to NIFTY_50 for CLI scripts that don't go through scalpingEngine.start().
+function _underlying() { return symbolRegistry.getActiveSymbol(); }
 const STRIKE_STEP = 50;
 const STRIKE_WINDOW = 6; // ATM ± 6  (13 strikes total)
 
@@ -355,7 +358,8 @@ async function backfillDay(dateStr, opts = {}) {
     skipIfComplete = true, // skip if folder has all required files non-empty
   } = opts;
   const date = dateStr || yesterdayIST();
-  const folderName = `${date}_${UNDERLYING}`;
+  const underlying = _underlying();
+  const folderName = `${date}_${underlying}`;
   const folder = path.join(ROOT_DIR, folderName);
   ensureDir(folder);
 
@@ -383,7 +387,7 @@ async function backfillDay(dateStr, opts = {}) {
 
   const meta = {
     date,
-    underlying: UNDERLYING,
+    underlying,
     securityId: NIFTY_SECURITY_ID,
     source: 'backfill',
     expiryFlag,
@@ -565,5 +569,8 @@ module.exports = {
   backfillRange,
   yesterdayIST,
   STRIKE_WINDOW,
-  UNDERLYING,
+  // Backwards-compat: the literal default. Live consumers should call
+  // `_underlying()` (private) or read via symbolRegistry directly.
+  UNDERLYING: 'NIFTY_50',
+  getUnderlying: _underlying,
 };

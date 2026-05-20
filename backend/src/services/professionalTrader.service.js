@@ -12,9 +12,21 @@ const dhanBypass = require('./dhanProd.service');
 const logger = require('../utils/logger');
 const aiIOLogger = require('../utils/aiIOLogger');
 const axios = require('axios');
+const symbolRegistry = require('../config/symbolRegistry');
 
-const NIFTY_SECURITY_ID = 13;
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
+
+/** Active-symbol metadata helper. */
+function _active() {
+  return symbolRegistry.getSymbol(symbolRegistry.getActiveSymbol());
+}
+/** Active symbol's index API triplet (for getDhanBypassData). */
+function _activeApiTriplet() {
+  const s = _active();
+  return s.indexSegment === 'BSE_I'
+    ? { exchange: 'BSE', segment: 'BSE_I', instrument: 'INDEX' }
+    : { exchange: 'IDX', segment: 'I',     instrument: 'IDX' };
+}
 
 // Store market opening data
 const marketSession = {
@@ -90,11 +102,13 @@ async function initializeMarketSession(authKey) {
     const now = Math.floor(Date.now() / 1000);
     const marketOpenTime = getMarketOpenTime(); // 9:15 AM
     
+    const active = _active();
+    const triplet = _activeApiTriplet();
     const res = await dhanBypass.getDhanBypassData(authKey, {
-      securityId: NIFTY_SECURITY_ID,
-      exchange: 'IDX',
-      segment: 'I',
-      instrument: 'IDX',
+      securityId: active.indexSecurityId,
+      exchange: triplet.exchange,
+      segment: triplet.segment,
+      instrument: triplet.instrument,
       startTime: marketOpenTime,
       endTime: marketOpenTime + 300, // First 5 minutes
       interval: '1',
@@ -107,8 +121,10 @@ async function initializeMarketSession(authKey) {
     const openingCandle = res.data.candles[0];
     const openingPrice = openingCandle.open;
     
-    // Calculate opening strike (round to nearest 50)
-    const openingStrike = Math.round(openingPrice / 50) * 50;
+    // Calculate opening strike (rounded to the symbol's strike step:
+    // NIFTY=50, SENSEX=100).
+    const stepOpen = active.strikeStep || 50;
+    const openingStrike = Math.round(openingPrice / stepOpen) * stepOpen;
     
     marketSession.openingStrike = openingStrike;
     marketSession.openingPrice = openingPrice;
@@ -151,11 +167,13 @@ async function analyzeMarketCharacter(authKey) {
     const now = Math.floor(Date.now() / 1000);
     const thirtyMinAgo = now - 1800;
     
+    const triplet = _activeApiTriplet();
+    const active = _active();
     const res = await dhanBypass.getDhanBypassData(authKey, {
-      securityId: NIFTY_SECURITY_ID,
-      exchange: 'IDX',
-      segment: 'I',
-      instrument: 'IDX',
+      securityId: active.indexSecurityId,
+      exchange: triplet.exchange,
+      segment: triplet.segment,
+      instrument: triplet.instrument,
       startTime: thirtyMinAgo,
       endTime: now,
       interval: '1',
@@ -226,11 +244,13 @@ async function analyzeMarketCharacter(authKey) {
 }
 
 /**
- * Identify pivot points (support/resistance)
+ * Identify pivot points (support/resistance) — strikes rounded to the
+ * active symbol's strike step (NIFTY=50, SENSEX=100).
  */
 function identifyPivotPoints(candles) {
   const highs = candles.map(c => c.high);
   const lows = candles.map(c => c.low);
+  const step = _active().strikeStep || 50;
   
   const resistance = [];
   const support = [];
@@ -239,7 +259,7 @@ function identifyPivotPoints(candles) {
   for (let i = 2; i < highs.length - 2; i++) {
     if (highs[i] > highs[i - 1] && highs[i] > highs[i - 2] &&
         highs[i] > highs[i + 1] && highs[i] > highs[i + 2]) {
-      resistance.push(Math.round(highs[i] / 50) * 50); // Round to nearest 50
+      resistance.push(Math.round(highs[i] / step) * step); // Round to nearest strike step
     }
   }
   
@@ -247,7 +267,7 @@ function identifyPivotPoints(candles) {
   for (let i = 2; i < lows.length - 2; i++) {
     if (lows[i] < lows[i - 1] && lows[i] < lows[i - 2] &&
         lows[i] < lows[i + 1] && lows[i] < lows[i + 2]) {
-      support.push(Math.round(lows[i] / 50) * 50); // Round to nearest 50
+      support.push(Math.round(lows[i] / step) * step); // Round to nearest strike step
     }
   }
   
@@ -259,16 +279,18 @@ function identifyPivotPoints(candles) {
 }
 
 /**
- * Get valid strikes (opening ±2 strikes only)
+ * Get valid strikes (opening ±2 strikes only) — step depends on active
+ * symbol (NIFTY=50, SENSEX=100).
  */
 function getValidStrikes() {
   if (!marketSession.openingStrike) {
     throw new Error('Market session not initialized');
   }
   
+  const step = _active().strikeStep || 50;
   const strikes = [];
   for (let i = -2; i <= 2; i++) {
-    strikes.push(marketSession.openingStrike + (i * 50));
+    strikes.push(marketSession.openingStrike + (i * step));
   }
   
   return strikes;
@@ -296,10 +318,12 @@ async function analyzeTrade(authKey, currentMarketData, aiModel = 'gpt-4o-mini')
     const expiries = await getExpiries(authKey);
     const nearestExpiry = expiries[0];
     
+    const active = _active();
     const optionChainRes = await dhanBypass.getOptionChainBypass(authKey, {
       segment: 0,
       expiry: nearestExpiry.exp,
-      securityId: NIFTY_SECURITY_ID,
+      securityId: active.indexSecurityId,
+      underlyingSeg: active.indexSegment,
     });
     
     if (!optionChainRes.ok) {

@@ -9,8 +9,17 @@
  */
 const logger = require('../../utils/logger');
 const dhanBypass = require('../dhanProd.service');
+const symbolRegistry = require('../../config/symbolRegistry');
 
-const NIFTY_SECURITY_ID = 13;
+function _active() {
+  return symbolRegistry.getSymbol(symbolRegistry.getActiveSymbol());
+}
+function _activeApiTriplet() {
+  const s = _active();
+  return s.indexSegment === 'BSE_I'
+    ? { exchange: 'BSE', segment: 'BSE_I', instrument: 'INDEX' }
+    : { exchange: 'IDX', segment: 'I',     instrument: 'IDX' };
+}
 
 // UT Bot Configuration
 const UT_BOT_CONFIG = {
@@ -75,12 +84,14 @@ async function analyzeMultiTimeframe(authKey, spotPrice) {
  */
 async function fetchTimeframeData(authKey, currentTime, minutesBack, interval) {
   const startTime = currentTime - (minutesBack * 60);
-  
+  const active = _active();
+  const triplet = _activeApiTriplet();
+
   const res = await dhanBypass.getDhanBypassData(authKey, {
-    securityId: NIFTY_SECURITY_ID,
-    exchange: 'IDX',
-    segment: 'I',
-    instrument: 'IDX',
+    securityId: active.indexSecurityId,
+    exchange: triplet.exchange,
+    segment: triplet.segment,
+    instrument: triplet.instrument,
     startTime,
     endTime: currentTime,
     interval,

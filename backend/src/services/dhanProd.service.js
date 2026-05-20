@@ -94,8 +94,12 @@ function mapExchangeSegment({ exchange, segment, instrument }) {
   const sg = String(segment || '').toUpperCase();
   const inst = String(instrument || '').toUpperCase();
 
-  // Index -> IDX_I
+  // Index -> IDX_I (NSE indices) / BSE_I (BSE indices like SENSEX, BANKEX)
   if (ex === 'IDX' || inst === 'IDX' || inst === 'INDEX') {
+    // BSE indices — caller passes exchange='BSE' or segment='BSE_I'
+    if (ex === 'BSE' || sg === 'BSE_I') {
+      return { exchangeSegment: 'BSE_I', instrument: 'INDEX' };
+    }
     return { exchangeSegment: 'IDX_I', instrument: 'INDEX' };
   }
   // NSE Equity
@@ -109,6 +113,10 @@ function mapExchangeSegment({ exchange, segment, instrument }) {
   // BSE Equity
   if (ex === 'BSE' && (sg === 'E' || inst === 'EQUITY')) {
     return { exchangeSegment: 'BSE_EQ', instrument: 'EQUITY' };
+  }
+  // BSE F&O (SENSEX / BANKEX options + futures)
+  if (ex === 'BSE' && (sg === 'D' || inst === 'FUTIDX' || inst === 'OPTIDX')) {
+    return { exchangeSegment: 'BSE_FNO', instrument: inst === 'IDX' ? 'FUTIDX' : inst };
   }
   // Default — treat as index
   return { exchangeSegment: 'IDX_I', instrument: 'INDEX' };
@@ -297,11 +305,25 @@ async function getDhanProdData(authKey, params) {
 // ============================================================================
 /**
  * @param {string} authKey
- * @param {object} params - { segment = 0, securityId = 13 }
+ * @param {object} params - { segment = 0, securityId = 13, underlyingSeg }
+ *   underlyingSeg defaults from securityId via symbolRegistry; pass to override.
  */
 async function getExpiryListProd(authKey, params) {
   const { securityId = 13 } = params || {};
-  const underlyingSeg = 'IDX_I'; // NIFTY 50 is an index
+  // Resolve segment: explicit param wins; else look up from symbolRegistry
+  // by matching securityId; else fall back to NSE indices (IDX_I).
+  let underlyingSeg = params?.underlyingSeg;
+  if (!underlyingSeg) {
+    try {
+      const symbolRegistry = require('../config/symbolRegistry');
+      const match = Object.values(symbolRegistry.SYMBOLS).find(
+        s => s.indexSecurityId === Number(securityId)
+      );
+      underlyingSeg = match?.indexSegment || 'IDX_I';
+    } catch (_) {
+      underlyingSeg = 'IDX_I';
+    }
+  }
   const cacheKey = `${securityId}_${underlyingSeg}`;
   const cached = expiryCache.get(cacheKey);
   if (cached && Date.now() - cached.at < EXPIRY_CACHE_TTL) {
@@ -389,7 +411,7 @@ async function getExpiryListProd(authKey, params) {
 // ============================================================================
 /**
  * @param {string} authKey
- * @param {object} params - { segment = 0, expiry: <unix-ts>, securityId = 13 }
+ * @param {object} params - { segment = 0, expiry: <unix-ts>, securityId = 13, underlyingSeg }
  */
 async function getOptionChainProd(authKey, params) {
   const { expiry, securityId = 13 } = params || {};
@@ -401,7 +423,7 @@ async function getOptionChainProd(authKey, params) {
       expiryDateStr = toDateString(expiry);
     } else {
       // Pull nearest expiry automatically
-      const listRes = await getExpiryListProd(authKey, { securityId });
+      const listRes = await getExpiryListProd(authKey, { securityId, underlyingSeg: params?.underlyingSeg });
       if (!listRes.ok || !listRes.data.expiries?.length) {
         return { ok: false, error: 'Unable to resolve nearest expiry' };
       }
@@ -409,7 +431,20 @@ async function getOptionChainProd(authKey, params) {
       expiryDateStr = nearest._raw || toDateString(nearest.exp);
     }
 
-    const underlyingSeg = 'IDX_I';
+    // Resolve segment the same way as getExpiryListProd.
+    let underlyingSeg = params?.underlyingSeg;
+    let displayPrefix = 'NIFTY';
+    try {
+      const symbolRegistry = require('../config/symbolRegistry');
+      const match = Object.values(symbolRegistry.SYMBOLS).find(
+        s => s.indexSecurityId === Number(securityId)
+      );
+      if (match) {
+        underlyingSeg = underlyingSeg || match.indexSegment;
+        displayPrefix = match.futuresUnderlying || match.key.split('_')[0];
+      }
+    } catch (_) {}
+    if (!underlyingSeg) underlyingSeg = 'IDX_I';
     const cacheKey = `${securityId}_${underlyingSeg}_${expiryDateStr}`;
     const cached = ocCache.get(cacheKey);
     if (cached && Date.now() - cached.at < OC_CACHE_TTL) {
@@ -445,6 +480,16 @@ async function getOptionChainProd(authKey, params) {
     }
 
     // Transform strike-keyed map -> array of { strike, call, put, pcr }
+    // Strike step (50 for NIFTY, 100 for SENSEX) — used for ATM threshold.
+    let strikeStep = 50;
+    try {
+      const symbolRegistry = require('../config/symbolRegistry');
+      const match = Object.values(symbolRegistry.SYMBOLS).find(
+        s => s.indexSecurityId === Number(securityId)
+      );
+      if (match?.strikeStep) strikeStep = match.strikeStep;
+    } catch (_) {}
+    const atmHalfWindow = strikeStep / 2;
     const strikes = [];
     for (const [strikeStr, strikeData] of Object.entries(ocMap)) {
       const strike = parseFloat(strikeStr);
@@ -478,14 +523,15 @@ async function getOptionChainProd(authKey, params) {
       // Moneyness vs spot
       const moneyness = (() => {
         if (!spotLtp) return 'NA';
-        if (Math.abs(strike - spotLtp) < 25) return 'ATM';
+        if (Math.abs(strike - spotLtp) < atmHalfWindow) return 'ATM';
         return strike > spotLtp ? 'OTM' : 'ITM';
       })();
 
-      // Construct display symbols (NIFTY format: NIFTY 15MAY26 23600 CE/PE)
+      // Construct display symbols (e.g. NIFTY 15MAY26 23600 CE/PE,
+      // SENSEX 15MAY26 80000 CE/PE) — prefix derives from symbolRegistry.
       const expiryFormatted = expiryDateStr ? new Date(expiryDateStr).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' }).replace(/ /g, '').toUpperCase() : '';
-      const ceDisplaySymbol = ce.trading_symbol || ce.tradingsymbol || `NIFTY ${expiryFormatted} ${strike} CE`;
-      const peDisplaySymbol = pe.trading_symbol || pe.tradingsymbol || `NIFTY ${expiryFormatted} ${strike} PE`;
+      const ceDisplaySymbol = ce.trading_symbol || ce.tradingsymbol || `${displayPrefix} ${expiryFormatted} ${strike} CE`;
+      const peDisplaySymbol = pe.trading_symbol || pe.tradingsymbol || `${displayPrefix} ${expiryFormatted} ${strike} PE`;
 
       strikes.push({
         strike,
@@ -604,9 +650,9 @@ async function getOptionChainProd(authKey, params) {
  *   { pcr_oi, pcr_vol, oi:{ce,pe}, vol:{ce,pe} }
  */
 async function getOIAnalysis(authKey, params) {
-  const { securityId = 13, expiry } = params || {};
+  const { securityId = 13, expiry, underlyingSeg } = params || {};
   try {
-    const ocRes = await getOptionChainProd(authKey, { securityId, expiry });
+    const ocRes = await getOptionChainProd(authKey, { securityId, expiry, underlyingSeg });
     if (!ocRes.ok) return ocRes;
     const strikes = ocRes.data.strikes || [];
 
@@ -637,9 +683,9 @@ async function getOIAnalysis(authKey, params) {
 // 5. OI CHANGE — derived from option chain (oi - previous_oi per strike)
 // ============================================================================
 async function getOIChange(authKey, params) {
-  const { securityId = 13, expiry } = params || {};
+  const { securityId = 13, expiry, underlyingSeg } = params || {};
   try {
-    const ocRes = await getOptionChainProd(authKey, { securityId, expiry });
+    const ocRes = await getOptionChainProd(authKey, { securityId, expiry, underlyingSeg });
     if (!ocRes.ok) return ocRes;
     const strikes = ocRes.data.strikes || [];
 

@@ -29,9 +29,10 @@ let cached = {
 };
 
 // ---------------------------------------------------------------------------
-// Parse the Dhan detailed scrip master CSV to find the NIFTY futures line
+// Parse the Dhan detailed scrip master CSV to find FUTIDX rows for the
+// requested exchange + underlying. Tightly scoped because the CSV is huge.
 // ---------------------------------------------------------------------------
-function parseScripMasterCsv(text) {
+function parseScripMasterCsvFor(text, exchFilter = 'NSE', underlyingFilter = 'NIFTY', defaultLot = 75) {
   const lines = text.split(/\r?\n/).filter(Boolean);
   if (lines.length < 2) return [];
 
@@ -48,23 +49,29 @@ function parseScripMasterCsv(text) {
   const iLot = idx('LOT_SIZE')                 >= 0 ? idx('LOT_SIZE')               : idx('SEM_LOT_UNITS');
 
   const out = [];
-  // CSV is huge — only keep NIFTY FUTIDX lines
+  const exchTarget = String(exchFilter).toUpperCase();
+  const undTarget = String(underlyingFilter).toUpperCase();
   for (let i = 1; i < lines.length; i++) {
     const cols = lines[i].split(',');
-    if (cols[iExch] !== 'NSE') continue;
+    if (cols[iExch] !== exchTarget) continue;
     if (cols[iInst] !== 'FUTIDX') continue;
     const sym = cols[iSymbol] || '';
-    if (sym.toUpperCase() !== 'NIFTY') continue;
+    if (sym.toUpperCase() !== undTarget) continue;
     const secId = parseInt(cols[iSid], 10);
     if (!Number.isFinite(secId)) continue;
     out.push({
       securityId: secId,
       tradingSymbol: cols[iDisplay] || '',
       expiryDate: cols[iExpiry] || '',
-      lotSize: parseInt(cols[iLot], 10) || 75,
+      lotSize: parseInt(cols[iLot], 10) || defaultLot,
     });
   }
   return out;
+}
+
+// Backwards-compat: legacy NIFTY-only parser kept for the test export below.
+function parseScripMasterCsv(text) {
+  return parseScripMasterCsvFor(text, 'NSE', 'NIFTY', 75);
 }
 
 function byExpiryAsc(a, b) {
@@ -72,13 +79,35 @@ function byExpiryAsc(a, b) {
 }
 
 async function loadFromScripMaster() {
-  logger.info({ url: SCRIP_MASTER_URL }, '[niftyFuturesProd] Fetching Dhan scrip master CSV');
+  // Resolve which futures we're looking for based on the active symbol.
+  // Default: NIFTY on NSE_FNO. SENSEX is on BSE_FNO with UNDERLYING_SYMBOL='SENSEX'.
+  let exchFilter = 'NSE';
+  let underlyingFilter = 'NIFTY';
+  let defaultLot = 75;
+  try {
+    const symbolRegistry = require('../config/symbolRegistry');
+    const active = symbolRegistry.getSymbol(symbolRegistry.getActiveSymbol());
+    if (active?.futuresUnderlying) {
+      underlyingFilter = active.futuresUnderlying.toUpperCase();
+      // BSE_FNO segment → BSE exchange in scrip master
+      if (active.futuresSegment === 'BSE_FNO') exchFilter = 'BSE';
+      defaultLot = active.lotSize || defaultLot;
+    }
+  } catch (_) {}
+
+  logger.info({ url: SCRIP_MASTER_URL, exchFilter, underlyingFilter }, '[niftyFuturesProd] Fetching Dhan scrip master CSV');
   const { data } = await axios.get(SCRIP_MASTER_URL, {
     timeout: 60000,
     responseType: 'text',
   });
-  const all = parseScripMasterCsv(data);
-  if (!all.length) throw new Error('No NIFTY FUTIDX rows found in scrip master');
+  const all = parseScripMasterCsvFor(data, exchFilter, underlyingFilter, defaultLot);
+  if (!all.length) {
+    logger.warn({ exchFilter, underlyingFilter }, '[niftyFuturesProd] No FUTIDX rows found in scrip master');
+    // Don't throw — degrade gracefully so SENSEX sessions can still trade
+    // off spot. Caller checks getNearContract() result for null.
+    cached = { expiresAt: Date.now() + FUTURES_CACHE_TTL, nearFut: null, nextFut: null };
+    return cached;
+  }
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -90,7 +119,11 @@ async function loadFromScripMaster() {
     })
     .sort(byExpiryAsc);
 
-  if (!upcoming.length) throw new Error('No upcoming NIFTY futures found');
+  if (!upcoming.length) {
+    logger.warn({ exchFilter, underlyingFilter }, '[niftyFuturesProd] No upcoming futures found');
+    cached = { expiresAt: Date.now() + FUTURES_CACHE_TTL, nearFut: null, nextFut: null };
+    return cached;
+  }
 
   const nearFut = upcoming[0];
   const nextFut = upcoming[1] || null;
@@ -104,7 +137,7 @@ async function loadFromScripMaster() {
   logger.info({
     near: { sid: nearFut.securityId, expiry: nearFut.expiryDate, symbol: nearFut.tradingSymbol, lot: nearFut.lotSize },
     next: nextFut ? { sid: nextFut.securityId, expiry: nextFut.expiryDate } : null,
-  }, '[niftyFuturesProd] Resolved NIFTY futures contracts');
+  }, '[niftyFuturesProd] Resolved futures contracts');
 
   return cached;
 }
@@ -112,6 +145,15 @@ async function loadFromScripMaster() {
 async function ensureResolved() {
   if (cached.nearFut && Date.now() < cached.expiresAt) return cached;
   return loadFromScripMaster();
+}
+
+/**
+ * Reset cached futures contracts. Call this when the active trading symbol
+ * changes so the next ensureResolved() reparses the scrip master for the
+ * new underlying (e.g. NIFTY → SENSEX).
+ */
+function resetCache() {
+  cached = { expiresAt: 0, nearFut: null, nextFut: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +181,15 @@ async function getSecurityId() {
  */
 async function getIntradayCandles({ interval = '1', startTime, endTime } = {}) {
   const c = await getNearContract();
-  if (!c) return { ok: false, error: 'Could not resolve NIFTY futures contract' };
+  if (!c) return { ok: false, error: 'Could not resolve futures contract for active symbol', data: { candles: [] } };
+
+  // Use the active symbol's exchange (NSE for NIFTY, BSE for SENSEX)
+  let exchange = 'NSE';
+  try {
+    const symbolRegistry = require('../config/symbolRegistry');
+    const active = symbolRegistry.getSymbol(symbolRegistry.getActiveSymbol());
+    if (active?.futuresSegment === 'BSE_FNO') exchange = 'BSE';
+  } catch (_) {}
 
   const nowSec = Math.floor(Date.now() / 1000);
   const end = endTime || nowSec;
@@ -147,7 +197,7 @@ async function getIntradayCandles({ interval = '1', startTime, endTime } = {}) {
 
   return dhanProd.getDhanProdData(null, {
     securityId: c.securityId,
-    exchange: 'NSE',
+    exchange,
     segment: 'D',
     instrument: 'FUTIDX',
     startTime: start,
@@ -161,14 +211,20 @@ async function getIntradayCandles({ interval = '1', startTime, endTime } = {}) {
  */
 async function getMarketQuote() {
   const c = await getNearContract();
-  if (!c) return { ok: false, error: 'Could not resolve NIFTY futures contract' };
+  if (!c) return { ok: false, error: 'Could not resolve futures contract for active symbol' };
 
-  const res = await dhanProd.getQuote(null, {
-    NSE_FNO: [c.securityId],
-  });
+  // Use the right segment for the active symbol's futures.
+  let segKey = 'NSE_FNO';
+  try {
+    const symbolRegistry = require('../config/symbolRegistry');
+    const active = symbolRegistry.getSymbol(symbolRegistry.getActiveSymbol());
+    if (active?.futuresSegment) segKey = active.futuresSegment;
+  } catch (_) {}
+
+  const res = await dhanProd.getQuote(null, { [segKey]: [c.securityId] });
   if (!res.ok) return res;
 
-  const row = res.data?.NSE_FNO?.[String(c.securityId)];
+  const row = res.data?.[segKey]?.[String(c.securityId)];
   return {
     ok: true,
     data: {
@@ -201,11 +257,17 @@ async function getMarketQuote() {
 async function subscribeLiveFeed(mode = 'FULL') {
   const c = await getNearContract();
   if (!c) return null;
+  let segKey = 'NSE_FNO';
+  try {
+    const symbolRegistry = require('../config/symbolRegistry');
+    const active = symbolRegistry.getSymbol(symbolRegistry.getActiveSymbol());
+    if (active?.futuresSegment) segKey = active.futuresSegment;
+  } catch (_) {}
   liveFeedProd.subscribe(
-    [{ exchangeSegment: 'NSE_FNO', securityId: c.securityId }],
+    [{ exchangeSegment: segKey, securityId: c.securityId }],
     mode
   );
-  logger.info({ sid: c.securityId, mode }, '[niftyFuturesProd] Subscribed futures to live feed');
+  logger.info({ sid: c.securityId, segKey, mode }, '[niftyFuturesProd] Subscribed futures to live feed');
   return c.securityId;
 }
 
@@ -216,7 +278,13 @@ async function subscribeLiveFeed(mode = 'FULL') {
 async function getLiveTick() {
   const c = await getNearContract();
   if (!c) return null;
-  const tick = liveFeedProd.getTick('NSE_FNO', c.securityId);
+  let segKey = 'NSE_FNO';
+  try {
+    const symbolRegistry = require('../config/symbolRegistry');
+    const active = symbolRegistry.getSymbol(symbolRegistry.getActiveSymbol());
+    if (active?.futuresSegment) segKey = active.futuresSegment;
+  } catch (_) {}
+  const tick = liveFeedProd.getTick(segKey, c.securityId);
   if (!tick || typeof tick.ltp !== 'number') return null;
   if (!tick.updatedAt || Date.now() - tick.updatedAt > 5000) return null;
   return {
@@ -274,6 +342,8 @@ module.exports = {
   subscribeLiveFeed,
   getLiveTick,
   analyzeCandles,
+  resetCache,
   // exposed for tests
   _parseScripMasterCsv: parseScripMasterCsv,
+  _parseScripMasterCsvFor: parseScripMasterCsvFor,
 };

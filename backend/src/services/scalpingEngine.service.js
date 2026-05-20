@@ -97,6 +97,22 @@ const monitorEngine = require('./monitorEngine.service');     // NEW centralised
 // Can be overridden per-session via settings.useNewEngines. Default false for safety.
 const DEFAULT_USE_NEW_ENGINES = process.env.USE_NEW_ENGINES === '1';
 
+// ─── Active-symbol option-segment helpers ──────────────────────────────
+// Resolve the F&O segment ('NSE_FNO' or 'BSE_FNO') for a trade. We store
+// `trade.market` at entry; for in-flight legacy trades without a market
+// field we fall back to the registry's active symbol.
+const _symbolRegistryForEngine = require('../config/symbolRegistry');
+function _optionSegmentForTrade(trade) {
+  let key = trade?.market;
+  if (!key) key = _symbolRegistryForEngine.getActiveSymbol();
+  const sym = _symbolRegistryForEngine.getSymbol(key);
+  return sym?.optionsSegment || 'NSE_FNO';
+}
+function _optionSegmentForActive() {
+  const sym = _symbolRegistryForEngine.getSymbol(_symbolRegistryForEngine.getActiveSymbol());
+  return sym?.optionsSegment || 'NSE_FNO';
+}
+
 // ============================================================
 // AGGRESSIVE SCALPING ENHANCEMENTS
 // ============================================================
@@ -157,6 +173,59 @@ async function start({ authKey, settings, aiModel }) {
     const err = new Error(`Market is not live: ${market.reason}`);
     err.status = 400;
     throw err;
+  }
+
+  // ── Wire trading symbols ──────────────────────────────────────────
+  // settings.tradingSymbols is the source of truth for which underlying
+  // the engine pipeline runs against. Set it BEFORE any service is
+  // touched so feedRecorder, candleSynthesizer, historicalContextLoader,
+  // liveFeedIntegrity, multiDayContextEngine all key their folders on
+  // the right symbol.
+  let activeSymbolMeta = null;
+  try {
+    const symbolRegistry = require('../config/symbolRegistry');
+    const active = symbolRegistry.setActiveSymbols(settings);
+    activeSymbolMeta = symbolRegistry.getSymbol(active.active);
+    logger.info({
+      active: active.active,
+      all: active.all,
+      lotSize: activeSymbolMeta.lotSize,
+      strikeStep: activeSymbolMeta.strikeStep,
+      indexSegment: activeSymbolMeta.indexSegment,
+      indexSecurityId: activeSymbolMeta.indexSecurityId,
+    }, '[engine] active trading symbols');
+    // Auto-fill lotSize from the symbol metadata if user didn't supply one.
+    // NIFTY=65, SENSEX=20, BANKNIFTY=35 etc.
+    if (!Number.isFinite(Number(settings.lotSize)) || Number(settings.lotSize) <= 0) {
+      settings.lotSize = activeSymbolMeta.lotSize;
+      logger.info({ lotSize: settings.lotSize }, '[engine] lotSize auto-filled from symbol metadata');
+    }
+  } catch (e) {
+    logger.warn({ err: e.message }, '[engine] failed to set active symbols (using NIFTY_50 default)');
+  }
+
+  // ── Refresh live-feed subscription for the active symbol ──────────
+  // The boot block subscribed NIFTY+BANKNIFTY+SENSEX index spots, but if
+  // the active symbol is something else we (re)subscribe defensively.
+  // Also resets the futures cache so SENSEX runs reparse the scrip
+  // master for BSE FUTIDX rows on the next ensureResolved() call.
+  try {
+    if (activeSymbolMeta) {
+      const { instance: liveFeedProd } = require('./dhanLiveFeedProd.service');
+      liveFeedProd.subscribe(
+        [{ exchangeSegment: activeSymbolMeta.indexSegment, securityId: activeSymbolMeta.indexSecurityId }],
+        'QUOTE'
+      );
+      const niftyFuturesProd = require('./niftyFuturesProd.service');
+      niftyFuturesProd.resetCache();
+      // Best-effort: subscribe the futures contract for the active symbol.
+      // For SENSEX this currently no-ops because the BSE FUTIDX scrip lookup
+      // returns null until further wiring is done.
+      try { await niftyFuturesProd.subscribeLiveFeed('FULL'); }
+      catch (_) {}
+    }
+  } catch (e) {
+    logger.warn({ err: e.message }, '[engine] live-feed re-subscribe failed (non-fatal)');
   }
 
   // Initialize professional trader session (market opening strike as anchor)
@@ -2309,7 +2378,9 @@ async function runPredictionCycle() {
       tradeType: tradeType,
       // ── ENGINE & MARKET (NEW 2026-05-19) ──
       engineType: institutionalEntryDecision.engineType || 'CORE',
-      market:     institutionalEntryDecision.market     || 'NIFTY_50',
+      market:     institutionalEntryDecision.market
+                  || state.session?.settings?.tradingSymbols?.[0]
+                  || 'NIFTY_50',
       // Per-trade AI overrides — consumed by monitor engine
       maxHoldSeconds: Number(institutionalEntryDecision.suggested_max_hold_seconds)
         || (isSwingTrade ? (state.session.settings?.swingMaxHoldMinutes || 15) * 60 : state.session.settings?.maxHoldTimeSeconds || 180),
@@ -2347,8 +2418,9 @@ async function runPredictionCycle() {
     try {
       if (optionSecurityId) {
         const { instance: liveFeedProd } = require('./dhanLiveFeedProd.service');
+        const optionSegment = _optionSegmentForActive();
         liveFeedProd.subscribe(
-          [{ exchangeSegment: 'NSE_FNO', securityId: optionSecurityId }],
+          [{ exchangeSegment: optionSegment, securityId: optionSecurityId }],
           'FULL'
         );
         
@@ -2508,7 +2580,7 @@ async function runMonitorCycle() {
       if (trade.optionSecurityId) {
         try {
           const { instance: liveFeedProd } = require('./dhanLiveFeedProd.service');
-          const tick = liveFeedProd.getTick('NSE_FNO', trade.optionSecurityId);
+          const tick = liveFeedProd.getTick(_optionSegmentForTrade(trade), trade.optionSecurityId);
           if (tick && typeof tick.ltp === 'number' && tick.ltp > 0 && tick.updatedAt && Date.now() - tick.updatedAt < 5000) {
             ltp = tick.ltp;
             ltpSource = 'live_feed_direct';
@@ -2844,7 +2916,7 @@ async function runPriceUpdateCycle() {
 
       try {
         // Get live tick from WebSocket feed
-        const tick = liveFeedProd.getTick('NSE_FNO', trade.optionSecurityId);
+        const tick = liveFeedProd.getTick(_optionSegmentForTrade(trade), trade.optionSecurityId);
         
         // Validate tick is fresh (< 5 seconds old) and has valid LTP
         if (tick && 

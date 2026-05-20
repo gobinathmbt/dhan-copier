@@ -665,13 +665,24 @@ async function decide({
         });
       }
       // If futures depth unavailable, try spot — most useful when index has
-      // been subscribed in FULL mode.
+      // been subscribed in FULL mode. Use the active symbol's index (NIFTY
+      // 13 / SENSEX 51 etc.) so the same code path works for any symbol.
       if (!microRead?.available) {
-        microRead = microstructureEngine.analyze({
-          segment: 'IDX_I',
-          securityId: 13,
-          windowMs: 60_000,
-        });
+        try {
+          const sr = require('../../config/symbolRegistry');
+          const active = sr.getSymbol(sr.getActiveSymbol());
+          microRead = microstructureEngine.analyze({
+            segment: active.indexSegment,
+            securityId: active.indexSecurityId,
+            windowMs: 60_000,
+          });
+        } catch (_) {
+          microRead = microstructureEngine.analyze({
+            segment: 'IDX_I',
+            securityId: 13,
+            windowMs: 60_000,
+          });
+        }
       }
     } catch (e) {
       hybridLogger.warn({ sessionId, event: 'microstructure_failed',

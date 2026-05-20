@@ -28,9 +28,11 @@
 
 const fs = require('fs');
 const path = require('path');
+const symbolRegistry = require('../../config/symbolRegistry');
 
 const ROOT_DIR = path.resolve(__dirname, '../../../live-feed');
-const UNDERLYING = 'NIFTY_50';
+// Active underlying — driven by `settings.tradingSymbols[0]`.
+function _underlying() { return symbolRegistry.getActiveSymbol(); }
 const PROFILE_BUCKETS = 50;
 
 // In-memory caches
@@ -223,15 +225,16 @@ function _classifyDayType({ candles1m, dayHigh, dayLow, ib, vwap, open, close })
 // ─── Folder enumeration ──────────────────────────────────────────────────
 function _listFolders(rootDir = ROOT_DIR) {
   if (!fs.existsSync(rootDir)) return [];
+  const underlying = _underlying();
   return fs.readdirSync(rootDir, { withFileTypes: true })
-    .filter(e => e.isDirectory() && e.name.endsWith(`_${UNDERLYING}`))
+    .filter(e => e.isDirectory() && e.name.endsWith(`_${underlying}`))
     .map(e => e.name)
     .sort();
 }
 
 function _foldersBefore(dateStr, n, rootDir = ROOT_DIR) {
   const all = _listFolders(rootDir);
-  const target = `${dateStr}_${UNDERLYING}`;
+  const target = `${dateStr}_${_underlying()}`;
   const idx = all.findIndex(f => f >= target);
   // collect up to n entries strictly before idx
   const before = idx === -1 ? all.slice(-n) : all.slice(Math.max(0, idx - n), idx);

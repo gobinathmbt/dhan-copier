@@ -19,6 +19,7 @@ const ultraScalpEngine        = require('./ultraScalpEngine');
 const ultraScalpStrikeSelector = require('./ultraScalpStrikeSelector');
 const supportScalpEngine      = require('./supportScalpEngine');
 const supportScalpStrikeSelector = require('./supportScalpStrikeSelector');
+const symbolRegistry          = require('../../config/symbolRegistry');
 // Core engine — the full institutional hybrid pipeline. Lazy-required so
 // when coreEngine=false we don't pull in the heavy graph.
 let _coreEngine = null;
@@ -43,7 +44,12 @@ const hybridLogger = require('./hybridLogger');
 async function decide(params) {
   const settings = params.settings || {};
   const sessionId = params.session?._id || params.sessionId;
-  const market    = params.market || (settings.tradingSymbols?.[0]) || 'NIFTY_50';
+  // Resolve the market from the params first, then settings.tradingSymbols,
+  // then fall back to the registry's active symbol (set by scalpingEngine.start()).
+  const market    = params.market
+    || (settings.tradingSymbols?.[0])
+    || symbolRegistry.getActiveSymbol()
+    || 'NIFTY_50';
 
   const ultraOn   = settings.ultraScalpingEngine !== false;
   const supportOn = settings.supportScalpEngine === true;

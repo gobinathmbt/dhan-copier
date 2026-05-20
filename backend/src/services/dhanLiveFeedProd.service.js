@@ -415,12 +415,21 @@ class DhanLiveFeedProd extends EventEmitter {
       logger.warn({ err: e.message }, '[liveFeedProd] tick listener threw');
     }
 
-    // Record NIFTY 50 spot ticks to disk (feed recorder handles market-hours gating)
-    if (segmentName === 'IDX_I' && securityId === 13) {
-      try { feedRecorder.recordSpotTick(next); } catch (_) {}
-    }
-    // Record NIFTY futures ticks (NSE_FNO segment, any FUTIDX security id)
-    if (segmentName === 'NSE_FNO') {
+    // Record spot ticks for the ACTIVE underlying to disk (feed recorder
+    // gates on market hours). symbolRegistry.getActiveSymbol() is set by
+    // scalpingEngine.start() based on settings.tradingSymbols[0]; falls
+    // back to NIFTY_50 at boot.
+    try {
+      const symbolRegistry = require('../config/symbolRegistry');
+      const active = symbolRegistry.getSymbol(symbolRegistry.getActiveSymbol());
+      if (active
+          && segmentName === active.indexSegment
+          && Number(securityId) === Number(active.indexSecurityId)) {
+        feedRecorder.recordSpotTick(next);
+      }
+    } catch (_) {}
+    // Record futures ticks (NSE_FNO for NIFTY/BANKNIFTY, BSE_FNO for SENSEX/BANKEX).
+    if (segmentName === 'NSE_FNO' || segmentName === 'BSE_FNO') {
       try { feedRecorder.recordFuturesTick(next); } catch (_) {}
     }
   }
