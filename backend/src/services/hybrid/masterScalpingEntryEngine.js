@@ -64,11 +64,17 @@ async function decide(params) {
   // Ultra & support engines expect raw candle arrays — we pull them from
   // the aggregator payload and historical context.
   const payload = params.aggregator?.payload || {};
-  const histCtx = await _getHistoricalCandles(params);
-  const candles1m  = histCtx?.['1m']  || [];
+  // Pass the active market explicitly so the loader keys folder lookups
+  // on the right symbol regardless of registry timing.
+  const histCtx = await _getHistoricalCandles(params, market);
+  // Prefer aggregator-fresh candles when present (faster, no disk read).
+  // Fall back to historical-context disk candles when aggregator is empty
+  // (e.g. cold start before the aggregator's first cycle finishes).
+  const aggCandles = payload?.candles || {};
+  const candles1m  = (aggCandles['1m']  && aggCandles['1m'].length)  ? _normCandles(aggCandles['1m'])  : (histCtx?.['1m']  || []);
+  const candles5m  = (aggCandles['5m']  && aggCandles['5m'].length)  ? _normCandles(aggCandles['5m'])  : (histCtx?.['5m']  || []);
+  const candles15m = (aggCandles['15m'] && aggCandles['15m'].length) ? _normCandles(aggCandles['15m']) : (histCtx?.['15m'] || []);
   const candles3m  = _build3m(candles1m);
-  const candles5m  = histCtx?.['5m']  || [];
-  const candles15m = histCtx?.['15m'] || [];
   const spotPrice  = payload?.spot_data?.ltp || params.aggregator?.spotPrice;
   const atmStrike  = params.aggregator?.atmStrike || payload?.actual_atm_strike;
   const primaryStrikes = payload?.options_chain?.strikes || params.aggregator?.optionChain?.strikes || [];
@@ -191,19 +197,38 @@ async function decide(params) {
 // ────────────────────────────────────────────────────────────────────────
 // Helpers
 // ────────────────────────────────────────────────────────────────────────
-async function _getHistoricalCandles(params) {
+async function _getHistoricalCandles(params, market) {
   // Reuse the historicalContextLoader the core engine uses, so we get the
-  // same data the institutional pipeline sees.
+  // same data the institutional pipeline sees. Pass `symbolKey` explicitly
+  // so loader uses the right per-symbol folder regardless of registry timing.
   try {
     const histLoader = require('../historicalContextLoader.service');
     const ctx = await histLoader.buildHistoricalContext({
       maxBackfillDays: 1,
       includeRawToday: true,
+      symbolKey: market || (params?.market) || (params?.settings?.tradingSymbols?.[0]) || null,
     });
     return ctx?.today?.candles || {};
   } catch (_) {
     return {};
   }
+}
+
+/**
+ * Normalise candle shape — aggregator emits { time, open, high, low, close, volume }
+ * while disk-recorded candles use compact { t, o, h, l, c, v }. The downstream
+ * UT Bot / Supertrend code accepts either via { open ?? o }, but we normalise
+ * here so logging is consistent.
+ */
+function _normCandles(arr) {
+  return (arr || []).map(c => ({
+    t: c.t ?? c.time,
+    o: c.o ?? c.open,
+    h: c.h ?? c.high,
+    l: c.l ?? c.low,
+    c: c.c ?? c.close,
+    v: c.v ?? c.volume ?? 0,
+  })).filter(c => Number.isFinite(c.c));
 }
 
 function _build3m(c1m) {

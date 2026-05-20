@@ -40,11 +40,19 @@ const TF_SECONDS = { '1m': 60, '5m': 300, '15m': 900, '30m': 1800 };
 // Mapping TF → Dhan production API interval string
 const TF_API_INTERVAL = { '1m': '1', '5m': '5', '15m': '15', '30m': '30' };
 
-// Spot is NIFTY 50, security id 13 on the index segment.
-const SPOT_API_PARAMS = { securityId: 13, exchange: 'IDX', segment: 'I', instrument: 'IDX' };
+// Resolve spot API params for the ACTIVE symbol — all index spots use IDX_I in Dhan.
+function _spotApiParamsForSymbol(symbolKey) {
+  const sym = symbolRegistry.getSymbol(symbolKey);
+  return {
+    securityId: sym?.indexSecurityId || 13,
+    exchange: 'IDX',
+    segment: 'I',
+    instrument: 'IDX',
+  };
+}
 
-// Throttle backfill — don't hammer the API. Per-key cooldown.
-const _backfillLastAt = new Map();        // key: `${base}-${tf}` -> ms timestamp
+// Throttle backfill — don't hammer the API. Per-key cooldown (per symbol).
+const _backfillLastAt = new Map();        // key: `${symbol}-${base}-${tf}` -> ms timestamp
 const BACKFILL_COOLDOWN_MS = 30_000;
 
 function _todayIstYYYYMMDD() {
@@ -134,12 +142,13 @@ function dedupeFile(file) {
  * @param {string} dateStr YYYY-MM-DD of the folder
  * @returns {Promise<{fetched:number, error?:string, skipped?:string}>}
  */
-async function backfillFromApi(folder, base, tf, dateStr) {
+async function backfillFromApi(folder, base, tf, dateStr, symbolKey) {
   const tfSec = TF_SECONDS[tf];
   const interval = TF_API_INTERVAL[tf];
   if (!tfSec || !interval) return { fetched: 0, skipped: 'unsupported-tf' };
+  if (!symbolKey) symbolKey = _underlying();
 
-  const cooldownKey = `${base}-${tf}`;
+  const cooldownKey = `${symbolKey}-${base}-${tf}`;
   const last = _backfillLastAt.get(cooldownKey) || 0;
   if (Date.now() - last < BACKFILL_COOLDOWN_MS) {
     return { fetched: 0, skipped: 'cooldown' };
@@ -171,12 +180,15 @@ async function backfillFromApi(folder, base, tf, dateStr) {
     if (base === 'candles') {
       const dhanProd = require('./dhanProd.service');
       res = await dhanProd.getDhanProdData(null, {
-        ...SPOT_API_PARAMS,
+        ..._spotApiParamsForSymbol(symbolKey),
         interval,
         startTime: open,
         endTime: endSec,
       });
     } else if (base === 'futures') {
+      // Futures intraday only resolves for symbols with a registered
+      // futures contract (currently NIFTY only on NSE_FNO). For SENSEX
+      // this returns ok:false and we skip.
       const niftyFuturesProd = require('./niftyFuturesProd.service');
       res = await niftyFuturesProd.getIntradayCandles({
         interval,
@@ -312,59 +324,80 @@ function detectGaps(folder, base = 'candles') {
 }
 
 /**
- * Run a single integrity sweep for today's folder.
- * Order:
- *   1) Dedupe existing files (cheap, no API)
- *   2) API-backfill missing candles (recover from outages)
- *   3) Synthesise missing higher-TF candles from 1m
- *   4) Report any remaining 1m gaps for monitoring
+ * Run a single integrity sweep for today's folder, for ALL enabled symbols.
+ * Each enabled symbol gets its own folder swept independently. The active
+ * symbol in symbolRegistry is briefly switched per iteration so any
+ * downstream services that read it (e.g. niftyFuturesProd for futures
+ * scrip-master resolution) align with the symbol being swept.
  */
 async function sweepToday() {
   const dateStr = _todayIstYYYYMMDD();
-  const folder = path.join(ROOT_DIR, `${dateStr}_${_underlying()}`);
-  if (!fs.existsSync(folder)) {
-    return { skipped: true, reason: 'folder missing' };
-  }
-  const result = { dateStr, folder, dedupe: {}, backfill: {}, synth: {}, gaps: {} };
-
-  // 1) Dedupe all candle / futures files
-  for (const base of ['candles', 'futures']) {
-    for (const tf of ['1m', '5m', '15m', '30m']) {
-      const f = path.join(folder, `${base}-${tf}.jsonl`);
-      if (!fs.existsSync(f)) continue;
-      const r = dedupeFile(f);
-      if (r.dropped > 0) result.dedupe[`${base}-${tf}`] = r;
+  const symbols = (() => {
+    try {
+      const list = symbolRegistry.getActiveSymbols();
+      return list && list.length ? list : [_underlying()];
+    } catch (_) {
+      return [_underlying()];
     }
-  }
+  })();
 
-  // 2) API backfill — only during/after market hours when there's data to fetch.
-  //    1m is the priority; 5m/15m/30m can also be backfilled directly so
-  //    they're authoritative even if 1m has dropouts that synth can't cover.
-  if (_istMinutesNow() >= SESSION_OPEN_MIN) {
+  const result = { dateStr, perSymbol: {} };
+  // Save original active so we can restore it after iterating.
+  const original = _underlying();
+
+  for (const symKey of symbols) {
+    const folder = path.join(ROOT_DIR, `${dateStr}_${symKey}`);
+    if (!fs.existsSync(folder)) {
+      result.perSymbol[symKey] = { skipped: true, reason: 'folder missing' };
+      continue;
+    }
+    const symResult = { folder, dedupe: {}, backfill: {}, synth: {}, gaps: {} };
+
+    // 1) Dedupe all candle / futures files
     for (const base of ['candles', 'futures']) {
       for (const tf of ['1m', '5m', '15m', '30m']) {
-        try {
-          const r = await backfillFromApi(folder, base, tf, dateStr);
-          if (r.fetched > 0) result.backfill[`${base}-${tf}`] = r;
-        } catch (e) {
-          // Never let one TF blow up the sweep
-          logger.debug({ err: e.message, base, tf }, '[liveFeedIntegrity] backfill threw');
+        const f = path.join(folder, `${base}-${tf}.jsonl`);
+        if (!fs.existsSync(f)) continue;
+        const r = dedupeFile(f);
+        if (r.dropped > 0) symResult.dedupe[`${base}-${tf}`] = r;
+      }
+    }
+
+    // 2) API backfill — point the registry at this symbol so getIntradayCandles
+    //    resolves the right index/futures contract for the API call.
+    if (_istMinutesNow() >= SESSION_OPEN_MIN) {
+      try { symbolRegistry.setActiveSymbols({ tradingSymbols: [symKey] }); } catch (_) {}
+      for (const base of ['candles', 'futures']) {
+        // SENSEX has no NSE futures contract — skip futures backfill for now
+        if (base === 'futures' && symKey !== 'NIFTY_50') continue;
+        for (const tf of ['1m', '5m', '15m', '30m']) {
+          try {
+            const r = await backfillFromApi(folder, base, tf, dateStr, symKey);
+            if (r.fetched > 0) symResult.backfill[`${base}-${tf}`] = r;
+          } catch (e) {
+            logger.debug({ err: e.message, base, tf, symKey }, '[liveFeedIntegrity] backfill threw');
+          }
         }
       }
     }
+
+    // 3) Synth missing higher-TF candles from 1m (final safety net)
+    for (const base of ['candles', 'futures']) {
+      const r = synthesizeFromOneMinute(folder, base);
+      if (Object.keys(r.synthesised).length) symResult.synth[base] = r.synthesised;
+    }
+
+    // 4) Detect 1m gaps (informational)
+    for (const base of ['candles', 'futures']) {
+      const r = detectGaps(folder, base);
+      if (r.gaps > 0) symResult.gaps[base] = r;
+    }
+
+    result.perSymbol[symKey] = symResult;
   }
 
-  // 3) Synth missing higher-TF candles from 1m (final safety net)
-  for (const base of ['candles', 'futures']) {
-    const r = synthesizeFromOneMinute(folder, base);
-    if (Object.keys(r.synthesised).length) result.synth[base] = r.synthesised;
-  }
-
-  // 4) Detect 1m gaps (informational)
-  for (const base of ['candles', 'futures']) {
-    const r = detectGaps(folder, base);
-    if (r.gaps > 0) result.gaps[base] = r;
-  }
+  // Restore original active symbol so the next prediction cycle finds it.
+  try { symbolRegistry.setActiveSymbols({ tradingSymbols: [original] }); } catch (_) {}
 
   return result;
 }
@@ -381,17 +414,21 @@ async function _runOnce(label) {
       logger.info({ r }, `[liveFeedIntegrity] ${label} sweep skipped`);
       return;
     }
-    const hasWork = Object.keys(r.dedupe).length
-      || Object.keys(r.backfill).length
-      || Object.keys(r.synth).length
-      || Object.keys(r.gaps).length;
-    if (hasWork || label === 'initial') {
-      logger.info({
-        dedupe: r.dedupe,
-        backfill: r.backfill,
-        synth: r.synth,
-        gaps: r.gaps,
-      }, `[liveFeedIntegrity] ${label} sweep`);
+    // Log a summary that surfaces which symbols had work
+    const summary = {};
+    for (const [sym, sr] of Object.entries(r.perSymbol || {})) {
+      const work = (Object.keys(sr.dedupe || {}).length)
+        || (Object.keys(sr.backfill || {}).length)
+        || (Object.keys(sr.synth || {}).length)
+        || (Object.keys(sr.gaps || {}).length);
+      if (work || label === 'initial') {
+        summary[sym] = {
+          dedupe: sr.dedupe, backfill: sr.backfill, synth: sr.synth, gaps: sr.gaps,
+        };
+      }
+    }
+    if (Object.keys(summary).length) {
+      logger.info(summary, `[liveFeedIntegrity] ${label} sweep`);
     }
   } catch (e) {
     logger.warn({ err: e.message }, `[liveFeedIntegrity] ${label} sweep failed`);

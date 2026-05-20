@@ -138,11 +138,12 @@ function aggregate(candles1m, intervalMin) {
 // Keyed by `${dateStr}/${type}/${interval}` e.g. "2026-05-18/candles/5"
 const writtenTimestamps = new Map();
 
-function getWritten(dateStr, type, interval) {
-  const key = `${dateStr}/${_underlying()}/${type}/${interval}`;
+function getWritten(dateStr, type, interval, symbolKey = null) {
+  const sym = symbolKey || _underlying();
+  const key = `${dateStr}/${sym}/${type}/${interval}`;
   if (!writtenTimestamps.has(key)) {
     // Load from disk on first access
-    const folder = path.join(ROOT_DIR, `${dateStr}_${_underlying()}`);
+    const folder = path.join(ROOT_DIR, `${dateStr}_${sym}`);
     const file   = path.join(folder, `${type}-${interval}m.jsonl`);
     writtenTimestamps.set(key, loadExistingTimestamps(file));
   }
@@ -153,9 +154,11 @@ function getWritten(dateStr, type, interval) {
  * Synthesize and write missing higher-timeframe candles for one type.
  * @param {string} dateStr  - e.g. "2026-05-18"
  * @param {string} type     - "candles" or "futures"
+ * @param {string} [symbolKey] - explicit symbol key (defaults to active)
  */
-function synthesizeForType(dateStr, type) {
-  const folder = path.join(ROOT_DIR, `${dateStr}_${_underlying()}`);
+function synthesizeForType(dateStr, type, symbolKey = null) {
+  const sym = symbolKey || _underlying();
+  const folder = path.join(ROOT_DIR, `${dateStr}_${sym}`);
   if (!fs.existsSync(folder)) return;
 
   // Read 1m source
@@ -165,7 +168,7 @@ function synthesizeForType(dateStr, type) {
 
   for (const intervalMin of [5, 15, 30]) {
     const destFile = path.join(folder, `${type}-${intervalMin}m.jsonl`);
-    const written  = getWritten(dateStr, type, String(intervalMin));
+    const written  = getWritten(dateStr, type, String(intervalMin), sym);
 
     const aggregated = aggregate(candles1m, intervalMin);
     const newBars = aggregated.filter(c => !written.has(c.t));
@@ -178,12 +181,12 @@ function synthesizeForType(dateStr, type) {
       fs.appendFileSync(destFile, lines, 'utf8');
       newBars.forEach(c => written.add(c.t));
       logger.info({
-        type, interval: `${intervalMin}m`, count: newBars.length,
+        symbol: sym, type, interval: `${intervalMin}m`, count: newBars.length,
         first: new Date((newBars[0].t + IST_OFFSET_SEC) * 1000).toISOString().slice(11, 19) + ' IST',
         last:  new Date((newBars[newBars.length - 1].t + IST_OFFSET_SEC) * 1000).toISOString().slice(11, 19) + ' IST',
-      }, `[candleSynthesizer] wrote ${newBars.length} new ${type}-${intervalMin}m candles`);
+      }, `[candleSynthesizer] wrote ${newBars.length} new ${sym} ${type}-${intervalMin}m candles`);
     } catch (e) {
-      logger.warn({ err: e.message, type, intervalMin }, '[candleSynthesizer] write failed');
+      logger.warn({ err: e.message, symbol: sym, type, intervalMin }, '[candleSynthesizer] write failed');
     }
   }
 }
@@ -199,8 +202,17 @@ function tick() {
   try {
     if (!isMarketHours()) return;
     const { dateStr } = istNow();
-    synthesizeForType(dateStr, 'candles');
-    synthesizeForType(dateStr, 'futures');
+    // Iterate ALL enabled symbols so NIFTY and SENSEX both get their
+    // 5m/15m/30m candles synthesised from their own 1m data on disk.
+    let symbols;
+    try {
+      symbols = symbolRegistry.getActiveSymbols();
+    } catch (_) { symbols = [_underlying()]; }
+    if (!symbols || !symbols.length) symbols = [_underlying()];
+    for (const sym of symbols) {
+      synthesizeForType(dateStr, 'candles', sym);
+      synthesizeForType(dateStr, 'futures', sym);
+    }
   } catch (e) {
     logger.warn({ err: e.message }, '[candleSynthesizer] tick error');
   } finally {

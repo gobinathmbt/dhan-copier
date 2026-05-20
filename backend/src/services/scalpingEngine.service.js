@@ -334,6 +334,23 @@ async function start({ authKey, settings, aiModel }) {
     logger.warn({ err: e.message }, '[engine] live-feed re-subscribe failed (non-fatal)');
   }
 
+  // ── Pre-load historical context for ALL enabled symbols ──────────
+  // Triggers an async backfill (NIFTY uses the institutional path,
+  // SENSEX uses the lightweight spot-only path). Doesn't block start —
+  // any data fetched lands in live-feed/ before the first prediction
+  // cycle finishes (60s) so the engines see real candle history.
+  try {
+    if (enabledSymbols.includes('SENSEX')) {
+      const { backfillSensexRange } = require('./sensexBackfill.service');
+      // Fire-and-forget — the integrity guardian will also keep up later
+      backfillSensexRange({ days: 5, overwrite: false })
+        .then(r => logger.info({ days: r.days?.length }, '[engine] SENSEX backfill complete'))
+        .catch(err => logger.warn({ err: err.message }, '[engine] SENSEX backfill failed'));
+    }
+  } catch (e) {
+    logger.warn({ err: e.message }, '[engine] backfill bootstrap failed');
+  }
+
   // Initialize professional trader session (market opening strike as anchor)
   try {
     await professionalTrader.initializeMarketSession(authKey);

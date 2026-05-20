@@ -9,13 +9,17 @@
  * needing the live feed to have been parsed by the algo engine.
  *
  * Folder layout it expects (built by feedRecorder + historicalBackfill):
- *   live-feed/<YYYY-MM-DD>_NIFTY_50/
+ *   live-feed/<YYYY-MM-DD>_<SYMBOL>/    (e.g. _NIFTY_50, _SENSEX)
  *     metadata.json          — { openPrice, openingAtm, latestAtm, ... }
  *     spot.jsonl             — per-minute/per-tick spot snapshots
- *     candles-1m.jsonl       — NIFTY 1-min OHLC
+ *     candles-1m.jsonl       — 1-min OHLC
  *     candles-5m.jsonl
  *     candles-15m.jsonl
  *     option-chain.jsonl     — per-minute snapshots of ATM ± 6 strikes
+ *
+ * MULTI-SYMBOL: every top-level function accepts an optional `symbolKey`
+ * argument. When omitted, falls back to symbolRegistry.getActiveSymbol()
+ * for backwards compatibility.
  */
 const fs = require('fs');
 const path = require('path');
@@ -24,10 +28,9 @@ const logger = require('../utils/logger');
 const symbolRegistry = require('../config/symbolRegistry');
 
 const ROOT_DIR = path.resolve(__dirname, '../../live-feed');
-// Active underlying — driven by `settings.tradingSymbols[0]`.
 function _underlying() { return symbolRegistry.getActiveSymbol(); }
 const MAX_BACKFILL_DAYS = 7;
-const STRIKE_WINDOW = 4; // user wants ±4 strikes for the algo
+const STRIKE_WINDOW = 4;
 
 // In-memory cache for prior-day summaries — they don't change so we load once.
 // Key = folder name (e.g. "2026-05-12_NIFTY_50"). Value = summary object.
@@ -65,9 +68,9 @@ function readJsonSafe(file) {
   catch (_) { return null; }
 }
 
-function listRecordedFolders() {
+function listRecordedFolders(symbolKey = null) {
   if (!fs.existsSync(ROOT_DIR)) return [];
-  const underlying = _underlying();
+  const underlying = symbolKey || _underlying();
   return fs.readdirSync(ROOT_DIR, { withFileTypes: true })
     .filter(e => e.isDirectory() && e.name.endsWith(`_${underlying}`))
     .map(e => e.name)
@@ -76,10 +79,8 @@ function listRecordedFolders() {
 }
 
 // ---------------------------------------------------------------------------
-// Prior-day summary — cached. Produces:
-//   { date, open, high, low, close, rangePct, openingAtm, closingAtm,
-//     pivots: { r1, s1, vwap, pivot }, trend: 'bullish'|'bearish'|'neutral',
-//     strikesOpen, strikesClose, finalCallPain, finalPutPain, maxPainStrike }
+// Prior-day summary — cached. Cache key includes the folder name so it's
+// already symbol-aware (folder name contains symbol).
 // ---------------------------------------------------------------------------
 async function loadPriorDaySummary(folderName) {
   if (priorDayCache.has(folderName)) return priorDayCache.get(folderName);
@@ -97,7 +98,6 @@ async function loadPriorDaySummary(folderName) {
   const highs = candles15m.map(c => c.h);
   const lows = candles15m.map(c => c.l);
   const closes = candles15m.map(c => c.c);
-  const vols = candles15m.map(c => c.v || 0);
 
   const open = candles15m[0].o;
   const high = Math.max(...highs);
@@ -115,7 +115,6 @@ async function loadPriorDaySummary(folderName) {
   const vwap = v ? pv / v : close;
   const trend = close > open * 1.003 ? 'bullish' : close < open * 0.997 ? 'bearish' : 'neutral';
 
-  // Final option chain snapshot — find max pain strike
   const lastChain = await readLastChainSnapshot(folder);
   let maxPainStrike = null, finalCallOI = 0, finalPutOI = 0;
   if (lastChain?.strikes) {
@@ -123,14 +122,13 @@ async function loadPriorDaySummary(folderName) {
       finalCallOI += s.ce?.oi || 0;
       finalPutOI += s.pe?.oi || 0;
     }
-    // Max pain = strike where (sum of ITM CE OI × (strike-K)) + (sum of ITM PE OI × (K-strike)) is minimized
     let minLoss = Infinity;
     for (const row of lastChain.strikes) {
       const K = row.strike;
       let loss = 0;
       for (const s of lastChain.strikes) {
-        if (s.strike > K) loss += (s.strike - K) * (s.ce?.oi || 0); // CE writer loss
-        if (s.strike < K) loss += (K - s.strike) * (s.pe?.oi || 0); // PE writer loss
+        if (s.strike > K) loss += (s.strike - K) * (s.ce?.oi || 0);
+        if (s.strike < K) loss += (K - s.strike) * (s.pe?.oi || 0);
       }
       if (loss < minLoss) { minLoss = loss; maxPainStrike = K; }
     }
@@ -169,7 +167,6 @@ async function loadPriorDaySummary(folderName) {
 async function readLastChainSnapshot(folder) {
   const file = path.join(folder, 'option-chain.jsonl');
   if (!fs.existsSync(file)) return null;
-  // Stream the file and keep only the last line (avoid loading 2MB)
   return new Promise((resolve) => {
     let last = null;
     const rl = readline.createInterface({
@@ -185,18 +182,15 @@ async function readLastChainSnapshot(folder) {
 }
 
 // ---------------------------------------------------------------------------
-// Today's intraday context — NOT cached (grows minute by minute).
-// Returns everything from 09:15 up to "now" from the recorder:
-//   - candles 1m (keep last 120), 5m (last 48), 15m (last 16)
-//   - futures candles (same cadence) when present
-//   - per-strike evolution: for the selected strike list, last N chain snapshots
-//   - key stats: opening price, opening ATM, running high/low, cumulative volume
+// Today's intraday context — accepts explicit symbolKey so multi-symbol
+// callers don't depend on registry state at the moment of read.
 // ---------------------------------------------------------------------------
-async function loadTodayContext({ maxChainSnapshots = 30, focusStrikes = null } = {}) {
+async function loadTodayContext({ maxChainSnapshots = 30, focusStrikes = null, symbolKey = null } = {}) {
   const dateStr = istNowYYYYMMDD();
-  const folder = path.join(ROOT_DIR, `${dateStr}_${UNDERLYING}`);
+  const sym = symbolKey || _underlying();
+  const folder = path.join(ROOT_DIR, `${dateStr}_${sym}`);
   if (!fs.existsSync(folder)) {
-    return { date: dateStr, source: 'no_data', empty: true };
+    return { date: dateStr, symbol: sym, source: 'no_data', empty: true };
   }
 
   const meta = readJsonSafe(path.join(folder, 'metadata.json'));
@@ -210,7 +204,6 @@ async function loadTodayContext({ maxChainSnapshots = 30, focusStrikes = null } 
   ]);
   const chainRows = await readJsonlTail(path.join(folder, 'option-chain.jsonl'), maxChainSnapshots);
 
-  // Running session stats from 1m candles
   let sessionHigh = -Infinity, sessionLow = Infinity, sessionVolume = 0;
   for (const c of c1) {
     if (c.h > sessionHigh) sessionHigh = c.h;
@@ -218,7 +211,6 @@ async function loadTodayContext({ maxChainSnapshots = 30, focusStrikes = null } 
     sessionVolume += c.v || 0;
   }
 
-  // Futures premium right now — last futures close vs last spot close
   let futuresPremium = null;
   let futuresTrend = null;
   if (f1.length && c1.length) {
@@ -230,7 +222,6 @@ async function loadTodayContext({ maxChainSnapshots = 30, focusStrikes = null } 
     futuresTrend = delta > 0.15 ? 'bullish' : delta < -0.15 ? 'bearish' : 'neutral';
   }
 
-  // Condense chain: keep only ATM ± STRIKE_WINDOW (4) strikes if focusStrikes not specified
   const condensedChain = chainRows.map((snap) => {
     let rows = snap.strikes || [];
     if (focusStrikes && focusStrikes.length) {
@@ -252,11 +243,11 @@ async function loadTodayContext({ maxChainSnapshots = 30, focusStrikes = null } 
     };
   });
 
-  // OI evolution — for each strike, track how OI changed across the captured snapshots
   const oiEvolution = computeOiEvolution(condensedChain);
 
   return {
     date: dateStr,
+    symbol: sym,
     source: 'intraday',
     metadata: meta,
     sessionStats: {
@@ -304,7 +295,6 @@ function computeOiEvolution(snapshots) {
   }));
   rows.sort((a, b) => a.strike - b.strike);
 
-  // Heaviest CE additions = resistance; heaviest PE additions = support
   const heaviestCe = [...rows].sort((a, b) => b.ceOiChg - a.ceOiChg)[0];
   const heaviestPe = [...rows].sort((a, b) => b.peOiChg - a.peOiChg)[0];
 
@@ -319,14 +309,13 @@ function computeOiEvolution(snapshots) {
 }
 
 // ---------------------------------------------------------------------------
-// Top-level API — build the "full historical context" bundle for the AI.
-// Accepts { focusStrikes } so callers who already know the target strike can
-// request a denser slice for it.
+// Top-level API — accepts optional symbolKey for multi-symbol callers.
 // ---------------------------------------------------------------------------
-async function buildHistoricalContext({ maxBackfillDays = 5, focusStrikes = null, includeRawToday = true } = {}) {
-  const folders = listRecordedFolders();
+async function buildHistoricalContext({ maxBackfillDays = 5, focusStrikes = null, includeRawToday = true, symbolKey = null } = {}) {
+  const sym = symbolKey || _underlying();
+  const folders = listRecordedFolders(sym);
   const today = istNowYYYYMMDD();
-  const todayFolder = `${today}_${UNDERLYING}`;
+  const todayFolder = `${today}_${sym}`;
 
   const priorFolders = folders
     .filter(f => f !== todayFolder)
@@ -344,13 +333,12 @@ async function buildHistoricalContext({ maxBackfillDays = 5, focusStrikes = null
   let todayContext = null;
   if (includeRawToday) {
     try {
-      todayContext = await loadTodayContext({ maxChainSnapshots: 30, focusStrikes });
+      todayContext = await loadTodayContext({ maxChainSnapshots: 30, focusStrikes, symbolKey: sym });
     } catch (e) {
       logger.warn({ err: e.message }, '[historicalContext] today load failed');
     }
   }
 
-  // Aggregate insights across prior days
   const priorTrendVote = priorDays.reduce((acc, d) => {
     if (d.trend === 'bullish') acc.bull++;
     else if (d.trend === 'bearish') acc.bear++;
@@ -366,6 +354,7 @@ async function buildHistoricalContext({ maxBackfillDays = 5, focusStrikes = null
 
   return {
     generatedAt: Date.now(),
+    symbol: sym,
     priorDays,
     today: todayContext,
     rollup: {
