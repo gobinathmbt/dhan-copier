@@ -49,8 +49,12 @@ const SYMBOLS = {
     key: 'SENSEX',
     displayName: 'SENSEX',
     exchange: 'BSE',
-    indexSegment: 'BSE_I',
-    indexSecurityId: 51,                  // Dhan BSE Sensex security id
+    // SENSEX SPOT is exposed by Dhan under the IDX_I (Index Value) segment,
+    // NOT BSE_I — the Annexure only defines IDX_I (0), NSE_EQ (1), NSE_FNO (2),
+    // BSE_EQ (4), MCX_COMM (5), BSE_FNO (8). All Indian index spots
+    // (NIFTY 50, BANKNIFTY, SENSEX) live on IDX_I.
+    indexSegment: 'IDX_I',
+    indexSecurityId: 51,                  // Dhan SENSEX index security id
     optionsSegment: 'BSE_FNO',
     futuresSegment: 'BSE_FNO',
     futuresUnderlying: 'SENSEX',

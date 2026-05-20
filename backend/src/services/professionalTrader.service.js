@@ -20,12 +20,9 @@ const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
 function _active() {
   return symbolRegistry.getSymbol(symbolRegistry.getActiveSymbol());
 }
-/** Active symbol's index API triplet (for getDhanBypassData). */
+/** Active symbol's index API triplet — all index spots use IDX_I in Dhan. */
 function _activeApiTriplet() {
-  const s = _active();
-  return s.indexSegment === 'BSE_I'
-    ? { exchange: 'BSE', segment: 'BSE_I', instrument: 'INDEX' }
-    : { exchange: 'IDX', segment: 'I',     instrument: 'IDX' };
+  return { exchange: 'IDX', segment: 'I', instrument: 'IDX' };
 }
 
 // Store market opening data

@@ -146,10 +146,11 @@ async function buildPayload(authKey) {
   let candles15m  = [];      // 15m
   let candles30m  = [];      // 30m
 
-  // Map IDX_I → 'IDX'/'I'/'IDX' triplet, BSE_I → 'BSE'/'BSE_I'/'INDEX'
-  const candleExchange   = active.indexSegment === 'BSE_I' ? 'BSE' : 'IDX';
-  const candleSegment    = active.indexSegment === 'BSE_I' ? 'BSE_I' : 'I';
-  const candleInstrument = active.indexSegment === 'BSE_I' ? 'INDEX' : 'IDX';
+  // All Dhan index spots (NIFTY 50, BANKNIFTY, SENSEX) live on the IDX_I
+  // segment with instrument INDEX. Per-symbol identity is the securityId.
+  const candleExchange   = 'IDX';
+  const candleSegment    = 'I';
+  const candleInstrument = 'IDX';
 
   const fetchCandles = async (interval, minutesBack) => {
     try {
@@ -183,13 +184,16 @@ async function buildPayload(authKey) {
     '30m': candles30m.length,
   }, '[aggregator] Multi-timeframe candles fetched');
 
-  // Persist candles for later replay / backtesting (market-hours gated inside recorder)
+  // Persist candles for later replay / backtesting (market-hours gated inside recorder).
+  // Pass the ACTIVE symbol key explicitly so multi-symbol sessions write to
+  // the right per-symbol folder regardless of which symbol the registry has
+  // active at the moment the write happens.
   try {
     feedRecorder.recordCandles({
       '1':  spotCandles,
       '5':  candles5m,
       '15': candles15m,
-    });
+    }, active.key);
   } catch (_) {}
 
   // Persist futures candles (aggregate from ticks since API returns 401)
@@ -256,6 +260,7 @@ async function buildPayload(authKey) {
               spotLtp: getLiveSpotLtp() ?? last.close,
               strikes: optionChain.strikes,
               expiry: nearestExpiry?._raw || nearestExpiry?.expiryDate,
+              symbolKey: active.key,
             });
           } catch (_) {}
         } else {

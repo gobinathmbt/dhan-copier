@@ -1,14 +1,22 @@
 /**
  * Feed Recorder Service — persists live market data to disk for backtesting & replay.
  *
- * Folder layout:
+ * Folder layout (one per symbol per day):
  *   backend/live-feed/
  *     snapshot.json                      (existing — current tick snapshot)
  *     2026-05-13_NIFTY_50/
  *       metadata.json                    (session info: open price, atm, expiry)
- *       spot.jsonl                       (one line per NIFTY spot tick)
+ *       spot.jsonl                       (one line per spot tick)
  *       option-chain.jsonl               (one line per minute snapshot of ATM ± 6 strikes)
- *       futures.jsonl                    (optional — if we ever add futures feed)
+ *       futures-ticks.jsonl              (per-tick futures data)
+ *       candles-1m.jsonl, candles-5m.jsonl, candles-15m.jsonl
+ *       futures-1m.jsonl, futures-5m.jsonl, futures-15m.jsonl
+ *     2026-05-13_SENSEX/
+ *       (same file layout — populated when SENSEX is in tradingSymbols)
+ *
+ * MULTI-SYMBOL: every method accepts an optional symbolKey argument and
+ * routes the write to that symbol's per-day folder. When omitted, falls
+ * back to symbolRegistry.getActiveSymbol() for backwards compatibility.
  *
  * Rules:
  * - Only records between 09:15 and 15:30 IST (NSE hours).
@@ -22,11 +30,6 @@ const logger = require('../utils/logger');
 const symbolRegistry = require('../config/symbolRegistry');
 
 const ROOT_DIR = path.resolve(__dirname, '../../live-feed');
-// Active underlying — driven by `settings.tradingSymbols[0]` via
-// symbolRegistry.setActiveSymbols(). Defaults to NIFTY_50 so that anything
-// that runs before a session is started (server boot prune, controller
-// list endpoints, etc.) keeps the old behaviour.
-function _underlying() { return symbolRegistry.getActiveSymbol(); }
 const NIFTY_SECURITY_ID = 13;
 const OPTION_STRIKE_WINDOW = 6;         // ± 6 strikes around ATM
 const OPTION_CHAIN_FLUSH_MS = 60 * 1000; // 1-min OI cadence (matches Dhan refresh)
@@ -38,27 +41,14 @@ const CANDLE_INTERVALS = ['1', '5', '15']; // 1min, 5min, 15min
 const MKT_OPEN_MIN = 9 * 60 + 15;   // 09:15
 const MKT_CLOSE_MIN = 15 * 60 + 30; // 15:30
 
+function _activeKey() { return symbolRegistry.getActiveSymbol(); }
+
 class FeedRecorder {
   constructor() {
-    this.currentDay = null;          // e.g. "2026-05-13"
-    this.dayFolder = null;
-    this.spotStream = null;
-    this.chainStream = null;
-    this.futStream = null;   // NIFTY futures tick stream
-    // Candle streams and per-interval known-timestamp set to dedup
-    this.candleStreams = {}; // { '1': writeStream, '5': ..., '15': ... }
-    this.knownCandleTimes = {}; // { '1': Set<ts>, '5': ..., '15': ... }
-    this.futCandleStreams = {}; // futures candle streams per interval
-    this.knownFutCandleTimes = {};
-    this.metadataPath = null;
-    this.metadata = null;
-
-    this.lastSpotLtp = null;
-    this.lastSpotAt = 0;
-    this.lastFutLtp = null;
-    this.lastFutAt = 0;
-    this.lastChainFlushAt = 0;
-
+    /** Per-symbol state — keyed by symbol key (e.g. 'NIFTY_50', 'SENSEX').
+     *  Each entry holds its own currentDay/dayFolder/streams/throttles/metadata
+     *  so multiple symbols can record concurrently to separate folders. */
+    this.bySymbol = new Map();
     this.dayGuardTimer = null;
   }
 
@@ -69,25 +59,26 @@ class FeedRecorder {
   init() {
     try { fs.mkdirSync(ROOT_DIR, { recursive: true }); } catch (_) {}
     this._pruneOldFolders();
-    // Every minute check rollover (market-hours window / day-change)
+    // Every 30 sec check rollover (market-hours window / day-change) for ALL symbols
     if (!this.dayGuardTimer) {
-      this.dayGuardTimer = setInterval(() => this._checkRollover(), 30 * 1000);
+      this.dayGuardTimer = setInterval(() => this._checkRolloverAll(), 30 * 1000);
     }
-    this._checkRollover();
-    logger.info({ root: ROOT_DIR, underlying: _underlying(), retentionDays: RETENTION_DAYS }, '[feedRecorder] initialised');
+    // Run initial rollover for the active symbol so the folder exists.
+    this._checkRolloverFor(_activeKey());
+    logger.info({ root: ROOT_DIR, underlying: _activeKey(), retentionDays: RETENTION_DAYS }, '[feedRecorder] initialised');
   }
 
-  /** Called by the live feed service for every NIFTY spot tick. */
-  recordSpotTick(tick) {
+  /** Called by the live feed service for every spot tick. symbolKey routes to the right folder. */
+  recordSpotTick(tick, symbolKey = null) {
     if (!tick || typeof tick.ltp !== 'number') return;
     if (!this._isMarketHours()) return;
-    if (!this.spotStream) this._openStreams();
+    const key = symbolKey || _activeKey();
+    const sym = this._ensureSymbolState(key);
 
     const now = Date.now();
-    // throttle identical-price ticks
-    if (this.lastSpotLtp === tick.ltp && now - this.lastSpotAt < SPOT_THROTTLE_MS) return;
-    this.lastSpotLtp = tick.ltp;
-    this.lastSpotAt = now;
+    if (sym.lastSpotLtp === tick.ltp && now - sym.lastSpotAt < SPOT_THROTTLE_MS) return;
+    sym.lastSpotLtp = tick.ltp;
+    sym.lastSpotAt = now;
 
     try {
       const line = JSON.stringify({
@@ -104,30 +95,30 @@ class FeedRecorder {
         totalSellQty: tick.totalSellQty,
         oi: tick.oi,
       }) + '\n';
-      this.spotStream.write(line);
+      sym.spotStream.write(line);
 
-      // Update metadata on first tick of the day
-      if (this.metadata && !this.metadata.firstTickAt) {
-        this.metadata.firstTickAt = now;
-        this.metadata.openPrice = tick.ltp;
-        this.metadata.openCandle = { open: tick.open, high: tick.high, low: tick.low, close: tick.close };
-        this._saveMetadata();
+      if (sym.metadata && !sym.metadata.firstTickAt) {
+        sym.metadata.firstTickAt = now;
+        sym.metadata.openPrice = tick.ltp;
+        sym.metadata.openCandle = { open: tick.open, high: tick.high, low: tick.low, close: tick.close };
+        this._saveMetadata(sym);
       }
     } catch (e) {
-      logger.warn({ err: e.message }, '[feedRecorder] spot write failed');
+      logger.warn({ err: e.message, key }, '[feedRecorder] spot write failed');
     }
   }
 
-  /** Called by the live feed service for every NIFTY futures tick. */
-  recordFuturesTick(tick) {
+  /** Called by the live feed service for every futures tick. */
+  recordFuturesTick(tick, symbolKey = null) {
     if (!tick || typeof tick.ltp !== 'number') return;
     if (!this._isMarketHours()) return;
-    if (!this.futStream) this._openStreams();
+    const key = symbolKey || _activeKey();
+    const sym = this._ensureSymbolState(key);
 
     const now = Date.now();
-    if (this.lastFutLtp === tick.ltp && now - this.lastFutAt < SPOT_THROTTLE_MS) return;
-    this.lastFutLtp = tick.ltp;
-    this.lastFutAt = now;
+    if (sym.lastFutLtp === tick.ltp && now - sym.lastFutAt < SPOT_THROTTLE_MS) return;
+    sym.lastFutLtp = tick.ltp;
+    sym.lastFutAt = now;
 
     try {
       const line = JSON.stringify({
@@ -140,11 +131,11 @@ class FeedRecorder {
         low: tick.low,
         close: tick.close,
         oi: tick.oi,
-        premium: this.lastSpotLtp != null ? Number((tick.ltp - this.lastSpotLtp).toFixed(2)) : null,
+        premium: sym.lastSpotLtp != null ? Number((tick.ltp - sym.lastSpotLtp).toFixed(2)) : null,
       }) + '\n';
-      this.futStream.write(line);
+      sym.futStream.write(line);
     } catch (e) {
-      logger.warn({ err: e.message }, '[feedRecorder] futures tick write failed');
+      logger.warn({ err: e.message, key }, '[feedRecorder] futures tick write failed');
     }
   }
 
@@ -152,22 +143,21 @@ class FeedRecorder {
    * Persist futures candles the same way we do spot candles.
    * @param {object} byInterval - { '1': candles[], '5': candles[], '15': candles[] }
    */
-  recordFuturesCandles(byInterval) {
+  recordFuturesCandles(byInterval, symbolKey = null) {
     if (!byInterval) return;
     if (!this._isMarketHours()) return;
-    if (!this.futStream) this._openStreams();
+    const key = symbolKey || _activeKey();
+    const sym = this._ensureSymbolState(key);
 
     for (const interval of CANDLE_INTERVALS) {
       const candles = byInterval[interval];
       if (!Array.isArray(candles) || candles.length === 0) continue;
-      const stream = this.futCandleStreams[interval];
+      const stream = sym.futCandleStreams[interval];
       if (!stream) continue;
 
-      const known = this.knownFutCandleTimes[interval];
+      const known = sym.knownFutCandleTimes[interval];
       for (const c of candles) {
         if (!c || !c.time) continue;
-        // CALIBRATED 2026-05-19: normalise ms→sec to keep dedup robust
-        // across server restarts and provider format changes.
         let timeSec = Number(c.time);
         if (!Number.isFinite(timeSec)) continue;
         if (timeSec >= 1e12) timeSec = Math.floor(timeSec / 1000);
@@ -175,15 +165,12 @@ class FeedRecorder {
         try {
           stream.write(JSON.stringify({
             t: timeSec,
-            o: c.open,
-            h: c.high,
-            l: c.low,
-            c: c.close,
+            o: c.open, h: c.high, l: c.low, c: c.close,
             v: c.volume || 0,
           }) + '\n');
           known.add(timeSec);
         } catch (e) {
-          logger.warn({ err: e.message, interval }, '[feedRecorder] futures candle write failed');
+          logger.warn({ err: e.message, interval, key }, '[feedRecorder] futures candle write failed');
         }
       }
     }
@@ -193,20 +180,23 @@ class FeedRecorder {
    * Called by the engine each cycle with the full option chain.
    * Filters to ATM ± N strikes and snapshots at most once per minute.
    */
-  recordOptionChain({ spotLtp, strikes, expiry }) {
+  recordOptionChain({ spotLtp, strikes, expiry, symbolKey = null }) {
     if (!strikes || strikes.length === 0) return;
     if (!this._isMarketHours()) return;
-    if (!this.chainStream) this._openStreams();
+    const key = symbolKey || _activeKey();
+    const sym = this._ensureSymbolState(key);
 
     const now = Date.now();
-    if (now - this.lastChainFlushAt < OPTION_CHAIN_FLUSH_MS) return;
-    this.lastChainFlushAt = now;
+    if (now - sym.lastChainFlushAt < OPTION_CHAIN_FLUSH_MS) return;
+    sym.lastChainFlushAt = now;
 
-    // Round spot to nearest 50 for ATM
-    const spot = typeof spotLtp === 'number' ? spotLtp : this.lastSpotLtp || 0;
-    const atm = Math.round(spot / 50) * 50;
+    // Strike step (50 NIFTY, 100 SENSEX) drives ATM rounding.
+    const symbolMeta = symbolRegistry.getSymbol(key);
+    const step = symbolMeta?.strikeStep || 50;
+    const spot = typeof spotLtp === 'number' ? spotLtp : sym.lastSpotLtp || 0;
+    const atm = Math.round(spot / step) * step;
 
-    // Take ATM ± 6 strikes (13 total). Use the strike-spacing in the actual chain.
+    // Take ATM ± OPTION_STRIKE_WINDOW strikes.
     const sorted = [...strikes].sort((a, b) => a.strike - b.strike);
     const atmIdx = sorted.findIndex(s => s.strike === atm);
     let windowRows;
@@ -216,7 +206,6 @@ class FeedRecorder {
         Math.min(sorted.length, atmIdx + OPTION_STRIKE_WINDOW + 1)
       );
     } else {
-      // Pick closest-by-distance ± 6
       windowRows = sorted
         .map(s => ({ s, d: Math.abs(s.strike - spot) }))
         .sort((a, b) => a.d - b.d)
@@ -228,35 +217,21 @@ class FeedRecorder {
     const compact = windowRows.map(s => ({
       strike: s.strike,
       ce: {
-        ltp: s.call?.ltp || 0,
-        oi: s.call?.oi || 0,
-        oiChg: s.call?.oiChange || 0,
-        vol: s.call?.volume || 0,
-        iv: s.call?.iv || 0,
-        delta: s.call?.greeks?.delta || 0,
-        theta: s.call?.greeks?.theta || 0,
-        gamma: s.call?.greeks?.gamma || 0,
-        vega: s.call?.greeks?.vega || 0,
-        bid: s.call?.bid || 0,
-        ask: s.call?.ask || 0,
-        bidQty: s.call?.bidQty || 0,
-        askQty: s.call?.askQty || 0,
+        ltp: s.call?.ltp || 0, oi: s.call?.oi || 0, oiChg: s.call?.oiChange || 0,
+        vol: s.call?.volume || 0, iv: s.call?.iv || 0,
+        delta: s.call?.greeks?.delta || 0, theta: s.call?.greeks?.theta || 0,
+        gamma: s.call?.greeks?.gamma || 0, vega: s.call?.greeks?.vega || 0,
+        bid: s.call?.bid || 0, ask: s.call?.ask || 0,
+        bidQty: s.call?.bidQty || 0, askQty: s.call?.askQty || 0,
         buildup: s.call?.builtupName || 'Neutral',
       },
       pe: {
-        ltp: s.put?.ltp || 0,
-        oi: s.put?.oi || 0,
-        oiChg: s.put?.oiChange || 0,
-        vol: s.put?.volume || 0,
-        iv: s.put?.iv || 0,
-        delta: s.put?.greeks?.delta || 0,
-        theta: s.put?.greeks?.theta || 0,
-        gamma: s.put?.greeks?.gamma || 0,
-        vega: s.put?.greeks?.vega || 0,
-        bid: s.put?.bid || 0,
-        ask: s.put?.ask || 0,
-        bidQty: s.put?.bidQty || 0,
-        askQty: s.put?.askQty || 0,
+        ltp: s.put?.ltp || 0, oi: s.put?.oi || 0, oiChg: s.put?.oiChange || 0,
+        vol: s.put?.volume || 0, iv: s.put?.iv || 0,
+        delta: s.put?.greeks?.delta || 0, theta: s.put?.greeks?.theta || 0,
+        gamma: s.put?.greeks?.gamma || 0, vega: s.put?.greeks?.vega || 0,
+        bid: s.put?.bid || 0, ask: s.put?.ask || 0,
+        bidQty: s.put?.bidQty || 0, askQty: s.put?.askQty || 0,
         buildup: s.put?.builtupName || 'Neutral',
       },
     }));
@@ -264,113 +239,105 @@ class FeedRecorder {
     try {
       const strikeList = compact.map(s => s.strike);
       const line = JSON.stringify({
-        t: now,
-        spot,
-        atm,
-        expiry,
-        strikes: compact,
+        t: now, spot, atm, expiry, strikes: compact,
       }) + '\n';
-      this.chainStream.write(line);
+      sym.chainStream.write(line);
 
-      // Update metadata atm/expiry on first chain snapshot of the day
-      if (this.metadata) {
-        if (!this.metadata.openingAtm) {
-          this.metadata.openingAtm = atm;
-          this.metadata.openingStrikes = strikeList;
+      if (sym.metadata) {
+        if (!sym.metadata.openingAtm) {
+          sym.metadata.openingAtm = atm;
+          sym.metadata.openingStrikes = strikeList;
         }
-        this.metadata.latestAtm = atm;
-        this.metadata.latestStrikes = strikeList;
-        this.metadata.latestExpiry = expiry;
-        this._saveMetadata();
+        sym.metadata.latestAtm = atm;
+        sym.metadata.latestStrikes = strikeList;
+        sym.metadata.latestExpiry = expiry;
+        this._saveMetadata(sym);
       }
     } catch (e) {
-      logger.warn({ err: e.message }, '[feedRecorder] chain write failed');
+      logger.warn({ err: e.message, key }, '[feedRecorder] chain write failed');
     }
   }
 
   /**
    * Called each cycle with the arrays of spot candles for each timeframe.
    * Dedups by timestamp so only newly-closed bars get appended.
-   * @param {object} byInterval - { '1': candles[], '5': candles[], '15': candles[] }
    */
-  recordCandles(byInterval) {
+  recordCandles(byInterval, symbolKey = null) {
     if (!byInterval) return;
     if (!this._isMarketHours()) return;
-    if (!this.spotStream) this._openStreams();
+    const key = symbolKey || _activeKey();
+    const sym = this._ensureSymbolState(key);
 
     for (const interval of CANDLE_INTERVALS) {
       const candles = byInterval[interval];
       if (!Array.isArray(candles) || candles.length === 0) continue;
-      const stream = this.candleStreams[interval];
+      const stream = sym.candleStreams[interval];
       if (!stream) continue;
 
-      const known = this.knownCandleTimes[interval];
+      const known = sym.knownCandleTimes[interval];
       for (const c of candles) {
         if (!c || !c.time) continue;
-        // CALIBRATED 2026-05-19: defensively normalise the timestamp to
-        // seconds so the dedup set never sees a 10-digit and 13-digit form
-        // for the same bar. Without this, server restarts and provider
-        // upgrades produced 12 duplicate 5m bars in live-feed/2026-05-19.
         let timeSec = Number(c.time);
         if (!Number.isFinite(timeSec)) continue;
         if (timeSec >= 1e12) timeSec = Math.floor(timeSec / 1000);
         if (known.has(timeSec)) continue;
-        // Only persist candles that have actually closed — not the partial bar
-        // (partial = last bar whose start time + interval > now)
         try {
           stream.write(JSON.stringify({
             t: timeSec,
-            o: c.open,
-            h: c.high,
-            l: c.low,
-            c: c.close,
+            o: c.open, h: c.high, l: c.low, c: c.close,
             v: c.volume || 0,
           }) + '\n');
           known.add(timeSec);
         } catch (e) {
-          logger.warn({ err: e.message, interval }, '[feedRecorder] candle write failed');
+          logger.warn({ err: e.message, interval, key }, '[feedRecorder] candle write failed');
         }
       }
     }
   }
 
-  /** Return the current folder being written (useful for stop/status) */
+  /** Return per-symbol status. */
   getStatus() {
+    const symbols = {};
+    for (const [key, sym] of this.bySymbol.entries()) {
+      symbols[key] = {
+        dayFolder: sym.dayFolder,
+        currentDay: sym.currentDay,
+        lastSpotLtp: sym.lastSpotLtp,
+        lastSpotAt: sym.lastSpotAt ? new Date(sym.lastSpotAt).toISOString() : null,
+        lastChainFlushAt: sym.lastChainFlushAt ? new Date(sym.lastChainFlushAt).toISOString() : null,
+      };
+    }
     return {
-      dayFolder: this.dayFolder,
-      currentDay: this.currentDay,
+      activeSymbol: _activeKey(),
       isMarketHours: this._isMarketHours(),
-      lastSpotLtp: this.lastSpotLtp,
-      lastSpotAt: this.lastSpotAt ? new Date(this.lastSpotAt).toISOString() : null,
-      lastChainFlushAt: this.lastChainFlushAt ? new Date(this.lastChainFlushAt).toISOString() : null,
       rootDir: ROOT_DIR,
-      underlying: _underlying(),
       strikeWindow: OPTION_STRIKE_WINDOW,
       retentionDays: RETENTION_DAYS,
+      symbols,
     };
   }
 
-  /** Manually close streams — called on shutdown */
+  /** Manually close all per-symbol streams — called on shutdown */
   shutdown() {
     if (this.dayGuardTimer) {
       clearInterval(this.dayGuardTimer);
       this.dayGuardTimer = null;
     }
-    this._closeStreams();
+    for (const sym of this.bySymbol.values()) {
+      this._closeStreamsFor(sym);
+    }
   }
 
   // ---- internals ---------------------------------------------------------
   _isMarketHours() {
     const now = this._istNow();
-    // Skip weekends
-    const dow = now.weekday; // 0=Sun, 6=Sat (we build this manually)
+    const dow = now.weekday;
     if (dow === 0 || dow === 6) return false;
     const minutes = now.hours * 60 + now.minutes;
     return minutes >= MKT_OPEN_MIN && minutes < MKT_CLOSE_MIN;
   }
 
   _istNow() {
-    // Produce an object with IST date parts without relying on server timezone
     const fmt = new Intl.DateTimeFormat('en-GB', {
       timeZone: 'Asia/Kolkata',
       year: 'numeric', month: '2-digit', day: '2-digit',
@@ -392,96 +359,129 @@ class FeedRecorder {
     };
   }
 
-  _checkRollover() {
+  /** Build a fresh per-symbol state bag. */
+  _newSymbolState(key) {
+    return {
+      key,
+      currentDay: null,
+      dayFolder: null,
+      metadataPath: null,
+      metadata: null,
+      spotStream: null,
+      chainStream: null,
+      futStream: null,
+      candleStreams: {},
+      knownCandleTimes: {},
+      futCandleStreams: {},
+      knownFutCandleTimes: {},
+      lastSpotLtp: null,
+      lastSpotAt: 0,
+      lastFutLtp: null,
+      lastFutAt: 0,
+      lastChainFlushAt: 0,
+    };
+  }
+
+  /** Lazy-create per-symbol state and open streams for today's folder. */
+  _ensureSymbolState(key) {
+    let sym = this.bySymbol.get(key);
+    if (!sym) {
+      sym = this._newSymbolState(key);
+      this.bySymbol.set(key, sym);
+    }
+    this._checkRolloverFor(key);
+    if (!sym.spotStream) this._openStreamsFor(sym);
+    return sym;
+  }
+
+  /** Rollover check for a single symbol. */
+  _checkRolloverFor(key) {
+    let sym = this.bySymbol.get(key);
+    if (!sym) {
+      sym = this._newSymbolState(key);
+      this.bySymbol.set(key, sym);
+    }
     const { dateStr } = this._istNow();
-    const underlying = _underlying();
-    const wantedFolder = path.join(ROOT_DIR, `${dateStr}_${underlying}`);
-    if (this.currentDay && (this.currentDay !== dateStr || this.dayFolder !== wantedFolder)) {
-      logger.info({ from: this.currentDay, to: dateStr, fromFolder: this.dayFolder, toFolder: wantedFolder }, '[feedRecorder] day/symbol rollover');
-      this._closeStreams();
-      this._pruneOldFolders();
+    const wantedFolder = path.join(ROOT_DIR, `${dateStr}_${key}`);
+    if (sym.currentDay && (sym.currentDay !== dateStr || sym.dayFolder !== wantedFolder)) {
+      logger.info({ key, from: sym.currentDay, to: dateStr }, '[feedRecorder] day rollover');
+      this._closeStreamsFor(sym);
     }
-    // Ensure folder exists for today (even if not market hours — cheap)
-    if (this.currentDay !== dateStr || this.dayFolder !== wantedFolder) {
-      this.currentDay = dateStr;
-      this.dayFolder = wantedFolder;
-      try { fs.mkdirSync(this.dayFolder, { recursive: true }); } catch (_) {}
-      this.metadataPath = path.join(this.dayFolder, 'metadata.json');
-      this._loadMetadata(dateStr);
+    if (sym.currentDay !== dateStr || sym.dayFolder !== wantedFolder) {
+      sym.currentDay = dateStr;
+      sym.dayFolder = wantedFolder;
+      try { fs.mkdirSync(sym.dayFolder, { recursive: true }); } catch (_) {}
+      sym.metadataPath = path.join(sym.dayFolder, 'metadata.json');
+      this._loadMetadata(sym, dateStr);
     }
   }
 
-  _openStreams() {
-    if (!this.dayFolder) this._checkRollover();
+  /** Rollover for ALL symbols currently tracked. Also creates a folder
+   *  for the active symbol if it has no entry yet. */
+  _checkRolloverAll() {
+    // Make sure the active symbol is being tracked even if no tick has
+    // arrived yet (so the folder shows up in the file listing).
+    if (!this.bySymbol.has(_activeKey())) {
+      this._ensureSymbolState(_activeKey());
+    }
+    for (const key of this.bySymbol.keys()) {
+      this._checkRolloverFor(key);
+    }
+    this._pruneOldFolders();
+  }
+
+  _openStreamsFor(sym) {
+    if (!sym.dayFolder) this._checkRolloverFor(sym.key);
     try {
-      if (!this.spotStream) {
-        this.spotStream = fs.createWriteStream(
-          path.join(this.dayFolder, 'spot.jsonl'),
+      if (!sym.spotStream) {
+        sym.spotStream = fs.createWriteStream(
+          path.join(sym.dayFolder, 'spot.jsonl'),
           { flags: 'a', encoding: 'utf8' }
         );
       }
-      if (!this.chainStream) {
-        this.chainStream = fs.createWriteStream(
-          path.join(this.dayFolder, 'option-chain.jsonl'),
+      if (!sym.chainStream) {
+        sym.chainStream = fs.createWriteStream(
+          path.join(sym.dayFolder, 'option-chain.jsonl'),
           { flags: 'a', encoding: 'utf8' }
         );
       }
-      if (!this.futStream) {
-        this.futStream = fs.createWriteStream(
-          path.join(this.dayFolder, 'futures-ticks.jsonl'),
+      if (!sym.futStream) {
+        sym.futStream = fs.createWriteStream(
+          path.join(sym.dayFolder, 'futures-ticks.jsonl'),
           { flags: 'a', encoding: 'utf8' }
         );
       }
-      // Open candle streams + load any already-written timestamps for dedup
       for (const interval of CANDLE_INTERVALS) {
-        if (!this.candleStreams[interval]) {
-          const file = path.join(this.dayFolder, `candles-${interval}m.jsonl`);
-          this.knownCandleTimes[interval] = this._loadExistingCandleTimes(file);
-          this.candleStreams[interval] = fs.createWriteStream(file, { flags: 'a', encoding: 'utf8' });
+        if (!sym.candleStreams[interval]) {
+          const file = path.join(sym.dayFolder, `candles-${interval}m.jsonl`);
+          sym.knownCandleTimes[interval] = this._loadExistingCandleTimes(file);
+          sym.candleStreams[interval] = fs.createWriteStream(file, { flags: 'a', encoding: 'utf8' });
         }
-        if (!this.futCandleStreams[interval]) {
-          const file = path.join(this.dayFolder, `futures-${interval}m.jsonl`);
-          this.knownFutCandleTimes[interval] = this._loadExistingCandleTimes(file);
-          this.futCandleStreams[interval] = fs.createWriteStream(file, { flags: 'a', encoding: 'utf8' });
+        if (!sym.futCandleStreams[interval]) {
+          const file = path.join(sym.dayFolder, `futures-${interval}m.jsonl`);
+          sym.knownFutCandleTimes[interval] = this._loadExistingCandleTimes(file);
+          sym.futCandleStreams[interval] = fs.createWriteStream(file, { flags: 'a', encoding: 'utf8' });
         }
       }
-      logger.info({ folder: this.dayFolder }, '[feedRecorder] streams open');
+      logger.info({ key: sym.key, folder: sym.dayFolder }, '[feedRecorder] streams open');
     } catch (e) {
-      logger.error({ err: e.message, folder: this.dayFolder }, '[feedRecorder] open streams failed');
+      logger.error({ err: e.message, key: sym.key, folder: sym.dayFolder }, '[feedRecorder] open streams failed');
     }
   }
 
-  _closeStreams() {
-    if (this.spotStream) {
-      try { this.spotStream.end(); } catch (_) {}
-      this.spotStream = null;
-    }
-    if (this.chainStream) {
-      try { this.chainStream.end(); } catch (_) {}
-      this.chainStream = null;
-    }
-    if (this.futStream) {
-      try { this.futStream.end(); } catch (_) {}
-      this.futStream = null;
-    }
+  _closeStreamsFor(sym) {
+    if (!sym) return;
+    if (sym.spotStream)  { try { sym.spotStream.end(); } catch (_) {} sym.spotStream = null; }
+    if (sym.chainStream) { try { sym.chainStream.end(); } catch (_) {} sym.chainStream = null; }
+    if (sym.futStream)   { try { sym.futStream.end(); } catch (_) {} sym.futStream = null; }
     for (const interval of CANDLE_INTERVALS) {
-      if (this.candleStreams[interval]) {
-        try { this.candleStreams[interval].end(); } catch (_) {}
-        this.candleStreams[interval] = null;
-      }
-      if (this.futCandleStreams[interval]) {
-        try { this.futCandleStreams[interval].end(); } catch (_) {}
-        this.futCandleStreams[interval] = null;
-      }
-      this.knownCandleTimes[interval] = new Set();
-      this.knownFutCandleTimes[interval] = new Set();
+      if (sym.candleStreams[interval])    { try { sym.candleStreams[interval].end(); } catch (_) {} sym.candleStreams[interval] = null; }
+      if (sym.futCandleStreams[interval]) { try { sym.futCandleStreams[interval].end(); } catch (_) {} sym.futCandleStreams[interval] = null; }
+      sym.knownCandleTimes[interval] = new Set();
+      sym.knownFutCandleTimes[interval] = new Set();
     }
   }
 
-  /**
-   * Load all candle timestamps already recorded in the file so we can
-   * skip duplicates after a server restart.
-   */
   _loadExistingCandleTimes(file) {
     const set = new Set();
     try {
@@ -492,8 +492,6 @@ class FeedRecorder {
         try {
           const row = JSON.parse(line);
           if (!row.t) return;
-          // Normalise to seconds in case the file has mixed ms/sec entries
-          // (legacy data + restart bug — see recordCandles for details).
           let t = Number(row.t);
           if (!Number.isFinite(t)) return;
           if (t >= 1e12) t = Math.floor(t / 1000);
@@ -504,16 +502,16 @@ class FeedRecorder {
     return set;
   }
 
-  _loadMetadata(dateStr) {
-    const underlying = _underlying();
+  _loadMetadata(sym, dateStr) {
     try {
-      if (fs.existsSync(this.metadataPath)) {
-        this.metadata = JSON.parse(fs.readFileSync(this.metadataPath, 'utf8'));
+      if (fs.existsSync(sym.metadataPath)) {
+        sym.metadata = JSON.parse(fs.readFileSync(sym.metadataPath, 'utf8'));
       } else {
-        this.metadata = {
+        const symMeta = symbolRegistry.getSymbol(sym.key);
+        sym.metadata = {
           date: dateStr,
-          underlying,
-          securityId: NIFTY_SECURITY_ID,
+          underlying: sym.key,
+          securityId: symMeta?.indexSecurityId || NIFTY_SECURITY_ID,
           createdAt: Date.now(),
           firstTickAt: null,
           openPrice: null,
@@ -522,17 +520,17 @@ class FeedRecorder {
           latestExpiry: null,
           openCandle: null,
         };
-        this._saveMetadata();
+        this._saveMetadata(sym);
       }
     } catch (e) {
-      logger.warn({ err: e.message }, '[feedRecorder] metadata load failed');
-      this.metadata = { date: dateStr, underlying, createdAt: Date.now() };
+      logger.warn({ err: e.message, key: sym.key }, '[feedRecorder] metadata load failed');
+      sym.metadata = { date: dateStr, underlying: sym.key, createdAt: Date.now() };
     }
   }
 
-  _saveMetadata() {
+  _saveMetadata(sym) {
     try {
-      fs.writeFileSync(this.metadataPath, JSON.stringify(this.metadata, null, 2));
+      fs.writeFileSync(sym.metadataPath, JSON.stringify(sym.metadata, null, 2));
     } catch (_) {}
   }
 
@@ -542,7 +540,6 @@ class FeedRecorder {
       const cutoff = Date.now() - RETENTION_DAYS * 86400 * 1000;
       for (const e of entries) {
         if (!e.isDirectory()) continue;
-        // folder pattern: YYYY-MM-DD_UNDERLYING
         const m = e.name.match(/^(\d{4})-(\d{2})-(\d{2})_/);
         if (!m) continue;
         const folderDate = new Date(`${m[1]}-${m[2]}-${m[3]}T00:00:00Z`);
@@ -565,15 +562,15 @@ class FeedRecorder {
 const instance = new FeedRecorder();
 
 // Backwards-compat:
-//   UNDERLYING — kept as the legacy default ('NIFTY_50'). Anything that
-//                destructures this at module load gets the safe default.
-//   getUnderlying() — call at request time to resolve the symbol the
-//                     active session is recording.
+//   UNDERLYING — kept as a literal default ('NIFTY_50'). Callers that
+//                destructured it at module load get the safe default.
+//   getUnderlying() — returns the currently active symbol key at request
+//                     time, used by the controller to scan the right folder.
 module.exports = {
   instance,
   ROOT_DIR,
   UNDERLYING: 'NIFTY_50',
-  getUnderlying: _underlying,
+  getUnderlying: _activeKey,
   NIFTY_SECURITY_ID,
   OPTION_STRIKE_WINDOW,
 };

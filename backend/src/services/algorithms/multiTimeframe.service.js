@@ -15,10 +15,7 @@ function _active() {
   return symbolRegistry.getSymbol(symbolRegistry.getActiveSymbol());
 }
 function _activeApiTriplet() {
-  const s = _active();
-  return s.indexSegment === 'BSE_I'
-    ? { exchange: 'BSE', segment: 'BSE_I', instrument: 'INDEX' }
-    : { exchange: 'IDX', segment: 'I',     instrument: 'IDX' };
+  return { exchange: 'IDX', segment: 'I', instrument: 'IDX' };
 }
 
 // UT Bot Configuration

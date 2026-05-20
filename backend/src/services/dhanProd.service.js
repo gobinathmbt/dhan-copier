@@ -94,12 +94,10 @@ function mapExchangeSegment({ exchange, segment, instrument }) {
   const sg = String(segment || '').toUpperCase();
   const inst = String(instrument || '').toUpperCase();
 
-  // Index -> IDX_I (NSE indices) / BSE_I (BSE indices like SENSEX, BANKEX)
-  if (ex === 'IDX' || inst === 'IDX' || inst === 'INDEX') {
-    // BSE indices — caller passes exchange='BSE' or segment='BSE_I'
-    if (ex === 'BSE' || sg === 'BSE_I') {
-      return { exchangeSegment: 'BSE_I', instrument: 'INDEX' };
-    }
+  // Index -> IDX_I — the Dhan Annexure only defines IDX_I (segment enum 0)
+  // for ALL index spots (NIFTY 50, BANKNIFTY, SENSEX, etc.). There is NO
+  // BSE_I segment in Dhan's API; SENSEX spot lives on IDX_I:51.
+  if (ex === 'IDX' || inst === 'IDX' || inst === 'INDEX' || sg === 'IDX_I' || sg === 'BSE_I') {
     return { exchangeSegment: 'IDX_I', instrument: 'INDEX' };
   }
   // NSE Equity

@@ -14,10 +14,7 @@ function _active() {
   return symbolRegistry.getSymbol(symbolRegistry.getActiveSymbol());
 }
 function _activeApiTriplet() {
-  const s = _active();
-  return s.indexSegment === 'BSE_I'
-    ? { exchange: 'BSE', segment: 'BSE_I', instrument: 'INDEX' }
-    : { exchange: 'IDX', segment: 'I',     instrument: 'IDX' };
+  return { exchange: 'IDX', segment: 'I', instrument: 'IDX' };
 }
 
 const STRIKE_SELECTION_PROMPT = `You are an expert options trader specializing in NIFTY 50 intraday scalping.

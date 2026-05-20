@@ -360,15 +360,16 @@ async function start() {
     // imbalance, absorption, iceberg, liquidity-pull, and spoofing reads.
     microstructure.start(liveFeedProd);
     await liveFeedProd.connect();
-    // Default subscriptions — subscribe BOTH NIFTY 50 and SENSEX index spots
-    // so the engine can switch between them without needing a feed reconnect.
-    // BANKNIFTY remains as context. The recorder only persists ticks for the
-    // ACTIVE symbol (gated inside dhanLiveFeedProd._updateSnapshot).
+    // Default subscriptions — all index spots live on IDX_I in Dhan's
+    // segment enum (Annexure: IDX_I=0). NIFTY 50=13, BANKNIFTY=25, SENSEX=51.
+    // The recorder routes ticks to per-symbol folders by matching
+    // (segment, securityId) against symbolRegistry.SYMBOLS so both NIFTY
+    // and SENSEX feeds populate their own _NIFTY_50/ and _SENSEX/ folders.
     liveFeedProd.subscribe(
       [
         { exchangeSegment: 'IDX_I', securityId: 13 }, // NIFTY 50
         { exchangeSegment: 'IDX_I', securityId: 25 }, // BANK NIFTY — context
-        { exchangeSegment: 'BSE_I', securityId: 51 }, // SENSEX
+        { exchangeSegment: 'IDX_I', securityId: 51 }, // SENSEX
       ],
       'QUOTE'
     );

@@ -312,11 +312,18 @@ async function start({ authKey, settings, aiModel }) {
   try {
     const symbolRegistry = require('../config/symbolRegistry');
     const { instance: liveFeedProd } = require('./dhanLiveFeedProd.service');
+    const { instance: feedRecorder } = require('./feedRecorder.service');
     const subs = enabledSymbols
       .map(k => symbolRegistry.getSymbol(k))
       .filter(Boolean)
       .map(s => ({ exchangeSegment: s.indexSegment, securityId: s.indexSecurityId }));
     if (subs.length) liveFeedProd.subscribe(subs, 'QUOTE');
+    // Pre-create each enabled symbol's per-day folder + streams. Without
+    // this, the SENSEX folder only appears once the first SENSEX tick
+    // arrives — which delays visibility on disk.
+    for (const k of enabledSymbols) {
+      try { feedRecorder._ensureSymbolState(k); } catch (_) {}
+    }
     const niftyFuturesProd = require('./niftyFuturesProd.service');
     niftyFuturesProd.resetCache();
     // Best-effort futures subscribe for the FIRST enabled symbol. NIFTY

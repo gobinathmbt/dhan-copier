@@ -421,7 +421,7 @@ function classifyMoneyness(strike, aggregator) {
  * Call OpenAI with the full payload. Returns a structured decision or a
  * NO_TRADE fallback if the model hallucinates or rate-limits.
  */
-async function decide({ aggregator, algorithmOutputs, masterDecision, settings, session, openTradesCount, futuresData, tradesToday, lossesToday }) {
+async function decide({ aggregator, algorithmOutputs, masterDecision, settings, session, openTradesCount, futuresData, tradesToday, lossesToday, market }) {
   // ──────────────────────────────────────────────────────────────────────────
   // HYBRID ENGINE — sole decision-maker. No AI fallback.
   // The hybrid engine is deterministic, institutional-grade, and fully
@@ -435,9 +435,13 @@ async function decide({ aggregator, algorithmOutputs, masterDecision, settings, 
     const decision = await hybrid.entry.decide({
       aggregator, algorithmOutputs, masterDecision, settings, session, openTradesCount, futuresData,
       tradesToday, lossesToday,
+      // Forward the active market so the master scalping entry engine
+      // can stamp the right symbol on every log line and routing decision.
+      market,
     });
     logger.info({
       sessionId: String(session?._id || ''),
+      market: decision.market || market,
       signal: decision.signal,
       tradeType: decision.trade_type,
       score: decision.hybridSnapshot?.score,

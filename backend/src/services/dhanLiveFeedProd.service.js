@@ -415,22 +415,31 @@ class DhanLiveFeedProd extends EventEmitter {
       logger.warn({ err: e.message }, '[liveFeedProd] tick listener threw');
     }
 
-    // Record spot ticks for the ACTIVE underlying to disk (feed recorder
-    // gates on market hours). symbolRegistry.getActiveSymbol() is set by
-    // scalpingEngine.start() based on settings.tradingSymbols[0]; falls
-    // back to NIFTY_50 at boot.
+    // Record spot ticks to the symbol-specific folder. Match (segment, sid)
+    // against EVERY registered symbol so NIFTY ticks land in
+    // live-feed/<date>_NIFTY_50/ and SENSEX ticks land in
+    // live-feed/<date>_SENSEX/ — independent of which symbol is "active".
     try {
       const symbolRegistry = require('../config/symbolRegistry');
-      const active = symbolRegistry.getSymbol(symbolRegistry.getActiveSymbol());
-      if (active
-          && segmentName === active.indexSegment
-          && Number(securityId) === Number(active.indexSecurityId)) {
-        feedRecorder.recordSpotTick(next);
+      const matched = Object.values(symbolRegistry.SYMBOLS).find(
+        s => s.indexSegment === segmentName && Number(s.indexSecurityId) === Number(securityId)
+      );
+      if (matched) {
+        feedRecorder.recordSpotTick(next, matched.key);
       }
     } catch (_) {}
     // Record futures ticks (NSE_FNO for NIFTY/BANKNIFTY, BSE_FNO for SENSEX/BANKEX).
+    // We can't reverse-resolve futures securityId → symbol here without the
+    // scrip-master cache, so route by exchange segment to the active symbol
+    // whose futures segment matches. SENSEX uses BSE_FNO, NIFTY uses NSE_FNO.
     if (segmentName === 'NSE_FNO' || segmentName === 'BSE_FNO') {
-      try { feedRecorder.recordFuturesTick(next); } catch (_) {}
+      try {
+        const symbolRegistry = require('../config/symbolRegistry');
+        const matched = Object.values(symbolRegistry.SYMBOLS).find(
+          s => s.futuresSegment === segmentName
+        );
+        if (matched) feedRecorder.recordFuturesTick(next, matched.key);
+      } catch (_) {}
     }
   }
 
