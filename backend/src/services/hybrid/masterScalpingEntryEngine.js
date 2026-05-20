@@ -67,13 +67,15 @@ async function decide(params) {
   // Pass the active market explicitly so the loader keys folder lookups
   // on the right symbol regardless of registry timing.
   const histCtx = await _getHistoricalCandles(params, market);
-  // Prefer aggregator-fresh candles when present (faster, no disk read).
-  // Fall back to historical-context disk candles when aggregator is empty
-  // (e.g. cold start before the aggregator's first cycle finishes).
+  // MERGE aggregator-fresh + disk-historical candles. The aggregator only
+  // fetches the last 30 min of 1m data, but support scalp needs ≥14 3m
+  // bars (= 42 min of 1m data) for Supertrend ATR(10). The disk loader
+  // has the full session from 09:15 IST, so we merge by timestamp,
+  // letting the aggregator's fresher bars override stale disk reads.
   const aggCandles = payload?.candles || {};
-  const candles1m  = (aggCandles['1m']  && aggCandles['1m'].length)  ? _normCandles(aggCandles['1m'])  : (histCtx?.['1m']  || []);
-  const candles5m  = (aggCandles['5m']  && aggCandles['5m'].length)  ? _normCandles(aggCandles['5m'])  : (histCtx?.['5m']  || []);
-  const candles15m = (aggCandles['15m'] && aggCandles['15m'].length) ? _normCandles(aggCandles['15m']) : (histCtx?.['15m'] || []);
+  const candles1m  = _mergeCandles(histCtx?.['1m']  || [], _normCandles(aggCandles['1m']  || []));
+  const candles5m  = _mergeCandles(histCtx?.['5m']  || [], _normCandles(aggCandles['5m']  || []));
+  const candles15m = _mergeCandles(histCtx?.['15m'] || [], _normCandles(aggCandles['15m'] || []));
   const candles3m  = _build3m(candles1m);
   const spotPrice  = payload?.spot_data?.ltp || params.aggregator?.spotPrice;
   const atmStrike  = params.aggregator?.atmStrike || payload?.actual_atm_strike;
@@ -231,23 +233,69 @@ function _normCandles(arr) {
   })).filter(c => Number.isFinite(c.c));
 }
 
+/**
+ * Merge two candle arrays by timestamp. Both inputs are assumed to be
+ * { t, o, h, l, c, v } shape. When timestamps collide, `b` (typically
+ * the aggregator-fresh array) wins so the latest values are preserved.
+ * Result is sorted ascending by timestamp.
+ *
+ * Why merge? The disk loader has the full session from 09:15 IST (handles
+ * Supertrend ATR(14) warmup), while the aggregator has the latest 30 min.
+ * Without a merge the engine ends up with EITHER deep history but stale
+ * last-bar OR fresh last-bar but no warmup. Merging gives both.
+ */
+function _mergeCandles(a, b) {
+  const map = new Map();
+  for (const c of (a || [])) {
+    if (Number.isFinite(c.t) && Number.isFinite(c.c)) map.set(c.t, c);
+  }
+  for (const c of (b || [])) {
+    if (Number.isFinite(c.t) && Number.isFinite(c.c)) map.set(c.t, c);
+  }
+  return [...map.values()].sort((x, y) => x.t - y.t);
+}
+
+/**
+ * Build 3-min candles from 1-min candles, bucketising by timestamp so
+ * bars align to :00, :03, :06, :09 IST minute boundaries. Skips the
+ * still-forming current 3m bucket (only emits CLOSED bars).
+ *
+ * IST offset is added so buckets line up with how Indian traders see
+ * 3m bars on charts (start at 09:15 IST = 03:45 UTC).
+ */
+const IST_OFFSET_SEC = 5 * 3600 + 30 * 60;
 function _build3m(c1m) {
   if (!Array.isArray(c1m) || c1m.length < 3) return [];
+  const intervalSec = 3 * 60;
+  const groups = new Map();
+  for (const c of c1m) {
+    const t = Number(c.t ?? c.time);
+    if (!Number.isFinite(t)) continue;
+    const tIst = t + IST_OFFSET_SEC;
+    const bucketIst = Math.floor(tIst / intervalSec) * intervalSec;
+    const bucketUtc = bucketIst - IST_OFFSET_SEC;
+    if (!groups.has(bucketUtc)) groups.set(bucketUtc, []);
+    groups.get(bucketUtc).push(c);
+  }
+  const nowSec = Math.floor(Date.now() / 1000);
   const out = [];
-  for (let i = 0; i < c1m.length; i += 3) {
-    const slice = c1m.slice(i, i + 3);
-    if (!slice.length) continue;
-    const o = slice[0].o ?? slice[0].open;
-    const c = slice[slice.length - 1].c ?? slice[slice.length - 1].close;
+  for (const [bucketStart, bars] of groups) {
+    // Skip the still-forming bucket (3-min bar isn't closed yet)
+    const bucketEnd = bucketStart + intervalSec;
+    if (bucketEnd > nowSec) continue;
+    bars.sort((a, b) => Number(a.t) - Number(b.t));
+    const o = bars[0].o ?? bars[0].open;
+    const cl = bars[bars.length - 1].c ?? bars[bars.length - 1].close;
     let h = -Infinity, l = Infinity, v = 0;
-    for (const b of slice) {
+    for (const b of bars) {
       const bh = b.h ?? b.high; const bl = b.l ?? b.low; const bv = b.v ?? b.volume ?? 0;
       if (Number.isFinite(bh) && bh > h) h = bh;
       if (Number.isFinite(bl) && bl < l) l = bl;
       v += bv;
     }
-    out.push({ o, h, l, c, v, t: slice[0].t });
+    out.push({ o, h, l, c: cl, v, t: bucketStart });
   }
+  out.sort((a, b) => a.t - b.t);
   return out;
 }
 

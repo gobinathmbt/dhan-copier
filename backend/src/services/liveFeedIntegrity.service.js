@@ -88,8 +88,22 @@ function _readJsonl(file) {
 
 function _writeJsonlAtomic(file, rows) {
   const tmp = file + '.tmp';
-  fs.writeFileSync(tmp, rows.map(r => JSON.stringify(r)).join('\n') + '\n');
-  fs.renameSync(tmp, file);
+  try {
+    fs.writeFileSync(tmp, rows.map(r => JSON.stringify(r)).join('\n') + '\n');
+    fs.renameSync(tmp, file);
+    return { ok: true };
+  } catch (e) {
+    // Windows: rename fails with EPERM/EBUSY when the target file is open
+    // by another process (e.g. feedRecorder's append stream during a live
+    // session). Clean up the .tmp and signal a skip — the recorder writes
+    // append-only and dedupes on stream open, so an in-session dedup miss
+    // is harmless.
+    try { fs.unlinkSync(tmp); } catch (_) {}
+    if (e.code === 'EPERM' || e.code === 'EBUSY' || e.code === 'EACCES') {
+      return { ok: false, reason: 'file-locked', code: e.code };
+    }
+    return { ok: false, reason: e.message, code: e.code };
+  }
 }
 
 /**
@@ -119,7 +133,12 @@ function dedupeFile(file) {
   }
   out.sort((a, b) => a.t - b.t);
   if (out.length === rows.length) return { kept: out.length, dropped: 0 };
-  _writeJsonlAtomic(file, out);
+  const wr = _writeJsonlAtomic(file, out);
+  if (!wr.ok) {
+    // File is locked by the live recorder — skip this dedup pass; the
+    // recorder dedupes in-memory anyway, so duplicates aren't a live risk.
+    return { kept: out.length, dropped: 0, skipped: wr.reason };
+  }
   return { kept: out.length, dropped: rows.length - out.length };
 }
 
@@ -242,7 +261,12 @@ async function backfillFromApi(folder, base, tf, dateStr, symbolKey) {
     seen.add(r.t);
     dedup.push(r);
   }
-  _writeJsonlAtomic(file, dedup);
+  const wr = _writeJsonlAtomic(file, dedup);
+  if (!wr.ok) {
+    // File locked by the live recorder — skip backfill write this cycle.
+    // Will retry in 30s after the cooldown.
+    return { fetched: 0, skipped: wr.reason };
+  }
   return { fetched: newRows.length, total: dedup.length };
 }
 
@@ -294,12 +318,23 @@ function synthesizeFromOneMinute(folder, base /* 'candles' | 'futures' */) {
       newRows.push({ t: bucket, o, h, l, c, v });
     }
     if (newRows.length) {
-      const merged = [...existing, ...newRows]
-        .map(r => ({ ...r, t: _toSec(r.t) }))
-        .filter((r, i, arr) => r.t !== null && arr.findIndex(x => x.t === r.t) === i)
-        .sort((a, b) => a.t - b.t);
-      _writeJsonlAtomic(fileTf, merged);
-      synthesised[tf] = newRows.length;
+      // Append-only — avoids the rename collision with feedRecorder's
+      // open append stream on Windows. The recorder also reads its own
+      // dedup set on stream open and skips already-written timestamps,
+      // so a future recorder write at the same bucket will dedup, not
+      // duplicate. _toSec normalisation is applied so on-disk format
+      // stays consistent (seconds, no ms).
+      try {
+        const lines = newRows
+          .map(r => ({ ...r, t: _toSec(r.t) }))
+          .filter(r => r.t !== null)
+          .map(r => JSON.stringify({ t: r.t, o: r.o, h: r.h, l: r.l, c: r.c, v: r.v || 0 }))
+          .join('\n') + '\n';
+        fs.appendFileSync(fileTf, lines, 'utf8');
+        synthesised[tf] = newRows.length;
+      } catch (e) {
+        synthesised[`${tf}_skipped`] = e.code || e.message;
+      }
     }
   }
   return { synthesised };

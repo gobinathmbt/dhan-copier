@@ -194,13 +194,15 @@ async function loadTodayContext({ maxChainSnapshots = 30, focusStrikes = null, s
   }
 
   const meta = readJsonSafe(path.join(folder, 'metadata.json'));
+  // Read 240× 1m so we have 80× 3m bars and 48× 5m bars — enough warmup
+  // for any indicator (Supertrend ATR(10), UT Bot ATR(7), etc.)
   const [c1, c5, c15, f1, f5, f15] = await Promise.all([
-    readJsonlTail(path.join(folder, 'candles-1m.jsonl'), 120),
-    readJsonlTail(path.join(folder, 'candles-5m.jsonl'), 48),
-    readJsonlTail(path.join(folder, 'candles-15m.jsonl'), 16),
-    readJsonlTail(path.join(folder, 'futures-1m.jsonl'), 120),
-    readJsonlTail(path.join(folder, 'futures-5m.jsonl'), 48),
-    readJsonlTail(path.join(folder, 'futures-15m.jsonl'), 16),
+    readJsonlTail(path.join(folder, 'candles-1m.jsonl'), 240),
+    readJsonlTail(path.join(folder, 'candles-5m.jsonl'), 60),
+    readJsonlTail(path.join(folder, 'candles-15m.jsonl'), 24),
+    readJsonlTail(path.join(folder, 'futures-1m.jsonl'), 240),
+    readJsonlTail(path.join(folder, 'futures-5m.jsonl'), 60),
+    readJsonlTail(path.join(folder, 'futures-15m.jsonl'), 24),
   ]);
   const chainRows = await readJsonlTail(path.join(folder, 'option-chain.jsonl'), maxChainSnapshots);
 
