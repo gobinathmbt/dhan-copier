@@ -56,26 +56,30 @@ function _istDayBoundsUtc(now = new Date()) {
   const endUtc   = new Date(startUtc.getTime() + 24 * 3600 * 1000);
   return { startUtc, endUtc };
 }
-async function _countTodayTrades(sessionId) {
+async function _countTodayTrades(sessionId, market = null) {
   if (!sessionId) return 0;
   try {
     const { startUtc, endUtc } = _istDayBoundsUtc();
-    return await ScalpingTrade.countDocuments({
+    const q = {
       sessionId,
       createdAt: { $gte: startUtc, $lt: endUtc },
-    });
+    };
+    if (market) q.market = market;
+    return await ScalpingTrade.countDocuments(q);
   } catch (_) { return 0; }
 }
-async function _countTodayLosses(sessionId) {
+async function _countTodayLosses(sessionId, market = null) {
   if (!sessionId) return 0;
   try {
     const { startUtc, endUtc } = _istDayBoundsUtc();
-    return await ScalpingTrade.countDocuments({
+    const q = {
       sessionId,
       status: 'closed',
       result: 'LOSS',
       closedAt: { $gte: startUtc, $lt: endUtc },
-    });
+    };
+    if (market) q.market = market;
+    return await ScalpingTrade.countDocuments(q);
   } catch (_) { return 0; }
 }
 const sectorRotation = require('./algorithms/sectorRotation.service');
@@ -130,6 +134,11 @@ const state = {
   predictionTimer: null,
   monitorTimer: null,
   priceUpdateTimer: null, // NEW: Dedicated real-time price updater
+  // ── Active per-symbol slot (alias) ───────────────────────────────────
+  // These mirror the active symbol's slot in `state.bySymbol`. Existing
+  // code reads/writes `state.cooldownUntil`, `state.busy`, etc. without
+  // knowing about per-symbol slots. _useSymbolSlot(symbolKey) repoints
+  // every alias to that symbol's bag for the duration of one cycle.
   cooldownUntil: 0,
   busy: false,
   previousLiquidityData: null,
@@ -149,7 +158,87 @@ const state = {
   lastAlgorithmOutputs: null,
   lastMasterDecision: null,
   lastFuturesData: null,
+  // ── Per-symbol state bag — populated by _ensureSymbolSlots() ─────────
+  // Each entry is the same shape as the alias fields above. Used to
+  // run NIFTY_50 and SENSEX entry/monitor cycles in parallel without
+  // them stepping on each other's cooldowns / direction locks / caches.
+  bySymbol: {},
+  activeSymbolKey: 'NIFTY_50',
 };
+
+// ─── Per-symbol state helpers ────────────────────────────────────────────
+// Each enabled trading symbol gets its own slot in `state.bySymbol`. The
+// engine code reads/writes `state.cooldownUntil`, `state.busy`, etc. via
+// the alias fields above. `_useSymbolSlot(key)` flushes any pending writes
+// from the previous symbol back into its slot, then loads the new symbol's
+// slot into the alias fields. This lets us run the same cycle code for
+// each symbol sequentially without needing to thread a symbol parameter
+// through hundreds of lines of pipeline code.
+const _SYMBOL_SLOT_FIELDS = [
+  'cooldownUntil', 'busy',
+  'previousLiquidityData', 'previousSMCAnalysis',
+  'previousMarketInternalsData', 'previousSectorRotationData',
+  'previousGlobalData', 'previousBehavioralData', 'previousDEMAData',
+  'lastDirection', 'lastDirectionAt',
+  'futuresAuthFailed',
+  'lastAlgorithmOutputs', 'lastMasterDecision', 'lastFuturesData',
+];
+
+function _newSymbolSlot() {
+  return {
+    cooldownUntil: 0,
+    busy: false,
+    previousLiquidityData: null,
+    previousSMCAnalysis: null,
+    previousMarketInternalsData: null,
+    previousSectorRotationData: null,
+    previousGlobalData: null,
+    previousBehavioralData: null,
+    previousDEMAData: null,
+    lastDirection: null,
+    lastDirectionAt: 0,
+    futuresAuthFailed: false,
+    lastAlgorithmOutputs: null,
+    lastMasterDecision: null,
+    lastFuturesData: null,
+  };
+}
+
+function _ensureSymbolSlots(keys) {
+  for (const k of keys) {
+    if (!state.bySymbol[k]) state.bySymbol[k] = _newSymbolSlot();
+  }
+}
+
+function _flushAliasToSlot() {
+  const cur = state.bySymbol[state.activeSymbolKey];
+  if (!cur) return;
+  for (const f of _SYMBOL_SLOT_FIELDS) cur[f] = state[f];
+}
+
+function _loadSlotToAlias(key) {
+  const slot = state.bySymbol[key];
+  if (!slot) return;
+  state.activeSymbolKey = key;
+  for (const f of _SYMBOL_SLOT_FIELDS) state[f] = slot[f];
+}
+
+/**
+ * Activate a symbol slot for the duration of one cycle. Saves whatever
+ * is currently in the alias fields back to the previous symbol's slot,
+ * then loads the new symbol's slot. Also flips symbolRegistry so all
+ * downstream services key folders/feeds on the same symbol.
+ */
+function _useSymbolSlot(key) {
+  if (state.activeSymbolKey === key) {
+    // Already active — but make sure registry is in sync
+    try { require('../config/symbolRegistry').setActiveSymbols({ tradingSymbols: [key] }); } catch (_) {}
+    return;
+  }
+  _flushAliasToSlot();
+  _loadSlotToAlias(key);
+  try { require('../config/symbolRegistry').setActiveSymbols({ tradingSymbols: [key] }); } catch (_) {}
+}
 
 // ============================================================
 // OPTIMIZATION: Sentiment Cache (saves 2-4 seconds per cycle)
@@ -176,26 +265,36 @@ async function start({ authKey, settings, aiModel }) {
   }
 
   // ── Wire trading symbols ──────────────────────────────────────────
-  // settings.tradingSymbols is the source of truth for which underlying
-  // the engine pipeline runs against. Set it BEFORE any service is
-  // touched so feedRecorder, candleSynthesizer, historicalContextLoader,
+  // settings.tradingSymbols is the source of truth for which underlying(s)
+  // the engine pipeline runs against. Set BEFORE any service is touched
+  // so feedRecorder, candleSynthesizer, historicalContextLoader,
   // liveFeedIntegrity, multiDayContextEngine all key their folders on
   // the right symbol.
   let activeSymbolMeta = null;
+  let enabledSymbols = ['NIFTY_50'];
   try {
     const symbolRegistry = require('../config/symbolRegistry');
     const active = symbolRegistry.setActiveSymbols(settings);
+    enabledSymbols = active.all && active.all.length ? active.all : ['NIFTY_50'];
     activeSymbolMeta = symbolRegistry.getSymbol(active.active);
+    // Seed per-symbol state slots so each enabled symbol has its own
+    // cooldown / direction lock / algorithm cache.
+    _ensureSymbolSlots(enabledSymbols);
+    state.activeSymbolKey = active.active;
     logger.info({
       active: active.active,
-      all: active.all,
+      all: enabledSymbols,
       lotSize: activeSymbolMeta.lotSize,
       strikeStep: activeSymbolMeta.strikeStep,
       indexSegment: activeSymbolMeta.indexSegment,
       indexSecurityId: activeSymbolMeta.indexSecurityId,
     }, '[engine] active trading symbols');
     // Auto-fill lotSize from the symbol metadata if user didn't supply one.
-    // NIFTY=65, SENSEX=20, BANKNIFTY=35 etc.
+    // NIFTY=65, SENSEX=20, BANKNIFTY=35 etc. NOTE: when running multiple
+    // symbols, lotSize on the session is symbolic only — each trade is
+    // sized using the symbol-specific lot size from symbolRegistry at
+    // entry time (see entry path below). The session-level value is kept
+    // for legacy code that reads `settings.lotSize` directly.
     if (!Number.isFinite(Number(settings.lotSize)) || Number(settings.lotSize) <= 0) {
       settings.lotSize = activeSymbolMeta.lotSize;
       logger.info({ lotSize: settings.lotSize }, '[engine] lotSize auto-filled from symbol metadata');
@@ -204,26 +303,26 @@ async function start({ authKey, settings, aiModel }) {
     logger.warn({ err: e.message }, '[engine] failed to set active symbols (using NIFTY_50 default)');
   }
 
-  // ── Refresh live-feed subscription for the active symbol ──────────
-  // The boot block subscribed NIFTY+BANKNIFTY+SENSEX index spots, but if
-  // the active symbol is something else we (re)subscribe defensively.
+  // ── Refresh live-feed subscription for ALL enabled symbols ────────
+  // The boot block subscribed NIFTY+BANKNIFTY+SENSEX index spots in QUOTE
+  // mode. We re-subscribe defensively for the active set so any reconnect
+  // loop that lost subscriptions gets the right indices back.
   // Also resets the futures cache so SENSEX runs reparse the scrip
   // master for BSE FUTIDX rows on the next ensureResolved() call.
   try {
-    if (activeSymbolMeta) {
-      const { instance: liveFeedProd } = require('./dhanLiveFeedProd.service');
-      liveFeedProd.subscribe(
-        [{ exchangeSegment: activeSymbolMeta.indexSegment, securityId: activeSymbolMeta.indexSecurityId }],
-        'QUOTE'
-      );
-      const niftyFuturesProd = require('./niftyFuturesProd.service');
-      niftyFuturesProd.resetCache();
-      // Best-effort: subscribe the futures contract for the active symbol.
-      // For SENSEX this currently no-ops because the BSE FUTIDX scrip lookup
-      // returns null until further wiring is done.
-      try { await niftyFuturesProd.subscribeLiveFeed('FULL'); }
-      catch (_) {}
-    }
+    const symbolRegistry = require('../config/symbolRegistry');
+    const { instance: liveFeedProd } = require('./dhanLiveFeedProd.service');
+    const subs = enabledSymbols
+      .map(k => symbolRegistry.getSymbol(k))
+      .filter(Boolean)
+      .map(s => ({ exchangeSegment: s.indexSegment, securityId: s.indexSecurityId }));
+    if (subs.length) liveFeedProd.subscribe(subs, 'QUOTE');
+    const niftyFuturesProd = require('./niftyFuturesProd.service');
+    niftyFuturesProd.resetCache();
+    // Best-effort futures subscribe for the FIRST enabled symbol. NIFTY
+    // futures live wiring is full; SENSEX futures gracefully no-ops until
+    // BSE FUTIDX scrip-master coverage is added.
+    try { await niftyFuturesProd.subscribeLiveFeed('FULL'); } catch (_) {}
   } catch (e) {
     logger.warn({ err: e.message }, '[engine] live-feed re-subscribe failed (non-fatal)');
   }
@@ -367,6 +466,33 @@ async function getStatus() {
 }
 
 async function runPredictionCycle() {
+  if (!state.session) return;
+  // Iterate every enabled symbol. Each symbol has its own busy/cooldown/
+  // direction-lock slot, so NIFTY's prediction can't block SENSEX's.
+  let symbols = [];
+  try {
+    const symbolRegistry = require('../config/symbolRegistry');
+    symbols = symbolRegistry.getEnabledSymbols(state.session.settings).map(s => s.key);
+  } catch (_) { symbols = ['NIFTY_50']; }
+  if (!symbols.length) symbols = ['NIFTY_50'];
+  _ensureSymbolSlots(symbols);
+
+  for (const key of symbols) {
+    if (!state.session) return;
+    _useSymbolSlot(key);
+    try {
+      await _runPredictionCycleForActiveSymbol();
+    } catch (e) {
+      logger.error({ err: e.message, symbol: key }, '[engine] prediction cycle error for symbol');
+      // Make sure busy is cleared so this symbol isn't permanently locked
+      state.busy = false;
+    }
+  }
+  // Persist the last symbol's slot back so it doesn't get overwritten
+  _flushAliasToSlot();
+}
+
+async function _runPredictionCycleForActiveSymbol() {
   if (!state.session || state.busy) return;
   state.busy = true;
   try {
@@ -395,10 +521,13 @@ async function runPredictionCycle() {
 
     // ── ENTRY GATES ───────────────────────────────────────────────────────────
 
-    // 1. Max concurrent trades
+    // 1. Max concurrent trades — applied PER SYMBOL so NIFTY trades don't
+    //    block SENSEX entries (and vice versa). The session-level limit
+    //    is interpreted as a per-market limit when running multiple symbols.
     const openCount = await ScalpingTrade.countDocuments({
       sessionId: state.session._id,
       status: 'open',
+      market: state.activeSymbolKey,
     });
     if (openCount >= (settings.maxConcurrentTrades || 1)) return;
 
@@ -2028,10 +2157,16 @@ async function runPredictionCycle() {
         session: state.session,
         openTradesCount: currentOpenTrades.length,
         futuresData: futuresDataForHybrid || futuresAIDecision,
-        // Calibrated daily caps — pass today's count + loss streak so the
-        // entry engine can enforce the 8-trade/3-loss daily limits.
-        tradesToday: await _countTodayTrades(state.session?._id),
-        lossesToday: await _countTodayLosses(state.session?._id),
+        // Pass the active market so the master entry engine doesn't have to
+        // guess from registry state. This makes per-cycle routing deterministic
+        // when running multiple symbols in parallel.
+        market: state.activeSymbolKey,
+        // Per-symbol daily caps — count trades and losses ONLY for the
+        // active market so NIFTY's losses don't halt SENSEX entries and
+        // vice versa. The hybrid risk engine inside masterScalpingEntryEngine
+        // honours these via the maxTradesPerDay / maxLossesPerDay settings.
+        tradesToday: await _countTodayTrades(state.session?._id, state.activeSymbolKey),
+        lossesToday: await _countTodayLosses(state.session?._id, state.activeSymbolKey),
       });
       // Translate new-engine decision to the shape the rest of this function expects
       institutionalEntryDecision = {
@@ -2254,9 +2389,17 @@ async function runPredictionCycle() {
       return;
     }
     
-    // NIFTY lot size is fixed (65 qty per lot). Always use the session's
-    // original lotSize, not the potentially-reduced local copy.
-    const originalLotSize = state.session.settings.lotSize || 65;
+    // Lot size — when running multi-symbol, use the lot size for the
+    // ACTIVE symbol's contract spec (NIFTY=65, SENSEX=20). Fallback to
+    // session settings.lotSize for legacy single-symbol sessions.
+    let originalLotSize = Number(state.session.settings.lotSize) || 65;
+    try {
+      const symbolRegistry = require('../config/symbolRegistry');
+      const active = symbolRegistry.getSymbol(state.activeSymbolKey || symbolRegistry.getActiveSymbol());
+      if (Number.isFinite(active?.lotSize) && active.lotSize > 0) {
+        originalLotSize = active.lotSize;
+      }
+    } catch (_) {}
     const minLots = Number(state.session.settings.minLots) || 1;
     const lots = minLots;
     const qty = lots * originalLotSize;
@@ -2379,6 +2522,7 @@ async function runPredictionCycle() {
       // ── ENGINE & MARKET (NEW 2026-05-19) ──
       engineType: institutionalEntryDecision.engineType || 'CORE',
       market:     institutionalEntryDecision.market
+                  || state.activeSymbolKey
                   || state.session?.settings?.tradingSymbols?.[0]
                   || 'NIFTY_50',
       // Per-trade AI overrides — consumed by monitor engine
@@ -2545,23 +2689,62 @@ async function runMonitorCycle() {
       return;
     }
 
+    // ── Partition open trades by market ───────────────────────────────
+    // Each symbol's open trades are evaluated against THAT symbol's
+    // aggregator + algorithm cache. We loop symbol-by-symbol, set the
+    // active slot, and call the per-market monitor sub-cycle.
+    const tradesByMarket = new Map();
+    for (const t of open) {
+      const key = t.market || 'NIFTY_50';
+      if (!tradesByMarket.has(key)) tradesByMarket.set(key, []);
+      tradesByMarket.get(key).push(t);
+    }
+    _ensureSymbolSlots([...tradesByMarket.keys()]);
+
+    for (const [marketKey, marketTrades] of tradesByMarket.entries()) {
+      _useSymbolSlot(marketKey);
+      try {
+        await _runMonitorCycleForActiveSymbol(marketTrades);
+      } catch (e) {
+        logger.error({ err: e.message, market: marketKey }, '[engine] monitor cycle error for market');
+      }
+    }
+    _flushAliasToSlot();
+  } catch (e) {
+    logger.error({ err: e.message }, '[engine] runMonitorCycle outer error');
+  }
+}
+
+async function _runMonitorCycleForActiveSymbol(open) {
+  if (!state.session || !open.length) return;
+  try {
     const { payload, atmCallLtp, atmPutLtp } = await aggregator.buildPayload(state.authKey);
 
     // ============================================================
     // SEPARATE TRADE MONITORING SERVICE (with all algorithms)
     // ============================================================
-    logger.info({ openTradesCount: open.length }, '[engine] Delegating to Trade Monitor Service');
-    
-    // Fetch option chain to get actual LTP for each trade's specific strike
+    logger.info({
+      market: state.activeSymbolKey,
+      openTradesCount: open.length,
+    }, '[engine] Delegating to Trade Monitor Service');
+
+    // Fetch option chain for the ACTIVE symbol's expiry to get actual LTP
+    // for each trade's specific strike.
     let optionChainForMonitor = null;
     try {
-      const expiries = await dhanProd.getExpiryListBypass(state.authKey, {});
+      const symbolRegistry = require('../config/symbolRegistry');
+      const active = symbolRegistry.getSymbol(state.activeSymbolKey);
+      const expiries = await dhanProd.getExpiryListBypass(state.authKey, {
+        securityId: active.indexSecurityId,
+        underlyingSeg: active.indexSegment,
+      });
       const nearestExpiry = expiries?.data?.expiries?.[0];
       if (nearestExpiry) {
         const ocRes = await dhanProd.getOptionChainBypass(state.authKey, {
           segment: 0,
           expiry: nearestExpiry.exp,
-          securityId: 13,
+          securityId: active.indexSecurityId,
+          underlyingSeg: active.indexSegment,
         });
         if (ocRes.ok) optionChainForMonitor = ocRes.data;
       }
