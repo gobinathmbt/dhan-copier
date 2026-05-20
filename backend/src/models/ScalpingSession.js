@@ -123,12 +123,17 @@ const ScalpingSessionSchema = new mongoose.Schema(
       coreEngine:          { type: Boolean, default: false },
 
       // ── SUPPORT SCALP ENGINE (UT+Supertrend+VWAP+EMA+RSI confluence) ─
+      // CALIBRATED 2026-05-20:
+      //   • RSI longMin 55→52, shortMax 45→48 — captures setups where RSI
+      //     is just above neutral (53-54) in a confirmed trend.
+      //   • EMA tolerancePct 0.01% — accept "aligned" when EMAs are tied
+      //     within tolerance (consensus from VWAP+Supertrend takes over).
       supportScalp: { type: mongoose.Schema.Types.Mixed, default: () => ({
         primaryTf: '3m', confirmationTf: '15m',
         utBot: { keyValue: 1.5, atrPeriod: 10 },
         supertrend: { atrPeriod: 10, multiplier: 2.5 },
-        ema:   { fastPeriod: 9, slowPeriod: 20 },
-        rsi:   { period: 14, longMin: 55, shortMax: 45 },
+        ema:   { fastPeriod: 9, slowPeriod: 20, tolerancePct: 0.01 },
+        rsi:   { period: 14, longMin: 52, shortMax: 48 },
         requireVwap: true, requireSupertrend: true,
         requireEmaAlignment: true, requireRsiFilter: true,
         maxHoldSec: 240, slPtsMin: 6, slPtsMax: 14,

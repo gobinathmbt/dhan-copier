@@ -383,6 +383,11 @@ async function buildPayload(authKey) {
       ce_unwinding: ceUnwindCnt > peUnwindCnt,
       pe_unwinding: peUnwindCnt > ceUnwindCnt,
       atm_iv: atmRow?.call?.iv || atmRow?.put?.iv || null,
+      // Full strikes array — needed by hybrid strike selectors. Without
+      // this they see an empty array and emit "no chain or atm" warnings,
+      // blocking trade entry. Pass the whole option chain through so the
+      // selectors can apply their delta-band / liquidity / max-pain logic.
+      strikes: optionChain.strikes || [],
       atm_call: atmRow
         ? {
             symbol: atmRow.call.displaySymbol,

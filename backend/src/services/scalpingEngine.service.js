@@ -614,6 +614,61 @@ async function _runPredictionCycleForActiveSymbol() {
     const { payload, atmStrike, atmCallLtp, atmPutLtp, atmCallSymbol, atmPutSymbol, expiry } =
       await aggregator.buildPayload(state.authKey);
 
+    // ════════════════════════════════════════════════════════════════════
+    // ENGINE ROUTING — _ultraOnly fast path
+    // ════════════════════════════════════════════════════════════════════
+    // When CORE engine is OFF and only ultra/support are running, the
+    // master scalping engine drives entries entirely from raw candles.
+    // We bypass the legacy 17-algo + master + AI pipeline and go straight
+    // to entryEngine.decide(). On NO_TRADE we return; on fired we set up
+    // the legacy locals (masterDecision, tradeDecision, marketSession,
+    // etc.) with safe defaults so the trade-creation block downstream
+    // works without re-running the legacy gates.
+    const _ultraOnly = settings.coreEngine === false &&
+      (settings.ultraScalpingEngine !== false || settings.supportScalpEngine === true);
+
+    let __fastPathFired = false;
+    let __fastPathDecision = null;
+    if (_ultraOnly) {
+      try {
+        const aggBundle = {
+          payload,
+          atmStrike: payload?.actual_atm_strike || payload?.options_chain?.atm_strike || atmStrike,
+          atmCallLtp, atmPutLtp,
+          optionChain: payload?.options_chain || null,
+        };
+        const decision = await entryEngine.decide({
+          aggregator: aggBundle,
+          algorithmOutputs: {},
+          masterDecision: null,
+          settings,
+          session: state.session,
+          openTradesCount: openCount,
+          futuresData: state.lastFuturesData || null,
+          market: state.activeSymbolKey,
+          tradesToday: await _countTodayTrades(state.session?._id, state.activeSymbolKey),
+          lossesToday: await _countTodayLosses(state.session?._id, state.activeSymbolKey),
+        });
+        if (!decision || decision.signal === 'NO_TRADE') {
+          return; // No entry — skip legacy pipeline.
+        }
+        // Trade fired — execute trade creation in self-contained helper
+        // and return. Bypasses the legacy 17-algo pipeline entirely.
+        await _executeFastPathTrade({
+          decision,
+          payload,
+          atmCallLtp, atmPutLtp,
+          atmCallSymbol, atmPutSymbol,
+          expiry,
+          settings,
+        });
+        return;
+      } catch (e) {
+        logger.warn({ err: e.message, stack: e.stack?.slice(0, 300) }, '[engine] fast-path threw — bailing this cycle');
+        return;
+      }
+    }
+
     // ============================================================
     // STEP 0.5: MARKET SENTIMENT ANALYSIS (OPTIMIZED WITH CACHING)
     // OPTIMIZATION: Cache sentiment for 5 minutes (saves 2-4 seconds)
@@ -675,39 +730,66 @@ async function _runPredictionCycleForActiveSymbol() {
     }
 
     // ============================================================
-    // STEP 1: RUN ALL 17 ALGORITHMS IN PARALLEL
+    // STEP 1: ALGORITHM SUITE (gated by engine routing)
     // ============================================================
-    logger.info('[engine] Running 17 world-class algorithms (full professional suite + DEMA)');
-    
-    // Get option chain for algorithms
-    const optionChainRes = await dhanProd.getOptionChainBypass(state.authKey, {
-      segment: 0,
-      expiry: expiry,
-      securityId: 13,
-    });
-    
-    const optionChain = optionChainRes.ok ? optionChainRes.data : null;
-    const spotPrice = payload.spot_data?.ltp || payload.actual_spot_price || 23800;
-    
-    // Log option chain status — if null, algorithms will use fallback values
-    // but we still proceed (AI will use ATM data from aggregator payload)
-    if (!optionChain) {
-      logger.warn('[engine] Option chain fetch failed — algorithms will use fallback values, AI will use aggregator ATM data');
+    // When CORE engine is OFF and only ultra/support are running, skip
+    // the 8 hybrid-input algorithm calls — ultra/support engines read
+    // raw candle arrays from the aggregator payload and don't consume
+    // these algorithm outputs.
+    if (_ultraOnly) {
+      logger.info('[engine] Skipping algorithm suite — only ultra/support engines active (core engine OFF)');
+    } else {
+      logger.info('[engine] Running 8 hybrid-input algorithms (CORE engine path)');
     }
     
-    // Fetch 1-minute candles for SMC & Behavioral analysis (last 60 minutes)
+    // Get option chain for algorithms (CORE engine path only — ultra/support
+    // engines read the chain from the aggregator payload directly).
+    let optionChain = null;
+    if (!_ultraOnly) {
+      try {
+        const symbolRegistry = require('../config/symbolRegistry');
+        const active = symbolRegistry.getSymbol(state.activeSymbolKey);
+        const optionChainRes = await dhanProd.getOptionChainBypass(state.authKey, {
+          segment: 0,
+          expiry: expiry,
+          securityId: active?.indexSecurityId || 13,
+          underlyingSeg: active?.indexSegment || 'IDX_I',
+        });
+        optionChain = optionChainRes.ok ? optionChainRes.data : null;
+      } catch (e) {
+        logger.warn({ err: e.message }, '[engine] option chain fetch threw');
+      }
+    } else {
+      // Ultra/support path — reuse the chain the aggregator already fetched
+      optionChain = payload?.options_chain ? { strikes: payload.options_chain.strikes || [] } : null;
+    }
+
+    const spotPrice = payload.spot_data?.ltp || payload.actual_spot_price || 23800;
+
+    // Log option chain status — if null, algorithms will use fallback values
+    // but we still proceed (AI will use ATM data from aggregator payload)
+    if (!optionChain && !_ultraOnly) {
+      logger.warn('[engine] Option chain fetch failed — algorithms will use fallback values, AI will use aggregator ATM data');
+    }
+
+    // Fetch 1-minute candles for SMC & Behavioral analysis (CORE engine only)
     const now = Math.floor(Date.now() / 1000);
     const sixtyMinAgo = now - (60 * 60);
-    const candlesRes = await dhanProd.getDhanBypassData(state.authKey, {
-      securityId: 13,
-      exchange: 'IDX',
-      segment: 'I',
-      instrument: 'IDX',
-      startTime: sixtyMinAgo,
-      endTime: now,
-      interval: '1',
-    });
-    const candles = candlesRes.ok ? candlesRes.data.candles : [];
+    let candles = [];
+    if (!_ultraOnly) {
+      try {
+        const symbolRegistry = require('../config/symbolRegistry');
+        const active = symbolRegistry.getSymbol(state.activeSymbolKey);
+        const candlesRes = await dhanProd.getDhanBypassData(state.authKey, {
+          securityId: active?.indexSecurityId || 13,
+          exchange: 'IDX', segment: 'I', instrument: 'IDX',
+          startTime: sixtyMinAgo, endTime: now, interval: '1',
+        });
+        candles = candlesRes.ok ? candlesRes.data.candles : [];
+      } catch (e) {
+        logger.warn({ err: e.message }, '[engine] 1m candles fetch threw');
+      }
+    }
     
     // Store previous data for analysis
     const previousLiquidityData = state.previousLiquidityData || null;
@@ -716,23 +798,21 @@ async function _runPredictionCycleForActiveSymbol() {
     const previousGlobalData = state.previousGlobalData || null;
 
     // ============================================================
-    // ALGORITHMS — only the 8 the hybrid engine actually consumes.
-    // Removed (cycle 31, 2026-05-18):
-    //   - aiAnalysis, institutionalAI, masterAlgorithm, professionalTrader,
-    //     sentimentAnalyzer (legacy AI path — hybrid engine is now the
-    //     sole decision-maker, no AI fallback)
-    //   - rsi, macd, stochastic, bollingerBands (Phase 2 — never read by
-    //     hybrid engine; UT Bot in hybrid covers momentum)
-    //   - volumeProfile, orderBookImbalance, tickVolume (Phase 3 — hybrid
-    //     uses its own volumeAnalysisEngine + tickDeltaClassifier)
-    //   - dema, behavioral, sectorRotation (Phase 1 extras — not consumed)
-    // Kept (used by hybrid.entry.decide):
-    //   gammaExposure, orderFlow, multiTimeframe, liquidityAnalysis,
-    //   smartMoneyConcepts, marketInternals, professionalScalping (UT Bot
-    //   driver via ADX), globalMarkets (VIX only)
+    // ALGORITHMS — only the 8 the hybrid CORE engine actually consumes.
+    // When _ultraOnly (ultra/support only, no CORE), skip all 8 calls
+    // since ultra/support engines work purely from raw candle arrays.
     // ============================================================
-    const algorithmOutputs = {
-      gammaExposure: optionChain ? gammaExposure.calculateGammaExposure(optionChain, spotPrice) : null,
+    let algorithmOutputs;
+    if (_ultraOnly) {
+      // Empty bag — ultra/support entry path doesn't read these
+      algorithmOutputs = {
+        gammaExposure: null, orderFlow: null, multiTimeframe: null,
+        liquidityAnalysis: null, smartMoneyConcepts: null,
+        marketInternals: null, globalMarkets: null, professionalScalping: null,
+      };
+    } else {
+      algorithmOutputs = {
+        gammaExposure: optionChain ? gammaExposure.calculateGammaExposure(optionChain, spotPrice) : null,
       orderFlow: optionChain ? orderFlow.analyzeOrderFlow(optionChain, payload.spot_data, null) : null,
       multiTimeframe: await multiTimeframe.analyzeMultiTimeframe(state.authKey, spotPrice),
       liquidityAnalysis: optionChain ? liquidityAnalysis.analyzeLiquidity(
@@ -767,7 +847,8 @@ async function _runPredictionCycleForActiveSymbol() {
           return null;
         }
       })(),
-    };
+      };
+    } // end if (_ultraOnly) else { ... }
 
     // Persist previous-cycle state for diff-based algorithms
     state.previousLiquidityData = { optionChain, spotPrice, timestamp: Date.now() };
@@ -778,16 +859,18 @@ async function _runPredictionCycleForActiveSymbol() {
     // Store for monitor cycle to use
     state.lastAlgorithmOutputs = algorithmOutputs;
 
-    logger.info({
-      gamma: !!algorithmOutputs.gammaExposure,
-      orderFlow: !!algorithmOutputs.orderFlow,
-      multiTimeframe: !!algorithmOutputs.multiTimeframe,
-      liquidity: algorithmOutputs.liquidityAnalysis?.liquidity_score ?? 'null',
-      smc: algorithmOutputs.smartMoneyConcepts?.smc_score ?? 'null',
-      marketInternals: algorithmOutputs.marketInternals?.market_internals_score ?? 'null',
-      globalMarkets: algorithmOutputs.globalMarkets?.global_score ?? 'null',
-      professionalScalping: !!algorithmOutputs.professionalScalping,
-    }, '[engine] hybrid-required algorithms completed (8 inputs)');
+    if (!_ultraOnly) {
+      logger.info({
+        gamma: !!algorithmOutputs.gammaExposure,
+        orderFlow: !!algorithmOutputs.orderFlow,
+        multiTimeframe: !!algorithmOutputs.multiTimeframe,
+        liquidity: algorithmOutputs.liquidityAnalysis?.liquidity_score ?? 'null',
+        smc: algorithmOutputs.smartMoneyConcepts?.smc_score ?? 'null',
+        marketInternals: algorithmOutputs.marketInternals?.market_internals_score ?? 'null',
+        globalMarkets: algorithmOutputs.globalMarkets?.global_score ?? 'null',
+        professionalScalping: !!algorithmOutputs.professionalScalping,
+      }, '[engine] hybrid-required algorithms completed (8 inputs)');
+    }
 
     // ============================================================
     // OPTIMIZATION 1: PARALLEL AI EXECUTION (Save 10-15 seconds)
@@ -3334,6 +3417,174 @@ async function manualExit(tradeId) {
   const trade = await ScalpingTrade.findById(tradeId);
   if (!trade || trade.status !== 'open') throw new Error('Trade not open');
   await closeTrade(trade, trade.currentPrice || trade.entryPrice, 'Manual exit');
+  return trade;
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Fast-path trade execution helper for ULTRA / SUPPORT scalp engines.
+// ════════════════════════════════════════════════════════════════════
+// Called from runPredictionCycle when _ultraOnly && entryEngine fires.
+// Self-contained — does NOT depend on the legacy 17-algorithm pipeline
+// locals (masterDecision, tradeDecision, marketSession, etc.). Reads
+// everything it needs from the passed-in `decision` and `payload`.
+//
+// Creates the trade record, subscribes the option to the live feed,
+// emits the WebSocket event, and updates the cooldown.
+async function _executeFastPathTrade({
+  decision, payload, atmCallLtp, atmPutLtp,
+  atmCallSymbol, atmPutSymbol, expiry, settings,
+}) {
+  const isCE = decision.option_type === 'CE';
+  const direction = decision.direction;
+  const selectedStrike = decision.strike;
+  const tradeType = decision.trade_type || 'SCALP';
+  const isSwingTrade = tradeType === 'SWING';
+  const spotPrice = payload?.spot_data?.ltp || payload?.actual_spot_price || 0;
+
+  // Resolve premium + symbol from the chain in payload
+  const optionChain = payload?.options_chain || null;
+  const strikeRow = optionChain?.strikes?.find(s => s.strike === selectedStrike);
+  let premium      = decision.entry_premium_estimate || 0;
+  let optionSymbol = isCE ? atmCallSymbol : atmPutSymbol;
+  let optionSecurityId = null;
+  if (strikeRow) {
+    premium      = isCE ? strikeRow.call?.ltp : strikeRow.put?.ltp;
+    optionSymbol = isCE ? strikeRow.call?.displaySymbol : strikeRow.put?.displaySymbol;
+    optionSecurityId = isCE ? strikeRow.call?.securityId : strikeRow.put?.securityId;
+  } else if (selectedStrike === payload?.actual_atm_strike || selectedStrike === payload?.options_chain?.atm_strike) {
+    premium      = isCE ? atmCallLtp : atmPutLtp;
+    optionSymbol = isCE ? atmCallSymbol : atmPutSymbol;
+  }
+  if (!premium || premium < (settings.minEntryPremium || 50)) {
+    logger.warn({ premium, minEntryPremium: settings.minEntryPremium },
+      '[engine] fast-path: premium too low, skipping entry');
+    return;
+  }
+
+  // Lot size from the active symbol (NIFTY=65, SENSEX=20)
+  let originalLotSize = Number(settings.lotSize) || 65;
+  try {
+    const symbolRegistry = require('../config/symbolRegistry');
+    const active = symbolRegistry.getSymbol(state.activeSymbolKey || symbolRegistry.getActiveSymbol());
+    if (Number.isFinite(active?.lotSize) && active.lotSize > 0) originalLotSize = active.lotSize;
+  } catch (_) {}
+  const minLots = Number(settings.minLots) || 1;
+  const lots = minLots;
+  const qty = lots * originalLotSize;
+
+  const targetPoints = decision.target_points || settings.targetPoints || 10;
+  const slPoints = decision.sl_points || settings.slPoints || 15;
+  const targetPremium = premium + targetPoints;
+  const slPremium = premium - slPoints;
+  const ensembleConfidence = decision.confidence;
+
+  // Try to get opening strike for alternativeStrike field (best-effort)
+  let openingStrike = selectedStrike;
+  try { openingStrike = professionalTrader.getMarketSession?.()?.openingStrike || selectedStrike; } catch (_) {}
+
+  const trade = await ScalpingTrade.create({
+    sessionId: state.session._id,
+    signal: isCE ? 'BUY_CE' : 'BUY_PE',
+    strike: selectedStrike,
+    optionSymbol: optionSymbol,
+    expiry,
+    lotSize: originalLotSize,
+    quantity: qty,
+    entryPrice: premium,
+    currentPrice: premium,
+    sl: Number(slPremium.toFixed(2)),
+    target: Number(targetPremium.toFixed(2)),
+    aiConfidence: ensembleConfidence,
+    entryReason: `[${tradeType}] ${decision.engineType}: ${(decision.reasoning || '').slice(0, 100)} | Conf: ${ensembleConfidence}`,
+    marketRegime: decision.engineType || 'ULTRA_SCALP',
+    buildUpType: payload?.futures_data?.build_up_type,
+    vwapState: payload?.vwap_analysis?.price_vs_vwap,
+    oiDirection: direction,
+    spotPriceAtEntry: spotPrice,
+    strikeSelectionRationale: `${decision.engineType}: ${decision.signal} ${selectedStrike} ${decision.option_type}, target ${targetPoints}pts, sl ${slPoints}pts`,
+    strikeSelectionConfidence: ensembleConfidence,
+    alternativeStrike: openingStrike,
+    expectedHoldDuration: isSwingTrade ? '3-15min' : '30-120sec',
+    tradeType,
+    engineType: decision.engineType || 'ULTRA_SCALP',
+    market: decision.market || state.activeSymbolKey || 'NIFTY_50',
+    maxHoldSeconds: Number(decision.suggested_max_hold_seconds)
+      || Number(decision.max_hold_seconds)
+      || (isSwingTrade ? (settings.swingMaxHoldMinutes || 15) * 60 : settings.maxHoldTimeSeconds || 180),
+    aiEntryDecision: decision,
+    hybridEntrySnapshot: decision.hybridSnapshot || null,
+    hasReachedTarget: false,
+    maxPriceReached: premium,
+    futuresConfirmed: false,
+    futuresDirection: 'unknown',
+    futuresPremium: 0,
+    optionSecurityId: optionSecurityId || null,
+    liveFeedConnected: false,
+    lastPriceUpdate: new Date(),
+    priceUpdateSource: 'entry',
+    brokerageEnabled: settings.enableBrokerageCalculation || false,
+    aiSnapshots: [{
+      at: new Date(),
+      confidence: ensembleConfidence,
+      action: 'ENTER',
+      rationale: decision.reasoning,
+    }],
+  });
+
+  state.cooldownUntil = Date.now() + (settings.cooldownSec || 60) * 1000;
+
+  // Subscribe option to live feed for fast monitor reads
+  try {
+    if (optionSecurityId) {
+      const { instance: liveFeedProd } = require('./dhanLiveFeedProd.service');
+      const optionSegment = _optionSegmentForActive();
+      liveFeedProd.subscribe(
+        [{ exchangeSegment: optionSegment, securityId: optionSecurityId }],
+        'FULL'
+      );
+      trade.liveFeedConnected = true;
+      trade.priceUpdateSource = 'live_feed_subscribed';
+      await trade.save();
+      scalpingSocket.emitTradeUpdated(trade, state.session._id, 'live_feed_connected');
+    }
+  } catch (e) {
+    logger.warn({ err: e.message, tradeId: trade._id }, '[engine] fast-path: live feed subscribe failed');
+  }
+
+  logger.info({
+    tradeId: trade._id,
+    market: trade.market,
+    engineType: trade.engineType,
+    signal: trade.signal,
+    strike: trade.strike,
+    premium,
+    target: trade.target,
+    sl: trade.sl,
+    confidence: ensembleConfidence,
+  }, '[engine] 🚀 FAST-PATH TRADE OPENED');
+
+  scalpingSocket.emitTradeCreated(trade, state.session._id);
+
+  await engineLogger.logEvent({
+    sessionId: state.session._id,
+    eventType: 'trade_opened',
+    level: 'info',
+    message: `🚀 ${decision.engineType} ${trade.market}: ${trade.signal} @ ${trade.strike} (${decision.option_type}) for ₹${premium} | tgt ${targetPoints}pts | sl ${slPoints}pts | conf ${ensembleConfidence}`,
+    tradeId: trade._id,
+    data: {
+      signal: trade.signal,
+      strike: trade.strike,
+      market: trade.market,
+      engineType: trade.engineType,
+      entryPrice: premium,
+      quantity: qty,
+      sl: trade.sl,
+      target: trade.target,
+      confidence: ensembleConfidence,
+      reasoning: decision.reasoning,
+    },
+  });
+
   return trade;
 }
 

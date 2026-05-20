@@ -229,13 +229,19 @@ const ALGO_SETTINGS = {
   // ── Support Scalp Engine config (UT Bot + Supertrend + VWAP + EMA + RSI) ──
   // 5-confluence engine for higher-quality intraday scalps. All 5 must
   // align in trade direction. Defaults match user spec.
+  // CALIBRATED 2026-05-20:
+  //   • RSI longMin 55→52, shortMax 45→48 — captures setups where RSI is
+  //     just above neutral (53-54) in a confirmed trend; the previous
+  //     thresholds rejected ~10 close-call entries per session.
+  //   • EMA tolerance 0.01% — accept "aligned" when EMA9/EMA20 are tied
+  //     within tolerance (consensus from VWAP+Supertrend takes over).
   supportScalp: {
     primaryTf:        '3m',     // Trigger TF — 3m for balance
     confirmationTf:   '15m',    // Higher TF must agree
     utBot: { keyValue: 1.5, atrPeriod: 10 },  // User spec: balanced 3m setup
     supertrend: { atrPeriod: 10, multiplier: 2.5 },
-    ema:   { fastPeriod: 9, slowPeriod: 20 },
-    rsi:   { period: 14, longMin: 55, shortMax: 45 },
+    ema:   { fastPeriod: 9, slowPeriod: 20, tolerancePct: 0.01 },
+    rsi:   { period: 14, longMin: 52, shortMax: 48 },
     requireVwap:    true,
     requireSupertrend: true,
     requireEmaAlignment: true,

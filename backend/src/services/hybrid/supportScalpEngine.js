@@ -239,6 +239,14 @@ function decide({
   }
 
   // 4) EMA 9 vs EMA 20 on primary TF
+  // CALIBRATED 2026-05-20: pure ">" check rejected close-call setups where
+  // EMAs were within 0.01% (e.g. 23595.4 vs 23595.6 — 0.2 points apart).
+  // Now uses a small directional tolerance: "aligned" if EMA9 is on the
+  // RIGHT side of EMA20 by at least `emaTolerancePct` (default 0.01%) OR
+  // they're within tolerance AND VWAP+Supertrend already agree (consensus
+  // takes over from a tied EMA cross). Configurable via cfg.ema.tolerancePct.
+  const emaTolerancePct = Number(emaCfg.tolerancePct);
+  const tolFrac = Number.isFinite(emaTolerancePct) ? emaTolerancePct / 100 : 0.0001; // 0.01% default
   const closesPrimary = primary.map(c => c.c ?? c.close);
   const ema9  = _ema(closesPrimary, emaCfg.fastPeriod);
   const ema20 = _ema(closesPrimary, emaCfg.slowPeriod);
@@ -247,7 +255,14 @@ function decide({
   if (ema9.length && ema20.length) {
     lastEma9 = ema9[ema9.length - 1];
     lastEma20 = ema20[ema20.length - 1];
-    emaAligned = direction === 'bullish' ? lastEma9 > lastEma20 : lastEma9 < lastEma20;
+    const diffPct = Math.abs(lastEma9 - lastEma20) / Math.max(1, lastEma20);
+    if (direction === 'bullish') {
+      // Aligned if EMA9 is above EMA20 by any amount, OR EMAs are tied
+      // within tolerance (price action will resolve which side wins).
+      emaAligned = lastEma9 > lastEma20 || diffPct <= tolFrac;
+    } else {
+      emaAligned = lastEma9 < lastEma20 || diffPct <= tolFrac;
+    }
   }
   if (requireEmaAlign) {
     if (!ema9.length || !ema20.length) blockers.push('EMA warmup short');
