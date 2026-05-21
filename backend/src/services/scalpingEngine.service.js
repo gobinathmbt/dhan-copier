@@ -335,16 +335,34 @@ async function start({ authKey, settings, aiModel }) {
   }
 
   // ── Pre-load historical context for ALL enabled symbols ──────────
-  // Triggers an async backfill (NIFTY uses the institutional path,
-  // SENSEX uses the lightweight spot-only path). Doesn't block start —
-  // any data fetched lands in live-feed/ before the first prediction
-  // cycle finishes (60s) so the engines see real candle history.
+  // 2026-05-21: load past 7 trading days for every enabled symbol so the
+  // engines have proper warmup history (Supertrend ATR(14) on 15m needs
+  // ≥3 days; multi-day context needs ≥5). Each symbol uses its dedicated
+  // backfill path:
+  //   NIFTY_50 → historicalBackfill (full institutional: spot + chain + futures)
+  //   SENSEX   → sensexBackfill     (spot-only via getDhanProdData)
+  // Both fire-and-forget so engine start isn't blocked. The integrity
+  // guardian (now every 5s) keeps today's data fresh on top.
   try {
+    if (enabledSymbols.includes('NIFTY_50')) {
+      const histBackfill = require('./historicalBackfill.service');
+      // backfillRange walks back 7 trading days; backfillDay defaults to
+      // skipIfComplete=true so already-recorded folders aren't re-fetched.
+      histBackfill.backfillRange(7)
+        .then(r => logger.info({
+          symbol: 'NIFTY_50',
+          days: r.days?.length,
+          ok: r.days?.filter(d => d.ok).length,
+        }, '[engine] NIFTY backfill complete'))
+        .catch(err => logger.warn({ err: err.message }, '[engine] NIFTY backfill failed'));
+    }
     if (enabledSymbols.includes('SENSEX')) {
       const { backfillSensexRange } = require('./sensexBackfill.service');
-      // Fire-and-forget — the integrity guardian will also keep up later
-      backfillSensexRange({ days: 5, overwrite: false })
-        .then(r => logger.info({ days: r.days?.length }, '[engine] SENSEX backfill complete'))
+      backfillSensexRange({ days: 7, overwrite: false })
+        .then(r => logger.info({
+          symbol: 'SENSEX',
+          days: r.days?.length,
+        }, '[engine] SENSEX backfill complete'))
         .catch(err => logger.warn({ err: err.message }, '[engine] SENSEX backfill failed'));
     }
   } catch (e) {
@@ -374,12 +392,12 @@ async function start({ authKey, settings, aiModel }) {
   // Set session ID for JSON logger
   jsonEventLogger.setSessionId(session._id.toString());
 
-  // CALIBRATED 2026-05-19: start the live-feed integrity guardian — runs
-  // an immediate sweep (dedupe + synth missing higher-TF candles) and
-  // then every 60s while the session is live. Solves the duplicate-candle
-  // and missing-5m/15m issues observed in earlier live sessions.
+  // CALIBRATED 2026-05-21: start the live-feed integrity guardian — runs
+  // an immediate sweep (dedupe + API backfill + synth missing higher-TF
+  // candles) and then every 5s while the session is live. Per-file API
+  // cooldown (5s spot / 30s futures) prevents endpoint hammering.
   try {
-    liveFeedIntegrity.start({ intervalMs: 60_000 });
+    liveFeedIntegrity.start({ intervalMs: 5_000 });
   } catch (e) {
     logger.warn({ err: e.message }, '[engine] liveFeedIntegrity start failed');
   }

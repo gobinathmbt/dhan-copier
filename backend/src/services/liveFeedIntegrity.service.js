@@ -52,8 +52,13 @@ function _spotApiParamsForSymbol(symbolKey) {
 }
 
 // Throttle backfill — don't hammer the API. Per-key cooldown (per symbol).
+// 2026-05-21: Tuned down from 30s → 5s to support the new 5s sweeper
+// cadence. The Dhan production API tolerates this for charts/intraday
+// (≤5 calls/symbol/sec). For futures we keep a longer cooldown so we
+// don't hit the futures-specific rate limits.
 const _backfillLastAt = new Map();        // key: `${symbol}-${base}-${tf}` -> ms timestamp
-const BACKFILL_COOLDOWN_MS = 30_000;
+const BACKFILL_COOLDOWN_SPOT_MS    = 5_000;
+const BACKFILL_COOLDOWN_FUTURES_MS = 30_000;
 
 function _todayIstYYYYMMDD() {
   const ms = Date.now() + 5.5 * 60 * 60 * 1000;
@@ -169,7 +174,8 @@ async function backfillFromApi(folder, base, tf, dateStr, symbolKey) {
 
   const cooldownKey = `${symbolKey}-${base}-${tf}`;
   const last = _backfillLastAt.get(cooldownKey) || 0;
-  if (Date.now() - last < BACKFILL_COOLDOWN_MS) {
+  const cooldownMs = base === 'futures' ? BACKFILL_COOLDOWN_FUTURES_MS : BACKFILL_COOLDOWN_SPOT_MS;
+  if (Date.now() - last < cooldownMs) {
     return { fetched: 0, skipped: 'cooldown' };
   }
 
@@ -472,11 +478,13 @@ async function _runOnce(label) {
   }
 }
 
-function start({ intervalMs = 60_000 } = {}) {
+function start({ intervalMs = 5_000 } = {}) {
   if (_timer) return;
   // Run once immediately (don't block the caller — fire-and-forget)
   _runOnce('initial').catch(() => {});
-  // Periodic
+  // Periodic — every 5s during market hours so missing candles are
+  // filled within seconds, not a minute. The per-file cooldown
+  // (BACKFILL_COOLDOWN_MS) prevents API hammering even at 5s cadence.
   _timer = setInterval(() => {
     if (!_isMarketHours()) return;     // only run during market hours
     _runOnce('periodic').catch(() => {});

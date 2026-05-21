@@ -130,24 +130,45 @@ async function getCandles(authKey, params) {
     // different conventions; we accept both).
     const intervalMap = { '1': '1m', '5': '5m', '15': '15m', '25': '30m', '30': '30m' };
     const intervalStr = intervalMap[interval] || `${interval}m`;
-    
+    const tfSec = { '1m': 60, '5m': 300, '15m': 900, '30m': 1800 }[intervalStr] || 60;
+
     const candles = readCandlesFromFile(today, intervalStr, 'candles');
-    
+
     if (candles.length > 0) {
       // Filter by time range
-      const filtered = candles.filter(c => 
+      const filtered = candles.filter(c =>
         c.time >= startTime && c.time <= endTime
       );
-      
-      if (filtered.length > 0) {
+
+      // Determine if local data is FRESH ENOUGH. We need:
+      //   • the latest bar within (tfSec * 2) of "now", AND
+      //   • at least 90% of expected bars in the requested window.
+      // If either fails, fall through to the API so missing bars get filled.
+      const nowSec = Math.floor(Date.now() / 1000);
+      // IST session open today (09:15 IST = 03:45 UTC) — used so we don't
+      // over-count expected bars before the market opened.
+      const sessionOpenSec = (() => {
+        const ist = new Date(Date.now() + 5.5 * 3600 * 1000);
+        const y = ist.getUTCFullYear(), m = ist.getUTCMonth(), d = ist.getUTCDate();
+        return Math.floor(Date.UTC(y, m, d, 3, 45, 0) / 1000);
+      })();
+      const effectiveStart = Math.max(startTime, sessionOpenSec);
+      const effectiveEnd   = Math.min(endTime, nowSec - tfSec);
+      const expectedBars   = Math.max(1, Math.floor((effectiveEnd - effectiveStart) / tfSec) + 1);
+      const latestBar      = filtered.length ? filtered[filtered.length - 1].time : 0;
+      const isFresh        = latestBar > 0 && (nowSec - latestBar) <= tfSec * 2;
+      const isComplete     = filtered.length >= expectedBars * 0.9;
+
+      if (filtered.length > 0 && isFresh && isComplete) {
         logger.debug({
           source: 'live-feed-folder',
           interval: intervalStr,
           candleCount: filtered.length,
+          expectedBars,
           startTime,
           endTime,
         }, '[liveFeedDataProvider] Served candles from live-feed folder');
-        
+
         return {
           ok: true,
           data: {
@@ -156,6 +177,17 @@ async function getCandles(authKey, params) {
           },
         };
       }
+      // Local data is stale or sparse — fall through to API so the
+      // aggregator's recordCandles() can fill gaps. (Don't return empty;
+      // pass the API result back so the engine still gets a usable read.)
+      logger.debug({
+        source: 'live-feed-folder',
+        interval: intervalStr,
+        haveCount: filtered.length,
+        expectedBars,
+        latestBarAgeSec: latestBar ? (nowSec - latestBar) : null,
+        reason: !isFresh ? 'stale' : 'sparse',
+      }, '[liveFeedDataProvider] Local data insufficient — falling back to API');
     }
   }
   
