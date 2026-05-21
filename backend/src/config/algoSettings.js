@@ -99,8 +99,8 @@ const ALGO_SETTINGS = {
   // ============================================================
   lotSize: 65,                  // NIFTY lot size (fixed by exchange)
   minLots: 1,                   // Enter with 1 lot (65 qty) - CONSERVATIVE
-  maxLots: 2,                   // Max 1 lot only (reduced from 2 for strict risk control)
-  maxConcurrentTrades: 2,       // Maximum open positions at same time (kept at 1)
+  maxLots: 2,                   // Max 2 lots per trade
+  maxConcurrentTrades: 3,       // Maximum open positions PER SYMBOL (NIFTY 3 + SENSEX 3 = 6 max)
   cooldownSec: 3,              // Wait time between trades (increased from 5 for quality)
   
   // ============================================================
@@ -133,8 +133,8 @@ const ALGO_SETTINGS = {
   hybridMinScore: 55,               // Minimum hybrid composite score to allow entry (0-100)
   hybridMinGrade: 'C',              // Minimum grade: A/B/C/D/F (C = acceptable quality)
   executionMinScore: 50,            // Minimum score for actual order execution (vs just signalling)
-  maxTradesPerDay: 8,               // Hard cap on entries per IST calendar day
-  maxLossesPerDay: 2,               // Halt trading after this many losses in a day
+  maxTradesPerDay: 12,              // Hard cap on entries per IST calendar day per symbol (NIFTY 12 + SENSEX 12)
+  maxLossesPerDay: 3,               // Halt trading on a symbol after this many losses
   trapBlockThreshold: 80,           // Trap-detection score above which entry is blocked (0-100)
   enableHybridAIAdvisory: false,    // When true, hybrid engine calls AI for advisory confirmation
 
@@ -231,10 +231,12 @@ const ALGO_SETTINGS = {
   // align in trade direction. Defaults match user spec.
   // CALIBRATED 2026-05-20:
   //   • RSI longMin 55→52, shortMax 45→48 — captures setups where RSI is
-  //     just above neutral (53-54) in a confirmed trend; the previous
-  //     thresholds rejected ~10 close-call entries per session.
-  //   • EMA tolerance 0.01% — accept "aligned" when EMA9/EMA20 are tied
-  //     within tolerance (consensus from VWAP+Supertrend takes over).
+  //     just above neutral (53-54) in a confirmed trend.
+  //   • EMA tolerance 0.01% — accept "aligned" when EMAs are tied.
+  //   • targetMin/targetMax bumped to 15/22 — user requirement: only fire
+  //     when the validator projects ≥ 15-point premium move.
+  //   • slPtsMax 14→10 — tighter SL since we're only firing high-probability
+  //     setups; locks zero-loss tolerance with fast cut on any reversal.
   supportScalp: {
     primaryTf:        '3m',     // Trigger TF — 3m for balance
     confirmationTf:   '15m',    // Higher TF must agree
@@ -246,10 +248,38 @@ const ALGO_SETTINGS = {
     requireSupertrend: true,
     requireEmaAlignment: true,
     requireRsiFilter: true,
-    maxHoldSec: 240,
-    slPtsMin: 6, slPtsMax: 14,
-    targetMin: 8, targetMax: 20,
+    maxHoldSec: 300,           // 5 min max hold (was 240)
+    slPtsMin: 6, slPtsMax: 10, // tighter SL — protect zero-loss target
+    targetMin: 15, targetMax: 22, // 15pt minimum target (was 8/20)
     sizingFactor: 0.7,
+  },
+
+  // ── 15-Point Guarantee Validator (2026-05-20) ──────────────────────────
+  // Pre-fire validator that's called AFTER the 5 confluence factors agree.
+  // Its job: only fire when the engine can realistically capture ≥15pts
+  // of premium move given current option microstructure.
+  supportScalpValidator: {
+    minDeltaAbs:    0.40,       // Min |delta| — need ITM-ish for fast move
+    minVolSpikeMul: 1.5,        // Current 5m vol must be ≥1.5× 20-bar avg
+    minIv:          40,         // Min IV% — too low means no expected move
+    maxIv:          90,         // Max IV% — too high means imminent crush
+    maxSpreadPct:   1.0,        // Max bid-ask spread as % of mid
+    maxThetaPct:    5.0,        // Max theta/premium per day (decay rate)
+    minAtrPts:      6,          // Min ATR(5m) — market not dead
+    requireMtfUtBot: true,      // Need ≥3 of 4 UT Bot TFs aligned (1m/3m/5m/15m)
+  },
+
+  // ── Support Scalp EXIT Validator (2026-05-20) ──────────────────────────
+  // Mirrors the entry validator — re-checks the same microstructure factors
+  // continuously to exit BEFORE SL hits if the trend reverses. Zero-loss
+  // tolerance philosophy: if 2 of 6 factors flip, cut and re-deploy.
+  supportScalpExit: {
+    minHoldSec:        30,      // Below this only hard SL exits allowed
+    maxHoldSec:        300,     // Hard ceiling regardless of P&L
+    peakGiveBackPct:   0.50,    // Exit if peak gave back ≥50%
+    minProfitToTrail:  10,      // Lift SL to breakeven once +10pts profit
+    minTfsAligned:     2,       // Exit if <2 of 4 TFs still in direction
+    maxFailedFactors:  2,       // Exit if 2+ of 6 microstructure factors flip
   },
 
   // ── Trading symbols (for multi-symbol routing) ─────────────────────────

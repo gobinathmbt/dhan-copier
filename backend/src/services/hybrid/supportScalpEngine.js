@@ -186,6 +186,11 @@ function decide({
   vwap       = null,
   spotPrice  = null,
   atr        = null,
+  // NEW (2026-05-20) — extras for the 15-point pre-fire validator
+  primaryStrikes = null,         // option chain rows
+  atmStrike  = null,             // current ATM strike
+  futuresData = null,            // futures premium / lead-lag (best-effort)
+  market     = null,             // active symbol key (NIFTY_50 / SENSEX)
   settings   = {},
 } = {}) {
   const cfg = settings?.supportScalp || {};
@@ -313,6 +318,42 @@ function decide({
       pillars: { utBot: utRead, supertrend: stPrimary, ema9: lastEma9, ema20: lastEma20, rsi: rsiVal, vwap: vwapPos },
     };
   }
+
+  // ════════════════════════════════════════════════════════════════════
+  // 15-POINT GUARANTEE VALIDATOR (2026-05-20)
+  // ════════════════════════════════════════════════════════════════════
+  // The 5 confluence factors above (UT Bot + VWAP + Supertrend + EMA + RSI)
+  // confirm DIRECTION quality. The validator below confirms TARGET quality —
+  // can we realistically capture ≥ 15 points of premium given current ATR,
+  // delta, gamma, IV, OI flow, volume, bid-ask spread?
+  //
+  // Settings:
+  //   settings.supportScalp.targetMin (default 15) → required premium move
+  //   settings.supportScalpValidator.* → per-check thresholds (delta, IV, etc.)
+  // ────────────────────────────────────────────────────────────────────
+  const target15 = Number(cfg.targetMin) || 15;
+  const validator = require('./supportScalpValidator');
+  const v = validator.validate({
+    direction,
+    candles1m, candles3m: primary, candles5m, candles15m,
+    primaryStrikes: Array.isArray(primaryStrikes) ? primaryStrikes : [],
+    atmStrike,
+    targetPts: target15,
+    settings,
+  });
+  if (!v.ok) {
+    return {
+      fired: false, signal: null, direction,
+      reasoning: `support: ${reasons.join(' | ')} BLOCKED by 15pt validator: ${v.blockers.join('; ')}`,
+      pillars: {
+        utBot: utRead, supertrend: stPrimary, ema9: lastEma9, ema20: lastEma20,
+        rsi: rsiVal, vwap: vwapPos,
+        validator: { ok: false, expected_pts: v.expected_pts, factors: v.factors },
+      },
+    };
+  }
+  // Validator passed — record the expected premium move + factor breakdown.
+  reasons.push(`✓15pt-validator (expected ${v.expected_pts}pts, atr5m=${v.factors.atr5m}, delta=${v.factors.greeks?.delta?.toFixed(2)}, vol=${v.factors.volSpike5m}×, spread=${v.factors.spreadPct}%)`);
 
   // ── Sizing ───────────────────────────────────────────────────────────
   const atrPts = _safe(atr?.atr_5m) || 12;

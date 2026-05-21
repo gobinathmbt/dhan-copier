@@ -489,35 +489,71 @@ async function getStatus() {
   return { running: true, session: fresh, openTrades };
 }
 
+// Re-entrancy guard for the OUTER prediction cycle. setInterval will fire
+// a new cycle every 60s; if a previous one is still mid-flight (multiple
+// symbols × heavy aggregator + monitor work), the new one would race
+// against the slot swap and starve the second symbol. This mutex keeps
+// only one outer iteration running at a time.
+let _cycleInFlight = false;
+
 async function runPredictionCycle() {
   if (!state.session) return;
-  // Iterate every enabled symbol. Each symbol has its own busy/cooldown/
-  // direction-lock slot, so NIFTY's prediction can't block SENSEX's.
-  let symbols = [];
-  try {
-    const symbolRegistry = require('../config/symbolRegistry');
-    symbols = symbolRegistry.getEnabledSymbols(state.session.settings).map(s => s.key);
-  } catch (_) { symbols = ['NIFTY_50']; }
-  if (!symbols.length) symbols = ['NIFTY_50'];
-  _ensureSymbolSlots(symbols);
-
-  for (const key of symbols) {
-    if (!state.session) return;
-    _useSymbolSlot(key);
-    try {
-      await _runPredictionCycleForActiveSymbol();
-    } catch (e) {
-      logger.error({ err: e.message, symbol: key }, '[engine] prediction cycle error for symbol');
-      // Make sure busy is cleared so this symbol isn't permanently locked
-      state.busy = false;
-    }
+  if (_cycleInFlight) {
+    logger.info('[engine] outer cycle skipped — previous iteration still running');
+    return;
   }
-  // Persist the last symbol's slot back so it doesn't get overwritten
-  _flushAliasToSlot();
+  _cycleInFlight = true;
+  try {
+    // Iterate every enabled symbol. Each symbol has its own busy/cooldown/
+    // direction-lock slot, so NIFTY's prediction can't block SENSEX's.
+    let symbols = [];
+    try {
+      const symbolRegistry = require('../config/symbolRegistry');
+      symbols = symbolRegistry.getEnabledSymbols(state.session.settings).map(s => s.key);
+    } catch (_) { symbols = ['NIFTY_50']; }
+    if (!symbols.length) symbols = ['NIFTY_50'];
+    _ensureSymbolSlots(symbols);
+
+    for (const key of symbols) {
+      if (!state.session) return;
+      _useSymbolSlot(key);
+      logger.info({
+        symbol: key,
+        activeSymbolKey: state.activeSymbolKey,
+        busy: state.busy,
+        cooldownRemainMs: Math.max(0, state.cooldownUntil - Date.now()),
+      }, '[engine] cycle iteration: starting symbol');
+      try {
+        await _runPredictionCycleForActiveSymbol();
+      } catch (e) {
+        logger.error({
+          err: e.message,
+          symbol: key,
+          stack: e.stack?.slice(0, 500),
+        }, '[engine] prediction cycle error for symbol');
+        // Make sure busy is cleared so this symbol isn't permanently locked
+        state.busy = false;
+      }
+    }
+    // Persist the last symbol's slot back so it doesn't get overwritten
+    _flushAliasToSlot();
+  } finally {
+    _cycleInFlight = false;
+  }
 }
 
 async function _runPredictionCycleForActiveSymbol() {
-  if (!state.session || state.busy) return;
+  if (!state.session) return;
+  // NOTE: state.busy guards against re-entrant runs of the SAME symbol's
+  // cycle (e.g. a 5-second-running cycle gets re-triggered before it
+  // finishes). Since each symbol has its own slot, busy=true on NIFTY
+  // doesn't block SENSEX (the slot loader swaps in SENSEX's busy=false).
+  if (state.busy) {
+    logger.info({
+      market: state.activeSymbolKey,
+    }, '[engine] cycle skipped: previous run still in progress for this symbol');
+    return;
+  }
   state.busy = true;
   try {
     const market = isMarketOpen();
@@ -545,6 +581,11 @@ async function _runPredictionCycleForActiveSymbol() {
 
     // ── ENTRY GATES ───────────────────────────────────────────────────────────
 
+    logger.debug({
+      market: state.activeSymbolKey,
+      cycle: state.session.cycleCount,
+    }, '[engine] cycle gate-pass start');
+
     // 1. Max concurrent trades — applied PER SYMBOL so NIFTY trades don't
     //    block SENSEX entries (and vice versa). The session-level limit
     //    is interpreted as a per-market limit when running multiple symbols.
@@ -553,10 +594,22 @@ async function _runPredictionCycleForActiveSymbol() {
       status: 'open',
       market: state.activeSymbolKey,
     });
-    if (openCount >= (settings.maxConcurrentTrades || 1)) return;
+    if (openCount >= (settings.maxConcurrentTrades || 1)) {
+      logger.info({
+        market: state.activeSymbolKey, openCount,
+        max: settings.maxConcurrentTrades,
+      }, '[engine] gate-1 BLOCKED: max concurrent trades reached for symbol');
+      return;
+    }
 
-    // 2. Cooldown gate
-    if (Date.now() < state.cooldownUntil) return;
+    // 2. Cooldown gate (per-symbol — slot-scoped)
+    if (Date.now() < state.cooldownUntil) {
+      const remainMs = state.cooldownUntil - Date.now();
+      logger.debug({
+        market: state.activeSymbolKey, remainMs,
+      }, '[engine] gate-2: cooldown active for symbol');
+      return;
+    }
 
     // 3. Daily loss circuit breaker
     const lossPct =
@@ -569,50 +622,70 @@ async function _runPredictionCycleForActiveSymbol() {
     }
 
     // 4. Open trades in loss gate — don't add new trades when existing ones are losing
-    // If any open trade is down more than 3pts, pause new entries until it resolves
+    // CALIBRATED 2026-05-20: scope to ACTIVE MARKET only. Previously this
+    // checked all open trades sessionwide, so a losing NIFTY trade would
+    // block SENSEX entries (and vice versa). Now each market has its own
+    // "no new entries while existing one is bleeding" gate.
     if (openCount > 0) {
-      const openTrades = await ScalpingTrade.find({
+      const openTradesThisMarket = await ScalpingTrade.find({
         sessionId: state.session._id,
         status: 'open',
+        market: state.activeSymbolKey,
       }).lean();
-      const losingTrades = openTrades.filter(t => {
+      const losingTrades = openTradesThisMarket.filter(t => {
         const pnlPts = (t.currentPrice || t.entryPrice) - t.entryPrice;
         return pnlPts <= -3;
       });
       if (losingTrades.length > 0) {
         logger.warn({
+          market: state.activeSymbolKey,
           losingTrades: losingTrades.length,
           openCount,
-        }, '[engine] Open trades in loss (>-3pts) — pausing new entries until resolved');
+        }, '[engine] gate-4: open trade in loss (>-3pts) for this symbol — pausing new entries');
         return;
       }
     }
 
-    // 5. DUPLICATE STRIKE PREVENTION — Don't open same strike+side if already open
-    // This prevents opening both CE and PE at same strike, or multiple of same side
-    if (openCount > 0) {
-      const openTrades = await ScalpingTrade.find({
-        sessionId: state.session._id,
-        status: 'open',
-      }).lean();
-      
-      // Check if we already have an open trade at any nearby strike (±50 points)
-      const hasNearbyTrade = openTrades.some(t => {
-        return Math.abs(t.strike - atmStrike) <= 50;
-      });
-      
-      if (hasNearbyTrade) {
-        logger.warn({
-          atmStrike,
-          openStrikes: openTrades.map(t => ({ strike: t.strike, signal: t.signal })),
-        }, '[engine] Already have open trade at nearby strike — preventing duplicate entry');
-        return;
-      }
-    }
+    // 5. DUPLICATE STRIKE PREVENTION — moved AFTER buildPayload so we
+    //    have a fresh atmStrike. Now in the proper place below.
+    //    (Gate moved to after `const { ... atmStrike ... } = await aggregator.buildPayload()`)
 
     // Get current market data
     const { payload, atmStrike, atmCallLtp, atmPutLtp, atmCallSymbol, atmPutSymbol, expiry } =
       await aggregator.buildPayload(state.authKey);
+
+    // 5. DUPLICATE STRIKE PREVENTION — Don't open same strike+side if already open.
+    // Scoped to the ACTIVE MARKET so a NIFTY trade at 23600 doesn't block a
+    // SENSEX trade at 75100 (and vice versa).
+    if (openCount > 0) {
+      const openTradesThisMarket = await ScalpingTrade.find({
+        sessionId: state.session._id,
+        status: 'open',
+        market: state.activeSymbolKey,
+      }).lean();
+
+      // Strike-step varies by symbol (NIFTY=50, SENSEX=100); use ±1 step
+      let strikeStep = 50;
+      try {
+        const symbolRegistry = require('../config/symbolRegistry');
+        const meta = symbolRegistry.getSymbol(state.activeSymbolKey);
+        if (Number.isFinite(meta?.strikeStep)) strikeStep = meta.strikeStep;
+      } catch (_) {}
+
+      const hasNearbyTrade = openTradesThisMarket.some(t => {
+        return Math.abs(t.strike - atmStrike) <= strikeStep;
+      });
+
+      if (hasNearbyTrade) {
+        logger.warn({
+          market: state.activeSymbolKey,
+          atmStrike,
+          strikeStep,
+          openStrikes: openTradesThisMarket.map(t => ({ strike: t.strike, signal: t.signal })),
+        }, '[engine] gate-5: already have open trade at nearby strike for this symbol — preventing duplicate');
+        return;
+      }
+    }
 
     // ════════════════════════════════════════════════════════════════════
     // ENGINE ROUTING — _ultraOnly fast path

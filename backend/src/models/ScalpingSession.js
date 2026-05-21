@@ -25,10 +25,9 @@ const ScalpingSessionSchema = new mongoose.Schema(
 
       // ── LOT MANAGEMENT ──────────────────────────────────────────────────
       minLots: { type: Number, default: 1 },
-      maxLots: { type: Number, default: 3 },              // KEPT at 3 - reasonable maximum
-
+      maxLots: { type: Number, default: 3 },              // Max lots per trade
       // ── ANTI-OVERTRADING ────────────────────────────────────────────────
-      maxConcurrentTrades: { type: Number, default: 2 },  // REDUCED from 1 to 2 - allow some diversification
+      maxConcurrentTrades: { type: Number, default: 3 },  // PER-SYMBOL cap (NIFTY 3 + SENSEX 3 = 6 total)
       cooldownSec: { type: Number, default: 120 },        // INCREASED from 30 - prevent overtrading
 
       // ── IMPROVED RISK MANAGEMENT ────────────────────────────────────────
@@ -124,10 +123,12 @@ const ScalpingSessionSchema = new mongoose.Schema(
 
       // ── SUPPORT SCALP ENGINE (UT+Supertrend+VWAP+EMA+RSI confluence) ─
       // CALIBRATED 2026-05-20:
-      //   • RSI longMin 55→52, shortMax 45→48 — captures setups where RSI
-      //     is just above neutral (53-54) in a confirmed trend.
-      //   • EMA tolerancePct 0.01% — accept "aligned" when EMAs are tied
-      //     within tolerance (consensus from VWAP+Supertrend takes over).
+      //   • RSI longMin 55→52, shortMax 45→48
+      //   • EMA tolerancePct 0.01%
+      //   • targetMin 15 / targetMax 22 — 15-point guarantee
+      //   • slPtsMax 14→10 — tighter cut on reversal
+      //   • Pre-fire validator (see supportScalpValidator) requires ATR /
+      //     delta / IV / vol / OI / spread all confirm ≥15pt achievable
       supportScalp: { type: mongoose.Schema.Types.Mixed, default: () => ({
         primaryTf: '3m', confirmationTf: '15m',
         utBot: { keyValue: 1.5, atrPeriod: 10 },
@@ -136,8 +137,24 @@ const ScalpingSessionSchema = new mongoose.Schema(
         rsi:   { period: 14, longMin: 52, shortMax: 48 },
         requireVwap: true, requireSupertrend: true,
         requireEmaAlignment: true, requireRsiFilter: true,
-        maxHoldSec: 240, slPtsMin: 6, slPtsMax: 14,
-        targetMin: 8, targetMax: 20, sizingFactor: 0.7,
+        maxHoldSec: 300, slPtsMin: 6, slPtsMax: 10,
+        targetMin: 15, targetMax: 22, sizingFactor: 0.7,
+      }) },
+
+      // ── 15-Point Guarantee Validator (2026-05-20) ──────────────────
+      supportScalpValidator: { type: mongoose.Schema.Types.Mixed, default: () => ({
+        minDeltaAbs: 0.40, minVolSpikeMul: 1.5,
+        minIv: 40, maxIv: 90, maxSpreadPct: 1.0,
+        maxThetaPct: 5.0, minAtrPts: 6, requireMtfUtBot: true,
+      }) },
+
+      // ── Support Scalp EXIT Validator (2026-05-20) ──────────────────
+      // Mirrors the entry validator — re-checks the same microstructure
+      // factors mid-trade. If 2+ of 6 flip, exit fast (zero-loss tolerance).
+      supportScalpExit: { type: mongoose.Schema.Types.Mixed, default: () => ({
+        minHoldSec: 30, maxHoldSec: 300,
+        peakGiveBackPct: 0.50, minProfitToTrail: 10,
+        minTfsAligned: 2, maxFailedFactors: 2,
       }) },
 
       // ── TRADING SYMBOLS (NEW 2026-05-19) ─────────────────────────────

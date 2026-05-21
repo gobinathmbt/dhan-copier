@@ -5,9 +5,9 @@
  * the trade's `engineType` field (stamped at entry by the master entry).
  *
  *   trade.engineType === 'ULTRA_SCALP'   → ultraScalp + runnerExitEngine
- *   trade.engineType === 'SUPPORT_SCALP' → supportScalp + runnerExitEngine
- *                                          (same exit logic, different
- *                                           SL/target/maxHold from entry)
+ *   trade.engineType === 'SUPPORT_SCALP' → supportScalpExitValidator
+ *                                          (full microstructure re-check —
+ *                                           same data depth as entry)
  *   trade.engineType === 'CORE'          → hybridMonitorEngine (full
  *                                          institutional decay + adaptive
  *                                          + state machine)
@@ -17,6 +17,7 @@
  */
 
 const runnerExitEngine = require('./runnerExitEngine');
+const supportScalpExitValidator = require('./supportScalpExitValidator');
 
 // Lazy-required heavy deps
 let _coreMonitor = null;
@@ -43,6 +44,43 @@ function _hold(reason, source) {
 function _trail(newSl, reason, source) {
   return { action: 'TRAIL_SL', new_sl: newSl, add_lots: null, confidence: 9,
            reasoning: reason, exit_urgency: 'soft', source };
+}
+
+/** Build 3m candles from 1m, IST-aligned, only closed bars. Mirrors the
+ *  entry path's _build3m so the exit validator sees the same buckets. */
+const _IST_OFFSET_SEC = 5 * 3600 + 30 * 60;
+function _build3m(c1m) {
+  if (!Array.isArray(c1m) || c1m.length < 3) return [];
+  const intervalSec = 180;
+  const groups = new Map();
+  for (const c of c1m) {
+    const t = Number(c.t ?? c.time);
+    if (!Number.isFinite(t)) continue;
+    const tIst = t + _IST_OFFSET_SEC;
+    const bucketIst = Math.floor(tIst / intervalSec) * intervalSec;
+    const bucketUtc = bucketIst - _IST_OFFSET_SEC;
+    if (!groups.has(bucketUtc)) groups.set(bucketUtc, []);
+    groups.get(bucketUtc).push(c);
+  }
+  const nowSec = Math.floor(Date.now() / 1000);
+  const out = [];
+  for (const [bucketStart, bars] of groups) {
+    const bucketEnd = bucketStart + intervalSec;
+    if (bucketEnd > nowSec) continue;
+    bars.sort((a, b) => Number(a.t ?? a.time) - Number(b.t ?? b.time));
+    const o = bars[0].o ?? bars[0].open;
+    const cl = bars[bars.length - 1].c ?? bars[bars.length - 1].close;
+    let h = -Infinity, l = Infinity, v = 0;
+    for (const b of bars) {
+      const bh = b.h ?? b.high, bl = b.l ?? b.low, bv = b.v ?? b.volume ?? 0;
+      if (Number.isFinite(bh) && bh > h) h = bh;
+      if (Number.isFinite(bl) && bl < l) l = bl;
+      v += bv;
+    }
+    out.push({ o, h, l, c: cl, v, t: bucketStart });
+  }
+  out.sort((a, b) => a.t - b.t);
+  return out;
 }
 
 /**
@@ -73,6 +111,57 @@ async function decide(args) {
         message: e.message, data: { err: e.message },
       });
       return _hold(`core monitor error: ${e.message}`, 'master:core_error');
+    }
+  }
+
+  // ── SUPPORT_SCALP — dedicated microstructure-aware exit validator ────
+  // The entry was earned by 9 microstructure factors agreeing. Now we
+  // continuously re-verify those factors. If 2+ flip, exit fast.
+  if (engineType === 'SUPPORT_SCALP') {
+    try {
+      // Build per-TF candle arrays from the aggregator payload.
+      const payload = args?.aggregator?.payload || {};
+      const candles = payload?.candles || {};
+      const candles1m  = candles['1m']  || [];
+      const candles5m  = candles['5m']  || [];
+      const candles15m = candles['15m'] || [];
+      // 3m built from 1m on the fly (same as entry side)
+      const candles3m  = _build3m(candles1m);
+
+      const exitDecision = supportScalpExitValidator.decide({
+        trade,
+        aggregator: args.aggregator,
+        candles1m, candles3m, candles5m, candles15m,
+        settings,
+      });
+
+      // Hybrid logger for visibility — same shape as entry events
+      hybridLogger.info({
+        sessionId: trade.sessionId, tradeId: trade._id,
+        event: 'master_support_exit',
+        message: exitDecision.reasoning,
+        data: {
+          action: exitDecision.action,
+          source: exitDecision.source,
+          factors: exitDecision.factors,
+        },
+      });
+
+      // Translate to the action shape master monitor returns
+      if (exitDecision.action === 'EXIT') {
+        return _exit(exitDecision.reasoning, exitDecision.source);
+      }
+      if (exitDecision.action === 'TRAIL_SL') {
+        return _trail(exitDecision.new_sl, exitDecision.reasoning, exitDecision.source);
+      }
+      return _hold(exitDecision.reasoning, exitDecision.source);
+    } catch (e) {
+      hybridLogger.warn({
+        sessionId: trade.sessionId, tradeId: trade._id,
+        event: 'master_support_exit_error',
+        message: e.message, data: { err: e.message, stack: e.stack?.slice(0, 400) },
+      });
+      // Fall through to generic runner exit as safety net
     }
   }
 

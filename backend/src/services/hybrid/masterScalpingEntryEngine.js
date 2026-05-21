@@ -145,6 +145,15 @@ async function decide(params) {
       const sup = supportScalpEngine.decide({
         candles1m, candles3m, candles5m, candles15m,
         vwap, spotPrice, atr: { atr_5m: volatilityRegime?.atr5m },
+        // EXTRAS for 15-point target validation (added 2026-05-20):
+        // Pass the full option chain + futures + symbol metadata so the
+        // engine can verify with delta×ATR estimates, OI flow, IV health,
+        // bid/ask spread, volume spike — all the option-microstructure
+        // data Dhan's chain endpoint provides.
+        primaryStrikes,
+        atmStrike,
+        futuresData,
+        market,
         settings,
       });
       hybridLogger.info({
