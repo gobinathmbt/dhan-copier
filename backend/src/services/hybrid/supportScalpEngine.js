@@ -202,7 +202,7 @@ function decide({
   // Each factor has a weight; total threshold determines pass. Factors
   // can vote AGAINST the trade (negative weight) when strongly opposite.
   const scoring = cfg.scoring || {};
-  const minScore        = _safe(scoring.minScore,        60);   // Pass threshold (0-100)
+  const minScore        = _safe(scoring.minScore,        70);   // Pass threshold (0-100)
   const wUtBot          = _safe(scoring.wUtBot,          30);   // UT Bot trigger (mandatory)
   const wMtfTrend       = _safe(scoring.wMtfTrend,       20);   // 5m+15m trend confirmation
   const wSupertrend     = _safe(scoring.wSupertrend,     15);   // Supertrend on primary TF
@@ -270,6 +270,11 @@ function decide({
   }
 
   // 3) Supertrend on primary TF — bonus only
+  // CALIBRATED 2026-05-21: penalty for opposite Supertrend reduced from
+  // -50% to -20% of weight. Supertrend is a SLOW trailing stop by design;
+  // it commonly stays "green" for 5-10 minutes after a real bearish flip
+  // begins on faster indicators. We don't want it to drag a strong UT
+  // Bot + EMA + RSI setup below threshold just because it hasn't caught up.
   const stPrimary = _supertrend(
     primary.map(c => ({ h: c.h ?? c.high, l: c.l ?? c.low, c: c.c ?? c.close })),
     stCfg.atrPeriod, stCfg.multiplier
@@ -282,11 +287,12 @@ function decide({
         reasons.push(`Supertrend ${stPrimary.trend} [+${wSupertrend}]`);
         detail.supertrend = { trend: stPrimary.trend, weight: wSupertrend, contribution: wSupertrend };
       } else {
-        // Supertrend opposite is a SOFT penalty (it flips late by design)
-        score -= Math.floor(wSupertrend * 0.5);
+        // Supertrend opposite — small penalty (it flips late by design)
+        const penalty = Math.floor(wSupertrend * 0.2);
+        score -= penalty;
         oppositeCount++;
-        reasons.push(`Supertrend ${stPrimary.trend} (slow flip) [-${Math.floor(wSupertrend * 0.5)}]`);
-        detail.supertrend = { trend: stPrimary.trend, weight: wSupertrend, contribution: -Math.floor(wSupertrend * 0.5) };
+        reasons.push(`Supertrend ${stPrimary.trend} (slow flip) [-${penalty}]`);
+        detail.supertrend = { trend: stPrimary.trend, weight: wSupertrend, contribution: -penalty };
       }
     }
   }

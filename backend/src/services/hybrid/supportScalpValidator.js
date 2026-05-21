@@ -173,25 +173,39 @@ function validate({
   }
 
   // ── C/D/E/F/G. Option chain microstructure ───────────────────────────
+  // ROBUST 2026-05-21: Support BOTH chain shapes:
+  //   API-shape:    row.call / row.put  with row.call.greeks.delta
+  //   Flat-shape:   row.ce / row.pe     with row.ce.delta (top level)
+  // The engine receives chains from multiple sources (live API, folder
+  // fallback, futures aggregator) — be liberal in what we accept.
   const atmRow = _findATMRow(primaryStrikes, atmStrike);
   const isCE = direction === 'bullish';
-  const opt   = isCE ? atmRow?.call : atmRow?.put;
-  const oppOpt = isCE ? atmRow?.put  : atmRow?.call;
+  // Try API-shape first, fall back to flat-shape
+  const optApi = isCE ? atmRow?.call : atmRow?.put;
+  const optFlat = isCE ? atmRow?.ce  : atmRow?.pe;
+  const opt    = optApi || optFlat;
+  const oppOpt = isCE ? (atmRow?.put ?? atmRow?.pe) : (atmRow?.call ?? atmRow?.ce);
 
   if (!opt) {
-    blockers.push(`Option row missing for ATM ${atmStrike}`);
+    blockers.push(`Option row missing for ATM ${atmStrike} (chain has ${primaryStrikes?.length || 0} strikes)`);
     return { ok: false, expected_pts: 0, blockers, factors };
   }
 
-  // Greeks
-  const delta = Math.abs(_safe(opt?.greeks?.delta));
-  const theta = Math.abs(_safe(opt?.greeks?.theta));
-  const gamma = _safe(opt?.greeks?.gamma);
-  const vega  = _safe(opt?.greeks?.vega);
+  // Greeks — try nested first (API), fallback to flat (recorded)
+  const _greekDelta = opt?.greeks?.delta ?? opt?.delta;
+  const _greekTheta = opt?.greeks?.theta ?? opt?.theta;
+  const _greekGamma = opt?.greeks?.gamma ?? opt?.gamma;
+  const _greekVega  = opt?.greeks?.vega  ?? opt?.vega;
+  const delta = Math.abs(_safe(_greekDelta));
+  const theta = Math.abs(_safe(_greekTheta));
+  const gamma = _safe(_greekGamma);
+  const vega  = _safe(_greekVega);
   const ltp   = _safe(opt?.ltp);
   const oi    = _safe(opt?.oi);
-  const oiChg = _safe(opt?.oiChange);
-  const vol   = _safe(opt?.volume);
+  // OI change: API uses oiChange, flat uses oiChg
+  const oiChg = _safe(opt?.oiChange ?? opt?.oiChg);
+  // Volume: API uses volume, flat uses vol
+  const vol   = _safe(opt?.volume ?? opt?.vol);
   const iv    = _safe(opt?.iv);
   const bid   = _safe(opt?.bid);
   const ask   = _safe(opt?.ask);
@@ -254,7 +268,7 @@ function validate({
   // that's bullish for BUY_CE. If opposite-side OI is DECREASING (PE unwinding for CE),
   // that's also bullish.
   const sameOiChg = oiChg;
-  const oppOiChg  = _safe(oppOpt?.oiChange);
+  const oppOiChg  = _safe(oppOpt?.oiChange ?? oppOpt?.oiChg);
   factors.oiFlow = { sameOiChg, oppOiChg };
   // For bullish: want sameOiChg > 0 (call buyers piling in) OR oppOiChg < 0 (put unwinding)
   // For bearish: want sameOiChg > 0 (put buyers piling in) OR oppOiChg < 0 (call unwinding)

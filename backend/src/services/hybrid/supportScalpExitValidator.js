@@ -249,8 +249,9 @@ function decide({
   const optionChain = aggregator?.optionChain || payload?.options_chain || {};
   const strikes = optionChain?.strikes || [];
   const atmRow = _findATMRow(strikes, _safe(trade?.strike));
-  const opt = isCE ? atmRow?.call : atmRow?.put;
-  const oppOpt = isCE ? atmRow?.put : atmRow?.call;
+  // Robust 2026-05-21: support both API-shape (call/put) and flat-shape (ce/pe)
+  const opt = isCE ? (atmRow?.call ?? atmRow?.ce) : (atmRow?.put ?? atmRow?.pe);
+  const oppOpt = isCE ? (atmRow?.put ?? atmRow?.pe) : (atmRow?.call ?? atmRow?.ce);
 
   const microFlips = [];
 
@@ -281,8 +282,8 @@ function decide({
   }
 
   // 5d. OI flow reversal — same-side OI dropping AND opposite-side OI rising
-  const sameOiChg = _safe(opt?.oiChange);
-  const oppOiChg  = _safe(oppOpt?.oiChange);
+  const sameOiChg = _safe(opt?.oiChange ?? opt?.oiChg);
+  const oppOiChg  = _safe(oppOpt?.oiChange ?? oppOpt?.oiChg);
   factors.oiFlow = { sameOiChg, oppOiChg };
   if (sameOiChg < 0 && oppOiChg > 0) {
     microFlips.push(`OI reversed: same ${sameOiChg.toFixed(0)} (down), opposite ${oppOiChg.toFixed(0)} (up)`);
