@@ -198,10 +198,20 @@ function decide({
   const stCfg     = cfg.supertrend || { atrPeriod: 10, multiplier: 2.5 };
   const emaCfg    = cfg.ema        || { fastPeriod: 9, slowPeriod: 20 };
   const rsiCfg    = cfg.rsi        || { period: 14, longMin: 55, shortMax: 45 };
-  const requireVwap        = cfg.requireVwap        !== false;
-  const requireSupertrend  = cfg.requireSupertrend  !== false;
-  const requireEmaAlign    = cfg.requireEmaAlignment !== false;
-  const requireRsiFilter   = cfg.requireRsiFilter   !== false;
+  // CALIBRATED 2026-05-21: scoring system replaces strict 5-of-5 binary.
+  // Each factor has a weight; total threshold determines pass. Factors
+  // can vote AGAINST the trade (negative weight) when strongly opposite.
+  const scoring = cfg.scoring || {};
+  const minScore        = _safe(scoring.minScore,        60);   // Pass threshold (0-100)
+  const wUtBot          = _safe(scoring.wUtBot,          30);   // UT Bot trigger (mandatory)
+  const wMtfTrend       = _safe(scoring.wMtfTrend,       20);   // 5m+15m trend confirmation
+  const wSupertrend     = _safe(scoring.wSupertrend,     15);   // Supertrend on primary TF
+  const wEmaAlign       = _safe(scoring.wEmaAlign,       10);   // EMA9>EMA20
+  const wRsi            = _safe(scoring.wRsi,            10);   // RSI in trend zone
+  const wVwap           = _safe(scoring.wVwap,           10);   // VWAP alignment
+  const wMomentum       = _safe(scoring.wMomentum,       15);   // Recent momentum (last 3 1m closes)
+  const allowOppositeOf = _safe(scoring.allowOppositeOf, 1);    // Max 1 factor strongly against
+
   const primaryTf = cfg.primaryTf || '3m';
   const confirmTf = cfg.confirmationTf || '15m';
 
@@ -214,108 +224,191 @@ function decide({
     return { fired: false, reasoning: `support: insufficient ${primaryTf} candles (${primary?.length || 0})`, pillars: {} };
   }
 
-  // 1) UT Bot trigger
+  // 1) UT Bot trigger — MANDATORY (entry trigger)
   const utRead = _utBotRead(primary, utCfg);
   if (utRead.warmupShort || (utRead.signalBar !== 'buy' && utRead.signalBar !== 'sell')) {
     return { fired: false, reasoning: `support: no UT Bot cross on ${primaryTf}`, pillars: { utBot: utRead } };
   }
   const direction = utRead.signalBar === 'buy' ? 'bullish' : 'bearish';
 
-  const blockers = [];
+  // ════════════════════════════════════════════════════════════════════
+  // SCORING SYSTEM (CALIBRATED 2026-05-21)
+  // ════════════════════════════════════════════════════════════════════
+  // Replace strict 5-of-5 binary check with weighted scoring. Each factor
+  // contributes points; opposing factors deduct. Pass requires:
+  //   • Total score ≥ minScore (default 60 of ~100)
+  //   • Number of strongly-opposite factors ≤ allowOppositeOf (default 1)
+  //
+  // Why: today's logs showed 218 setups blocked solely on Supertrend
+  // disagreeing — but Supertrend is a slow trailing stop that flips LATE.
+  // Real momentum moves often have UT Bot + EMA + RSI + Momentum agreeing
+  // while Supertrend hasn't flipped yet. Scoring allows these legitimate
+  // setups through while still rejecting setups where many factors fight.
+  // ────────────────────────────────────────────────────────────────────
+  let score = wUtBot;
+  let oppositeCount = 0;
   const reasons = [
-    `UT Bot ${primaryTf} ${utRead.signalBar.toUpperCase()} (Key=${utCfg.keyValue} ATR=${utCfg.atrPeriod})`,
+    `UT Bot ${primaryTf} ${utRead.signalBar.toUpperCase()} (Key=${utCfg.keyValue} ATR=${utCfg.atrPeriod}) [+${wUtBot}]`,
   ];
+  const detail = { utBot: { sig: utRead.signalBar, weight: wUtBot, contribution: wUtBot } };
 
-  // 2) VWAP alignment
+  // 2) VWAP alignment — bonus only, not required
   const vwapPos = vwap?.position;
-  if (requireVwap) {
+  {
     const want = direction === 'bullish' ? 'above' : 'below';
-    if (vwapPos !== want) blockers.push(`VWAP ${vwapPos || 'unknown'} (need ${want})`);
-    else reasons.push('VWAP aligned');
+    if (vwapPos === want) {
+      score += wVwap;
+      reasons.push(`VWAP ${vwapPos} [+${wVwap}]`);
+      detail.vwap = { pos: vwapPos, weight: wVwap, contribution: wVwap };
+    } else if (vwapPos && vwapPos !== want) {
+      // Mild penalty for opposite, not a hard block
+      score -= Math.floor(wVwap * 0.5);
+      oppositeCount++;
+      reasons.push(`VWAP ${vwapPos} opposite [-${Math.floor(wVwap * 0.5)}]`);
+      detail.vwap = { pos: vwapPos, weight: wVwap, contribution: -Math.floor(wVwap * 0.5) };
+    }
   }
 
-  // 3) Supertrend on primary TF
-  const stPrimary = _supertrend(primary.map(c => ({ h: c.h ?? c.high, l: c.l ?? c.low, c: c.c ?? c.close })), stCfg.atrPeriod, stCfg.multiplier);
-  if (requireSupertrend) {
+  // 3) Supertrend on primary TF — bonus only
+  const stPrimary = _supertrend(
+    primary.map(c => ({ h: c.h ?? c.high, l: c.l ?? c.low, c: c.c ?? c.close })),
+    stCfg.atrPeriod, stCfg.multiplier
+  );
+  {
     const wantTrend = direction === 'bullish' ? 'green' : 'red';
-    if (stPrimary.warmupShort) blockers.push('Supertrend warmup short');
-    else if (stPrimary.trend !== wantTrend) blockers.push(`Supertrend ${stPrimary.trend} (need ${wantTrend})`);
-    else reasons.push(`Supertrend ${stPrimary.trend} aligned`);
+    if (!stPrimary.warmupShort) {
+      if (stPrimary.trend === wantTrend) {
+        score += wSupertrend;
+        reasons.push(`Supertrend ${stPrimary.trend} [+${wSupertrend}]`);
+        detail.supertrend = { trend: stPrimary.trend, weight: wSupertrend, contribution: wSupertrend };
+      } else {
+        // Supertrend opposite is a SOFT penalty (it flips late by design)
+        score -= Math.floor(wSupertrend * 0.5);
+        oppositeCount++;
+        reasons.push(`Supertrend ${stPrimary.trend} (slow flip) [-${Math.floor(wSupertrend * 0.5)}]`);
+        detail.supertrend = { trend: stPrimary.trend, weight: wSupertrend, contribution: -Math.floor(wSupertrend * 0.5) };
+      }
+    }
   }
 
-  // 4) EMA 9 vs EMA 20 on primary TF
-  // CALIBRATED 2026-05-20: pure ">" check rejected close-call setups where
-  // EMAs were within 0.01% (e.g. 23595.4 vs 23595.6 — 0.2 points apart).
-  // Now uses a small directional tolerance: "aligned" if EMA9 is on the
-  // RIGHT side of EMA20 by at least `emaTolerancePct` (default 0.01%) OR
-  // they're within tolerance AND VWAP+Supertrend already agree (consensus
-  // takes over from a tied EMA cross). Configurable via cfg.ema.tolerancePct.
+  // 4) EMA 9 vs EMA 20 on primary TF — bonus only
   const emaTolerancePct = Number(emaCfg.tolerancePct);
-  const tolFrac = Number.isFinite(emaTolerancePct) ? emaTolerancePct / 100 : 0.0001; // 0.01% default
+  const tolFrac = Number.isFinite(emaTolerancePct) ? emaTolerancePct / 100 : 0.0001;
   const closesPrimary = primary.map(c => c.c ?? c.close);
   const ema9  = _ema(closesPrimary, emaCfg.fastPeriod);
   const ema20 = _ema(closesPrimary, emaCfg.slowPeriod);
-  let emaAligned = false;
   let lastEma9, lastEma20;
   if (ema9.length && ema20.length) {
     lastEma9 = ema9[ema9.length - 1];
     lastEma20 = ema20[ema20.length - 1];
     const diffPct = Math.abs(lastEma9 - lastEma20) / Math.max(1, lastEma20);
-    if (direction === 'bullish') {
-      // Aligned if EMA9 is above EMA20 by any amount, OR EMAs are tied
-      // within tolerance (price action will resolve which side wins).
-      emaAligned = lastEma9 > lastEma20 || diffPct <= tolFrac;
+    const aligned = direction === 'bullish'
+      ? (lastEma9 > lastEma20 || diffPct <= tolFrac)
+      : (lastEma9 < lastEma20 || diffPct <= tolFrac);
+    if (aligned) {
+      score += wEmaAlign;
+      reasons.push(`EMA aligned (${lastEma9.toFixed(1)} vs ${lastEma20.toFixed(1)}) [+${wEmaAlign}]`);
+      detail.ema = { e9: lastEma9, e20: lastEma20, contribution: wEmaAlign };
     } else {
-      emaAligned = lastEma9 < lastEma20 || diffPct <= tolFrac;
+      // EMA against = soft penalty (lags fast moves)
+      score -= Math.floor(wEmaAlign * 0.5);
+      oppositeCount++;
+      reasons.push(`EMA against (${lastEma9.toFixed(1)} vs ${lastEma20.toFixed(1)}) [-${Math.floor(wEmaAlign * 0.5)}]`);
+      detail.ema = { e9: lastEma9, e20: lastEma20, contribution: -Math.floor(wEmaAlign * 0.5) };
     }
   }
-  if (requireEmaAlign) {
-    if (!ema9.length || !ema20.length) blockers.push('EMA warmup short');
-    else if (!emaAligned) blockers.push(`EMA${emaCfg.fastPeriod}=${lastEma9?.toFixed(1)} vs EMA${emaCfg.slowPeriod}=${lastEma20?.toFixed(1)} not aligned`);
-    else reasons.push(`EMA aligned (${lastEma9.toFixed(1)} vs ${lastEma20.toFixed(1)})`);
-  }
 
-  // 5) RSI filter on primary TF
+  // 5) RSI filter — directional zone scoring
   const rsiVal = _rsi(closesPrimary, rsiCfg.period);
-  if (requireRsiFilter) {
-    if (rsiVal == null) blockers.push('RSI warmup short');
-    else if (direction === 'bullish' && rsiVal < rsiCfg.longMin) {
-      blockers.push(`RSI ${rsiVal.toFixed(1)} < ${rsiCfg.longMin} (long min)`);
-    } else if (direction === 'bearish' && rsiVal > rsiCfg.shortMax) {
-      blockers.push(`RSI ${rsiVal.toFixed(1)} > ${rsiCfg.shortMax} (short max)`);
+  if (rsiVal != null) {
+    const longMin = rsiCfg.longMin || 52;
+    const shortMax = rsiCfg.shortMax || 48;
+    if (direction === 'bullish') {
+      if (rsiVal >= longMin) {
+        score += wRsi;
+        reasons.push(`RSI ${rsiVal.toFixed(1)} ≥ ${longMin} [+${wRsi}]`);
+      } else if (rsiVal >= 40) {
+        // Neutral zone — neither bonus nor penalty
+        reasons.push(`RSI ${rsiVal.toFixed(1)} neutral`);
+      } else {
+        // Oversold extreme is OK for BUY (it's a bounce setup)
+        // BUT we want UT Bot to confirm the bounce, which it just did
+        score += Math.floor(wRsi * 0.5); // half-bonus for bounce setup
+        reasons.push(`RSI ${rsiVal.toFixed(1)} oversold-bounce [+${Math.floor(wRsi * 0.5)}]`);
+      }
     } else {
-      reasons.push(`RSI ${rsiVal.toFixed(1)}`);
+      if (rsiVal <= shortMax) {
+        score += wRsi;
+        reasons.push(`RSI ${rsiVal.toFixed(1)} ≤ ${shortMax} [+${wRsi}]`);
+      } else if (rsiVal <= 60) {
+        reasons.push(`RSI ${rsiVal.toFixed(1)} neutral`);
+      } else {
+        // Overbought extreme is OK for SELL (it's a fade setup)
+        score += Math.floor(wRsi * 0.5);
+        reasons.push(`RSI ${rsiVal.toFixed(1)} overbought-fade [+${Math.floor(wRsi * 0.5)}]`);
+      }
     }
+    detail.rsi = { value: rsiVal };
   }
 
-  // 6) Confirmation TF — Supertrend + EMA must agree on 15m too
+  // 6) Multi-TF trend confirmation (5m + 15m) — replaces "confirmation TF" hard block
+  let mtfScore = 0;
+  if (Array.isArray(candles5m) && candles5m.length >= (stCfg.atrPeriod + 5)) {
+    const st5m = _supertrend(
+      candles5m.map(c => ({ h: c.h ?? c.high, l: c.l ?? c.low, c: c.c ?? c.close })),
+      stCfg.atrPeriod, stCfg.multiplier
+    );
+    const want = direction === 'bullish' ? 'green' : 'red';
+    if (!st5m.warmupShort && st5m.trend === want) mtfScore += Math.floor(wMtfTrend * 0.5);
+  }
   if (Array.isArray(candles15m) && candles15m.length >= (stCfg.atrPeriod + 5)) {
-    const stConf = _supertrend(
+    const st15m = _supertrend(
       candles15m.map(c => ({ h: c.h ?? c.high, l: c.l ?? c.low, c: c.c ?? c.close })),
       stCfg.atrPeriod, stCfg.multiplier
     );
     const want = direction === 'bullish' ? 'green' : 'red';
-    if (!stConf.warmupShort && stConf.trend !== want) {
-      blockers.push(`${confirmTf} Supertrend ${stConf.trend} (need ${want})`);
-    } else if (stConf.trend === want) {
-      reasons.push(`${confirmTf} Supertrend ${stConf.trend} aligned`);
-    }
-    const closesConf = candles15m.map(c => c.c ?? c.close);
-    const ema9c  = _ema(closesConf, emaCfg.fastPeriod);
-    const ema20c = _ema(closesConf, emaCfg.slowPeriod);
-    if (ema9c.length && ema20c.length) {
-      const lc9 = ema9c[ema9c.length - 1];
-      const lc20 = ema20c[ema20c.length - 1];
-      const ok = direction === 'bullish' ? lc9 > lc20 : lc9 < lc20;
-      if (!ok) blockers.push(`${confirmTf} EMA not aligned`);
+    if (!st15m.warmupShort && st15m.trend === want) mtfScore += Math.floor(wMtfTrend * 0.5);
+  }
+  score += mtfScore;
+  if (mtfScore > 0) reasons.push(`MTF 5m/15m confirms [+${mtfScore}]`);
+
+  // 7) Recent momentum (last 3 closes on primary TF) — fast-move detector
+  if (closesPrimary.length >= 4) {
+    const a = closesPrimary[closesPrimary.length - 4];
+    const b = closesPrimary[closesPrimary.length - 1];
+    const move = b - a;
+    const movePct = Math.abs(move) / a;
+    const dirMatch = direction === 'bullish' ? move > 0 : move < 0;
+    if (dirMatch && movePct >= 0.0008) { // ≥0.08% move in 3 bars = ~60pts on NIFTY 23800
+      score += wMomentum;
+      reasons.push(`Momentum ${(movePct * 100).toFixed(2)}% in 3×${primaryTf} [+${wMomentum}]`);
+      detail.momentum = { move, movePct };
+    } else if (!dirMatch && movePct >= 0.0015) {
+      // Strong opposite momentum = warning
+      score -= Math.floor(wMomentum * 0.7);
+      oppositeCount++;
+      reasons.push(`Momentum opposite ${(movePct * 100).toFixed(2)}% [-${Math.floor(wMomentum * 0.7)}]`);
     }
   }
 
-  if (blockers.length) {
+  // ── FINAL DECISION ────────────────────────────────────────────────
+  detail.score = score;
+  detail.minScore = minScore;
+  detail.oppositeCount = oppositeCount;
+  detail.allowOppositeOf = allowOppositeOf;
+
+  if (score < minScore) {
     return {
       fired: false, signal: null, direction,
-      reasoning: `support: ${reasons.join(' | ')} BLOCKED: ${blockers.join(', ')}`,
-      pillars: { utBot: utRead, supertrend: stPrimary, ema9: lastEma9, ema20: lastEma20, rsi: rsiVal, vwap: vwapPos },
+      reasoning: `support: ${reasons.join(' | ')} BLOCKED: score ${score}/${minScore}, opposite ${oppositeCount}/${allowOppositeOf}`,
+      pillars: { utBot: utRead, supertrend: stPrimary, ema9: lastEma9, ema20: lastEma20, rsi: rsiVal, vwap: vwapPos, score, detail },
+    };
+  }
+  if (oppositeCount > allowOppositeOf) {
+    return {
+      fired: false, signal: null, direction,
+      reasoning: `support: ${reasons.join(' | ')} BLOCKED: too many opposing factors (${oppositeCount} > ${allowOppositeOf})`,
+      pillars: { utBot: utRead, supertrend: stPrimary, ema9: lastEma9, ema20: lastEma20, rsi: rsiVal, vwap: vwapPos, score, detail },
     };
   }
 

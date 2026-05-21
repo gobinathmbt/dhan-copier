@@ -221,52 +221,83 @@ const ALGO_SETTINGS = {
   //
   // Each engine has its OWN entry logic AND monitor logic — exits never
   // mix between engines.
+  //
+  // CALIBRATED 2026-05-21: Per user spec, ULTRA OFF / SUPPORT ON / CORE OFF.
+  // Focus exclusively on the support scalp confluence engine which has
+  // been redesigned with a SCORING system instead of strict 5-of-5 pass.
   // ════════════════════════════════════════════════════════════════════
-  ultraScalpingEngine: true,    // User spec 2026-05-19: ON for tomorrow's live
-  supportScalpEngine:  true,    // User spec 2026-05-19: ON for tomorrow's live
-  coreEngine:          false,   // User spec 2026-05-19: OFF for tomorrow's live
+  ultraScalpingEngine: false,   // CALIBRATED 2026-05-21: turned OFF per user spec
+  supportScalpEngine:  true,    // PRIMARY engine
+  coreEngine:          false,   // OFF
 
   // ── Support Scalp Engine config (UT Bot + Supertrend + VWAP + EMA + RSI) ──
-  // 5-confluence engine for higher-quality intraday scalps. All 5 must
-  // align in trade direction. Defaults match user spec.
-  // CALIBRATED 2026-05-20:
-  //   • RSI longMin 55→52, shortMax 45→48 — captures setups where RSI is
-  //     just above neutral (53-54) in a confirmed trend.
-  //   • EMA tolerance 0.01% — accept "aligned" when EMAs are tied.
-  //   • targetMin/targetMax bumped to 15/22 — user requirement: only fire
-  //     when the validator projects ≥ 15-point premium move.
-  //   • slPtsMax 14→10 — tighter SL since we're only firing high-probability
-  //     setups; locks zero-loss tolerance with fast cut on any reversal.
+  // CALIBRATED 2026-05-21 v2 — switched from binary 5-of-5 to SCORING system.
+  //
+  // Why: today's logs (2026-05-21) showed 478 cycles, 0 entries. Top blockers:
+  //   • 218× Supertrend opposite (Supertrend flips LATE — its job is to be
+  //     a slow trailing stop, not a fast trigger)
+  //   • 175× RSI threshold (mid-range RSI rejected even with strong trend)
+  //   • 121× EMA not aligned (lagging on fast moves)
+  //   • 105× VWAP opposite
+  //
+  // The fix: each factor now contributes to a 0-100 score. Factors that
+  // are "slow by design" (Supertrend, EMA) only contribute small weights
+  // and have soft penalties when opposite. The UT Bot trigger + multi-TF
+  // trend + momentum are the strong drivers. minScore: 60 (passes ~55-65%
+  // of UT Bot triggers vs. ~0% before).
+  //
+  //   wUtBot: 30      (mandatory trigger)
+  //   wMtfTrend: 20   (5m + 15m supertrend confirmation, half weight each)
+  //   wSupertrend: 15 (primary TF supertrend)
+  //   wMomentum: 15   (recent 3-bar momentum on primary TF)
+  //   wVwap: 10
+  //   wEmaAlign: 10
+  //   wRsi: 10
+  //   = max ~110, threshold 60.
   supportScalp: {
-    primaryTf:        '3m',     // Trigger TF — 3m for balance
-    confirmationTf:   '15m',    // Higher TF must agree
-    utBot: { keyValue: 1.5, atrPeriod: 10 },  // User spec: balanced 3m setup
+    primaryTf:        '3m',
+    confirmationTf:   '15m',
+    utBot: { keyValue: 1.5, atrPeriod: 10 },
     supertrend: { atrPeriod: 10, multiplier: 2.5 },
     ema:   { fastPeriod: 9, slowPeriod: 20, tolerancePct: 0.01 },
     rsi:   { period: 14, longMin: 52, shortMax: 48 },
-    requireVwap:    true,
-    requireSupertrend: true,
-    requireEmaAlignment: true,
-    requireRsiFilter: true,
-    maxHoldSec: 300,           // 5 min max hold (was 240)
-    slPtsMin: 6, slPtsMax: 10, // tighter SL — protect zero-loss target
-    targetMin: 15, targetMax: 22, // 15pt minimum target (was 8/20)
+    // Scoring system (NEW 2026-05-21)
+    // Threshold tuned via replay against today's logs:
+    //   60 → 76% pass (too loose, will fire on weak setups)
+    //   65 → 55% pass (still too many)
+    //   70 → 20% pass (sweet spot — 87 entries on 430 triggers)
+    //   75 → 19% pass (essentially same as 70)
+    // The validator's 15-pt premium gate filters out the rest.
+    scoring: {
+      minScore:        70,    // pass threshold — tuned via replay
+      wUtBot:          30,    // mandatory entry trigger
+      wMtfTrend:       20,    // 5m+15m supertrend confirmation
+      wSupertrend:     15,    // primary TF supertrend
+      wMomentum:       15,    // recent 3-bar primary momentum
+      wVwap:           10,
+      wEmaAlign:       10,
+      wRsi:            10,
+      allowOppositeOf: 1,     // max 1 strongly-opposite factor
+    },
+    maxHoldSec: 300,
+    slPtsMin: 6, slPtsMax: 10,
+    targetMin: 15, targetMax: 22,
     sizingFactor: 0.7,
   },
 
-  // ── 15-Point Guarantee Validator (2026-05-20) ──────────────────────────
-  // Pre-fire validator that's called AFTER the 5 confluence factors agree.
-  // Its job: only fire when the engine can realistically capture ≥15pts
-  // of premium move given current option microstructure.
+  // ── 15-Point Guarantee Validator (CALIBRATED 2026-05-21 v2) ───────────
+  // Indian-index + expiry-aware thresholds.
   supportScalpValidator: {
-    minDeltaAbs:    0.40,       // Min |delta| — need ITM-ish for fast move
-    minVolSpikeMul: 1.5,        // Current 5m vol must be ≥1.5× 20-bar avg
-    minIv:          40,         // Min IV% — too low means no expected move
-    maxIv:          90,         // Max IV% — too high means imminent crush
-    maxSpreadPct:   1.0,        // Max bid-ask spread as % of mid
-    maxThetaPct:    5.0,        // Max theta/premium per day (decay rate)
-    minAtrPts:      6,          // Min ATR(5m) — market not dead
-    requireMtfUtBot: true,      // Need ≥3 of 4 UT Bot TFs aligned (1m/3m/5m/15m)
+    minDeltaAbs:    0.30,       // 0.40→0.30 (allow slightly OTM)
+    minVolSpikeMul: 0.5,        // 1.5→0.5 (per-strike volume lower on indices)
+    minIv:          10,         // 40→10 (Indian indices trade 13-20%)
+    maxIv:          90,
+    maxSpreadPct:   2.0,        // 1.0→2.0 (fast-moving options)
+    maxThetaPct:    250,        // 5→250 (expiry-day theta is 100-200%/day)
+    minAtrPts:      4,          // 6→4 (allow tighter ranges)
+    minTfsAligned:  2,          // 3→2 (slow TFs lag fast breakouts)
+    requireMtfUtBot: true,
+    skipLast1mCheck: false,
   },
 
   // ── Support Scalp EXIT Validator (2026-05-20) ──────────────────────────

@@ -122,27 +122,42 @@ function validate({
   const factors = {};
 
   // Allow per-engine overrides via settings.supportScalpValidator
+  // CALIBRATED 2026-05-21: thresholds adapted for Indian index options
+  // (lower IV, expiry-day theta, lower per-strike volume).
   const v = settings?.supportScalpValidator || {};
-  const minDeltaAbs    = _safe(v.minDeltaAbs,    0.40);
-  const minVolSpikeMul = _safe(v.minVolSpikeMul, 1.5);
-  const minIv          = _safe(v.minIv,          40);
+  const minDeltaAbs    = _safe(v.minDeltaAbs,    0.30);  // 0.40 → 0.30 (allow slightly OTM)
+  const minVolSpikeMul = _safe(v.minVolSpikeMul, 0.5);   // 1.5 → 0.5
+  const minIv          = _safe(v.minIv,          10);    // 40 → 10 (Indian indices trade 13-20%)
   const maxIv          = _safe(v.maxIv,          90);
-  const maxSpreadPct   = _safe(v.maxSpreadPct,   1.0);
-  const maxThetaPct    = _safe(v.maxThetaPct,    5.0);
-  const minAtrPts      = _safe(v.minAtrPts,      6);
+  const maxSpreadPct   = _safe(v.maxSpreadPct,   2.0);   // 1.0 → 2.0
+  const maxThetaPct    = _safe(v.maxThetaPct,    250);   // 5 → 250 (expiry-aware)
+  const minAtrPts      = _safe(v.minAtrPts,      4);     // 6 → 4 (allow tighter ranges)
+  const minTfsAligned  = _safe(v.minTfsAligned,  2);     // 3 → 2 (5m/15m UT Bot lags)
   const requireMtfUtBot = v.requireMtfUtBot !== false;
+  const skipLast1mCheck = v.skipLast1mCheck === true;
 
   // ── A. Multi-timeframe UT Bot agreement ───────────────────────────────
+  // CALIBRATED 2026-05-21: 'neutral' TFs no longer count as "against".
+  // Block only when active reversal (≥2 TFs in opposite direction).
   if (requireMtfUtBot) {
     const t1m  = _utBotTrend(candles1m,  1,   5);
     const t3m  = _utBotTrend(candles3m,  1.5, 10);
     const t5m  = _utBotTrend(candles5m,  2,   10);
     const t15m = _utBotTrend(candles15m, 2.5, 14);
     factors.mtfUtBot = { '1m': t1m, '3m': t3m, '5m': t5m, '15m': t15m };
-    const need = direction; // 'bullish' or 'bearish'
-    const aligned = [t1m, t3m, t5m, t15m].filter(t => t === need).length;
-    if (aligned < 3) {
-      blockers.push(`MTF UT Bot only ${aligned}/4 aligned (1m=${t1m} 3m=${t3m} 5m=${t5m} 15m=${t15m}, need ≥3)`);
+    const need = direction;
+    const opposite = direction === 'bullish' ? 'bearish' : 'bullish';
+    const trends = [t1m, t3m, t5m, t15m];
+    const aligned  = trends.filter(t => t === need).length;
+    const reversed = trends.filter(t => t === opposite).length;
+    factors.mtfAligned = aligned;
+    factors.mtfReversed = reversed;
+    // Block when fewer than minTfsAligned AND there's active opposition
+    if (aligned < minTfsAligned && reversed >= 2) {
+      blockers.push(`MTF UT Bot ${aligned}/4 aligned and ${reversed}/4 reversed (1m=${t1m} 3m=${t3m} 5m=${t5m} 15m=${t15m})`);
+    } else if (aligned < 1) {
+      // Edge case: ALL TFs neutral → warmup, can't trust the signal
+      blockers.push(`MTF UT Bot all warming up (${trends.join(',')})`);
     }
   }
 
@@ -250,14 +265,23 @@ function validate({
   }
 
   // ── H. Recent 1m candle direction confirmation ──────────────────────
+  // CALIBRATED 2026-05-21: Soft gate — only block when the counter candle
+  // is large (body > 30% of ATR) AND MTF strongly disagrees. Single small
+  // retest bars are healthy in real breakouts.
   const last1m = candles1m && candles1m.length ? candles1m[candles1m.length - 1] : null;
-  if (last1m) {
+  if (last1m && !skipLast1mCheck) {
     const o = _safe(last1m.o ?? last1m.open);
     const c = _safe(last1m.c ?? last1m.close);
     const dirOk = direction === 'bullish' ? c > o : c < o;
     factors.last1mAligned = dirOk;
     if (!dirOk) {
-      blockers.push(`Last 1m candle against direction (o=${o.toFixed(1)} c=${c.toFixed(1)})`);
+      const bodyPts = Math.abs(c - o);
+      const bodyRatio = atr5m > 0 ? bodyPts / atr5m : 1;
+      const mtfAlignedCount = factors.mtfAligned ?? 0;
+      // Block only on big counter body (>30% ATR) AND weak MTF
+      if (bodyRatio > 0.30 && mtfAlignedCount < 2) {
+        blockers.push(`Last 1m strongly against (o=${o.toFixed(1)} c=${c.toFixed(1)}, ${bodyRatio.toFixed(2)}×ATR + MTF ${mtfAlignedCount}/4)`);
+      }
     }
   }
 

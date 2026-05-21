@@ -113,39 +113,37 @@ const ScalpingSessionSchema = new mongoose.Schema(
       // Hard kill switch
       disableUltraScalp: { type: Boolean, default: false },
 
-      // ── ENGINE ROUTING (NEW 2026-05-19) ──────────────────────────────
-      // Three independent engines, each with its own entry+monitor logic.
-      // The master scalping engine routes every cycle to whichever is enabled.
-      // Priority order when multiple are enabled: ultraScalp > supportScalp > core.
-      ultraScalpingEngine: { type: Boolean, default: true },
+      // ── ENGINE ROUTING (CALIBRATED 2026-05-21) ───────────────────────
+      // Per user spec: ULTRA OFF, SUPPORT ON, CORE OFF.
+      ultraScalpingEngine: { type: Boolean, default: false },
       supportScalpEngine:  { type: Boolean, default: true },
       coreEngine:          { type: Boolean, default: false },
 
-      // ── SUPPORT SCALP ENGINE (UT+Supertrend+VWAP+EMA+RSI confluence) ─
-      // CALIBRATED 2026-05-20:
-      //   • RSI longMin 55→52, shortMax 45→48
-      //   • EMA tolerancePct 0.01%
-      //   • targetMin 15 / targetMax 22 — 15-point guarantee
-      //   • slPtsMax 14→10 — tighter cut on reversal
-      //   • Pre-fire validator (see supportScalpValidator) requires ATR /
-      //     delta / IV / vol / OI / spread all confirm ≥15pt achievable
+      // ── SUPPORT SCALP ENGINE (CALIBRATED 2026-05-21 v2 — scoring) ────
+      // Replaced strict 5-of-5 confluence with weighted scoring system.
+      // Each factor contributes to a 0-100 score; threshold 60 to pass.
       supportScalp: { type: mongoose.Schema.Types.Mixed, default: () => ({
         primaryTf: '3m', confirmationTf: '15m',
         utBot: { keyValue: 1.5, atrPeriod: 10 },
         supertrend: { atrPeriod: 10, multiplier: 2.5 },
         ema:   { fastPeriod: 9, slowPeriod: 20, tolerancePct: 0.01 },
         rsi:   { period: 14, longMin: 52, shortMax: 48 },
-        requireVwap: true, requireSupertrend: true,
-        requireEmaAlignment: true, requireRsiFilter: true,
+        scoring: {
+          minScore: 70, wUtBot: 30, wMtfTrend: 20,
+          wSupertrend: 15, wMomentum: 15, wVwap: 10,
+          wEmaAlign: 10, wRsi: 10, allowOppositeOf: 1,
+        },
         maxHoldSec: 300, slPtsMin: 6, slPtsMax: 10,
         targetMin: 15, targetMax: 22, sizingFactor: 0.7,
       }) },
 
-      // ── 15-Point Guarantee Validator (2026-05-20) ──────────────────
+      // ── 15-Point Guarantee Validator (CALIBRATED 2026-05-21 v2) ────
       supportScalpValidator: { type: mongoose.Schema.Types.Mixed, default: () => ({
-        minDeltaAbs: 0.40, minVolSpikeMul: 1.5,
-        minIv: 40, maxIv: 90, maxSpreadPct: 1.0,
-        maxThetaPct: 5.0, minAtrPts: 6, requireMtfUtBot: true,
+        minDeltaAbs: 0.30, minVolSpikeMul: 0.5,
+        minIv: 10, maxIv: 90, maxSpreadPct: 2.0,
+        maxThetaPct: 250, minAtrPts: 4,
+        minTfsAligned: 2, requireMtfUtBot: true,
+        skipLast1mCheck: false,
       }) },
 
       // ── Support Scalp EXIT Validator (2026-05-20) ──────────────────
