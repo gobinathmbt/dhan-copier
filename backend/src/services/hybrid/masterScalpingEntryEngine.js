@@ -30,6 +30,36 @@ function _getCore() {
 
 const hybridLogger = require('./hybridLogger');
 
+// ── Post-loss cooldown table (NEW 2026-05-22) ──────────────────────────
+// Map<`${market}:${strike}`, msUntil>. Populated by
+// `recordSupportScalpLoss(market, strike, durationSec)`, consulted by
+// the master engine before letting supportScalpEngine fire on the same
+// strike again. Prevents the "re-fire same losing thesis" pattern that
+// stacks 5+ identical-strike losses inside 30 minutes when the market
+// is choppy.
+//
+// In-memory by design: a server restart wipes it because a new session
+// is a fresh thesis anyway, and we don't want the cooldown surviving
+// past the trading day.
+const _supportLossCooldown = new Map();
+function recordSupportScalpLoss(market, strike, cooldownSec = 300) {
+  if (!market || !strike) return;
+  const key = `${market}:${strike}`;
+  _supportLossCooldown.set(key, Date.now() + Math.max(0, cooldownSec) * 1000);
+}
+function _supportCooldownRemainSec(market, strike) {
+  if (!market || !strike) return 0;
+  const key = `${market}:${strike}`;
+  const until = _supportLossCooldown.get(key);
+  if (!until) return 0;
+  const remain = Math.ceil((until - Date.now()) / 1000);
+  if (remain <= 0) {
+    _supportLossCooldown.delete(key);
+    return 0;
+  }
+  return remain;
+}
+
 /**
  * @param {object} params — same shape that the core hybrid entry receives:
  *   { aggregator, algorithmOutputs, masterDecision, settings, session,
@@ -174,6 +204,18 @@ async function decide(params) {
           hhmm:           sessionPhase?.hhmm,
         });
         if (strikeRes.ok) {
+          // Post-loss cooldown gate — block re-firing on a strike that
+          // just lost. Same thesis, same chop, same loss otherwise.
+          const cooldownRemain = _supportCooldownRemainSec(market, strikeRes.strike);
+          if (cooldownRemain > 0) {
+            hybridLogger.info({
+              sessionId, event: 'master_support_scalp_cooldown',
+              message: `support skipped: ${strikeRes.strike} in post-loss cooldown ${cooldownRemain}s`,
+              data: { fired: false, market, strike: strikeRes.strike, cooldownRemain },
+            });
+            return _noTrade(`support: post-loss cooldown ${cooldownRemain}s on ${market} ${strikeRes.strike}`,
+              { engineType: 'SUPPORT_SCALP', market });
+          }
           return _wrapDecision(sup, strikeRes, 'SUPPORT_SCALP', market);
         }
         hybridLogger.warn({ sessionId, event: 'master_support_strike_failed',
@@ -382,4 +424,4 @@ function _noTrade(reason, extras = {}) {
   };
 }
 
-module.exports = { decide };
+module.exports = { decide, recordSupportScalpLoss };

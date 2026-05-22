@@ -163,6 +163,9 @@ function decide({
   const minProfitToTrail = _safe(cfg.minProfitToTrail, 10);
   const minTfsAligned    = _safe(cfg.minTfsAligned, 2); // entry needed 3, exit needs <2
   const maxFailedFactors = _safe(cfg.maxFailedFactors, 2); // 2/6 microstructure flips → exit
+  const ivDropExitPct    = _safe(cfg.ivDropExitPct, 0.25);
+  const quickFailSec     = _safe(cfg.quickFailSec, 60);
+  const quickFailMinPnlPts = _safe(cfg.quickFailMinPnlPts, 0.5);
 
   const factors = { elapsed, pnlPts, peakPts };
 
@@ -192,6 +195,23 @@ function decide({
       action: 'HOLD',
       reasoning: `[SUPPORT-EXIT] Min hold ${elapsed}s/${minHoldSec}s — only SL allowed`,
       source: 'support_exit:min_hold',
+      factors,
+    };
+  }
+
+  // ── E2.5 Quick-fail (NEW 2026-05-22) ────────────────────────────────
+  // If by `quickFailSec` the trade hasn't moved in our favor at least
+  // `quickFailMinPnlPts`, the directional thesis is wrong. Cut now
+  // rather than ride to time_decay at 60% maxHold for a 5pt+ loss.
+  // Rationale: today's bleed pattern showed 5/7 trades exiting via
+  // time_decay/microstructure with peakPts ≤ 0.75 — meaning the trade
+  // never had any conviction. Exiting at 60s caps the damage.
+  if (elapsed >= quickFailSec && peakPts < quickFailMinPnlPts) {
+    return {
+      action: 'EXIT',
+      reasoning: `[SUPPORT-EXIT] Quick-fail at ${elapsed}s — peak only +${peakPts.toFixed(2)}pts ` +
+                 `(< ${quickFailMinPnlPts}pts needed by ${quickFailSec}s); thesis wrong, cutting`,
+      source: 'support_exit:quick_fail',
       factors,
     };
   }
@@ -289,12 +309,28 @@ function decide({
     microFlips.push(`OI reversed: same ${sameOiChg.toFixed(0)} (down), opposite ${oppOiChg.toFixed(0)} (up)`);
   }
 
-  // 5e. IV crashing (> 30% drop from entry IV would be catastrophic)
-  // Best-effort — we may not have entry IV stored. Skip if not available.
+  // 5e. IV regime check — exit if IV is *meaningfully crashing* relative to
+  // entry IV. Indian indices live at 13-18% IV, so an absolute floor like
+  // "IV < 25%" was ALWAYS true and effectively forced the microstructure
+  // flip count to 1/6 from the moment the trade opened. We now compare
+  // current IV to the IV captured at entry (trade.entryIv) and only flag
+  // when there's been a real ≥ 25% relative drop. If entry IV is missing
+  // (legacy trades) we fall back to "IV < 8%" as an absolute crash floor.
   const ivNow = _safe(opt?.iv);
   factors.ivNow = Number(ivNow.toFixed(1));
-  if (ivNow > 0 && ivNow < 25) {
-    microFlips.push(`IV crashed to ${ivNow.toFixed(1)}% (option dying)`);
+  const entryIv = _safe(trade?.entryIv);
+  if (ivNow > 0) {
+    if (entryIv > 0) {
+      const ivDropPct = (entryIv - ivNow) / entryIv;
+      factors.ivDropPct = Number(ivDropPct.toFixed(3));
+      if (ivDropPct >= ivDropExitPct) {
+        microFlips.push(`IV crashed ${(ivDropPct * 100).toFixed(0)}% ` +
+          `(${entryIv.toFixed(1)}% → ${ivNow.toFixed(1)}%) — option dying`);
+      }
+    } else if (ivNow < 8) {
+      // Legacy fallback only — no entry IV recorded
+      microFlips.push(`IV ${ivNow.toFixed(1)}% absolute floor breached`);
+    }
   }
 
   // 5f. Volume drying (5m current vol < 0.5× of 20-bar avg)

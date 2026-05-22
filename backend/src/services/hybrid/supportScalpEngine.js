@@ -247,6 +247,16 @@ function decide({
   // ────────────────────────────────────────────────────────────────────
   let score = wUtBot;
   let oppositeCount = 0;
+  // Track which factors actually contributed POSITIVELY to the score so the
+  // post-fire `confidence` and `consensusScore` reflect the new scoring
+  // system rather than the legacy `require*` boolean flags that were
+  // removed in the 2026-05-21 calibration. Without these, references to
+  // requireVwap/requireSupertrend/etc. throw a ReferenceError after the
+  // validator passes, silently aborting valid trade decisions.
+  let vwapPass = false;
+  let stPass   = false;
+  let emaPass  = false;
+  let rsiPass  = false;
   const reasons = [
     `UT Bot ${primaryTf} ${utRead.signalBar.toUpperCase()} (Key=${utCfg.keyValue} ATR=${utCfg.atrPeriod}) [+${wUtBot}]`,
   ];
@@ -258,6 +268,7 @@ function decide({
     const want = direction === 'bullish' ? 'above' : 'below';
     if (vwapPos === want) {
       score += wVwap;
+      vwapPass = true;
       reasons.push(`VWAP ${vwapPos} [+${wVwap}]`);
       detail.vwap = { pos: vwapPos, weight: wVwap, contribution: wVwap };
     } else if (vwapPos && vwapPos !== want) {
@@ -284,6 +295,7 @@ function decide({
     if (!stPrimary.warmupShort) {
       if (stPrimary.trend === wantTrend) {
         score += wSupertrend;
+        stPass = true;
         reasons.push(`Supertrend ${stPrimary.trend} [+${wSupertrend}]`);
         detail.supertrend = { trend: stPrimary.trend, weight: wSupertrend, contribution: wSupertrend };
       } else {
@@ -313,6 +325,7 @@ function decide({
       : (lastEma9 < lastEma20 || diffPct <= tolFrac);
     if (aligned) {
       score += wEmaAlign;
+      emaPass = true;
       reasons.push(`EMA aligned (${lastEma9.toFixed(1)} vs ${lastEma20.toFixed(1)}) [+${wEmaAlign}]`);
       detail.ema = { e9: lastEma9, e20: lastEma20, contribution: wEmaAlign };
     } else {
@@ -332,6 +345,7 @@ function decide({
     if (direction === 'bullish') {
       if (rsiVal >= longMin) {
         score += wRsi;
+        rsiPass = true;
         reasons.push(`RSI ${rsiVal.toFixed(1)} ≥ ${longMin} [+${wRsi}]`);
       } else if (rsiVal >= 40) {
         // Neutral zone — neither bonus nor penalty
@@ -345,6 +359,7 @@ function decide({
     } else {
       if (rsiVal <= shortMax) {
         score += wRsi;
+        rsiPass = true;
         reasons.push(`RSI ${rsiVal.toFixed(1)} ≤ ${shortMax} [+${wRsi}]`);
       } else if (rsiVal <= 60) {
         reasons.push(`RSI ${rsiVal.toFixed(1)} neutral`);
@@ -471,12 +486,14 @@ function decide({
   const sizingFactor = cfg.sizingFactor || 0.7;
 
   // ── Confidence ───────────────────────────────────────────────────────
-  // Each confirmation adds points. 5/5 confirmations → 90, 4/5 → 75, 3/5 → 60.
+  // Reflects which factors actually contributed positively to the score.
+  // 4/4 confirmations + UT Bot trigger → ~84, 3/4 → 78, 2/4 → 72.
+  // Capped at 95. RSI extreme adds a small fast-move bonus.
   let confidence = 60;
-  if (requireVwap)        confidence += 6;
-  if (requireSupertrend)  confidence += 6;
-  if (requireEmaAlign)    confidence += 6;
-  if (requireRsiFilter)   confidence += 6;
+  if (vwapPass) confidence += 6;
+  if (stPass)   confidence += 6;
+  if (emaPass)  confidence += 6;
+  if (rsiPass)  confidence += 6;
   if (rsiVal && Math.abs(rsiVal - 50) > 15) confidence += 4;
   confidence = Math.min(95, confidence);
 
@@ -503,7 +520,7 @@ function decide({
     holdProfile: { tradeType: 'SCALP', maxHoldSec, rrTarget },
     riskProfile: { slPct: 0.10, sizingFactor },
     confluenceTier: 'standard',
-    consensusScore: Math.min(100, 20 * [requireVwap, requireSupertrend, requireEmaAlign, requireRsiFilter, true].filter(Boolean).length),
+    consensusScore: Math.min(100, 20 * [vwapPass, stPass, emaPass, rsiPass, true].filter(Boolean).length),
     smartTrail: {
       mode: 'hybrid',
       lockTriggerPct:   0.50,

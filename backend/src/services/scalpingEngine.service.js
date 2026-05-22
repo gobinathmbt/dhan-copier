@@ -3445,6 +3445,25 @@ async function closeTrade(trade, exitPrice, reason) {
   trade.result = pnlForCapital > 0 ? 'WIN' : pnlForCapital < 0 ? 'LOSS' : 'BREAKEVEN';
   await trade.save();
 
+  // ── Post-loss cooldown registration (NEW 2026-05-22) ─────────────────
+  // For SUPPORT_SCALP losses, suppress new entries on the same
+  // (market, strike) for `postLossCooldownSec`. Stops the engine from
+  // re-firing the same losing thesis 5 minutes later when UT Bot is
+  // still showing the same cross.
+  try {
+    if (trade.result === 'LOSS' && trade.engineType === 'SUPPORT_SCALP') {
+      const masterEntry = require('./hybrid/masterScalpingEntryEngine');
+      const cd = state.session?.settings?.supportScalpExit?.postLossCooldownSec
+        ?? 300;
+      masterEntry.recordSupportScalpLoss(trade.market, trade.strike, cd);
+      logger.info({
+        tradeId: trade._id, market: trade.market, strike: trade.strike, cooldownSec: cd,
+      }, '[engine] support scalp post-loss cooldown registered');
+    }
+  } catch (e) {
+    logger.warn({ err: e.message }, '[engine] post-loss cooldown registration failed');
+  }
+
   // LIVE FEED: unsubscribe this option — no need to keep receiving ticks for a closed trade
   try {
     const { instance: liveFeedProd } = require('./dhanLiveFeedProd.service');
@@ -3569,6 +3588,18 @@ async function _executeFastPathTrade({
   const slPremium = premium - slPoints;
   const ensembleConfidence = decision.confidence;
 
+  // Capture the entry IV from the active strike's selected leg (CE/PE).
+  // The exit validator uses this to detect IV crash relative to entry,
+  // which is the only sane check on Indian indices (13-18% IV is normal).
+  const entryIv = (() => {
+    if (!strikeRow) return null;
+    const leg = isCE
+      ? (strikeRow.call ?? strikeRow.ce)
+      : (strikeRow.put  ?? strikeRow.pe);
+    const v = Number(leg?.iv);
+    return Number.isFinite(v) && v > 0 ? v : null;
+  })();
+
   // Try to get opening strike for alternativeStrike field (best-effort)
   let openingStrike = selectedStrike;
   try { openingStrike = professionalTrader.getMarketSession?.()?.openingStrike || selectedStrike; } catch (_) {}
@@ -3604,6 +3635,9 @@ async function _executeFastPathTrade({
       || (isSwingTrade ? (settings.swingMaxHoldMinutes || 15) * 60 : settings.maxHoldTimeSeconds || 180),
     aiEntryDecision: decision,
     hybridEntrySnapshot: decision.hybridSnapshot || null,
+    // Entry IV baseline — used by exit validator (relative-drop check)
+    entryIv: entryIv,
+    entrySpotAtm: payload?.actual_atm_strike || payload?.options_chain?.atm_strike,
     hasReachedTarget: false,
     maxPriceReached: premium,
     futuresConfirmed: false,

@@ -249,8 +249,36 @@ function validate({
     blockers.push('Bid/ask data missing — cannot verify spread');
   }
 
-  // Volume — current 5m volume vs 20-bar avg of 5m bars
-  const vols5m = candles5m.map(c => _safe(c.v ?? c.volume));
+  // Volume — current 5m volume vs 20-bar avg of 5m bars.
+  //
+  // FIX 2026-05-22: skip still-forming current 5m bucket. The aggregator
+  // can emit BOTH the closed bar (full volume ~1-5M) AND a partial bar
+  // for the same timestamp (volume few KB) within the same cycle. Without
+  // this guard the validator reads the partial as "last volume", computes
+  // a near-zero spike ratio and blocks every otherwise-valid setup.
+  // Dedup by timestamp keeping the higher-volume row, then drop the
+  // trailing bar if it's still inside the active 5m bucket.
+  const _TF_5M_SEC = 300;
+  const _nowSec = Math.floor(Date.now() / 1000);
+  // Keep highest-volume sample per timestamp (handles aggregator+disk
+  // duplicates where one has the full bar and the other a partial).
+  const byT = new Map();
+  for (const c of candles5m) {
+    const t = Number(c.t ?? c.time);
+    if (!Number.isFinite(t)) continue;
+    const v = _safe(c.v ?? c.volume);
+    const prev = byT.get(t);
+    if (!prev || v > prev) byT.set(t, v);
+  }
+  const sortedTs = [...byT.keys()].sort((a, b) => a - b);
+  // Drop the latest bar if its bucket has not closed yet
+  // (bucketStart + 300s > now means we're still inside it).
+  while (sortedTs.length > 0) {
+    const lastT = sortedTs[sortedTs.length - 1];
+    if (lastT + _TF_5M_SEC > _nowSec) sortedTs.pop();
+    else break;
+  }
+  const vols5m = sortedTs.map(t => byT.get(t));
   const avgVol5m = _avg(vols5m, 20);
   const lastVol5m = vols5m[vols5m.length - 1] || 0;
   const volSpike = avgVol5m > 0 ? lastVol5m / avgVol5m : 0;
@@ -300,15 +328,26 @@ function validate({
   }
 
   // ── Expected premium move ───────────────────────────────────────────
-  // 3 × ATR(5m) is a reasonable 15-min ceiling; realistic capture is ~50-70%.
+  // We project the realistic premium gain a 15-min scalp can capture
+  // given current ATR + Greeks. NIFTY's 3× ATR(5m) is a reasonable
+  // 15-min ceiling; capture rate is ~50-70% of that.
+  //
+  // 2026-05-22: Added effectiveDeltaMul (default 0.85) — in low-IV
+  // regimes (Indian indices at 13-15% IV) premium captures only ~85%
+  // of theoretical delta×spotMove because of bid-ask wear, slippage,
+  // and theta bleed during the hold. Without this haircut, the
+  // validator was projecting 19pts and capturing 4pts.
+  const effectiveDeltaMul = _safe(v.effectiveDeltaMul, 0.85);
   const expectedSpotMove = atr5m * 3 * 0.6;
-  const expectedPremiumMove = expectedSpotMove * delta + (gamma * Math.pow(expectedSpotMove, 2)) / 2;
+  const expectedPremiumMove = (expectedSpotMove * delta * effectiveDeltaMul)
+    + (gamma * Math.pow(expectedSpotMove, 2)) / 2;
   factors.expectedSpotMove = Number(expectedSpotMove.toFixed(2));
   factors.expectedPremiumMove = Number(expectedPremiumMove.toFixed(2));
+  factors.effectiveDeltaMul = effectiveDeltaMul;
   if (expectedPremiumMove < targetPts) {
     blockers.push(
       `Expected premium move ${expectedPremiumMove.toFixed(1)}pts < target ${targetPts}pts ` +
-      `(spotMove=${expectedSpotMove.toFixed(1)} × delta=${delta.toFixed(2)})`
+      `(spotMove=${expectedSpotMove.toFixed(1)} × delta=${delta.toFixed(2)} × ${effectiveDeltaMul})`
     );
   }
 

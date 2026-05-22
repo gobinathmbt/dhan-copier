@@ -478,8 +478,24 @@ async function _runOnce(label) {
   }
 }
 
+let _intervalMs = null;
+
 function start({ intervalMs = 5_000 } = {}) {
-  if (_timer) return;
+  // If already running at the SAME (or finer) cadence, no-op.
+  // If a finer cadence is requested, reconfigure the timer so the
+  // engine's 5s call wins over server.js's 60s boot call. Without this,
+  // the boot timer's 60s cadence would silently lock out the engine's
+  // intended 5s cadence (the original `if (_timer) return` guard).
+  if (_timer && _intervalMs && intervalMs >= _intervalMs) {
+    return;
+  }
+  if (_timer) {
+    clearInterval(_timer);
+    _timer = null;
+    logger.info({ from: _intervalMs, to: intervalMs },
+      '[liveFeedIntegrity] reconfiguring sweeper cadence');
+  }
+  _intervalMs = intervalMs;
   // Run once immediately (don't block the caller — fire-and-forget)
   _runOnce('initial').catch(() => {});
   // Periodic — every 5s during market hours so missing candles are
@@ -495,6 +511,7 @@ function start({ intervalMs = 5_000 } = {}) {
 
 function stop() {
   if (_timer) { clearInterval(_timer); _timer = null; }
+  _intervalMs = null;
 }
 
 module.exports = {

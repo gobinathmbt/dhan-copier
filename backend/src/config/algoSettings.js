@@ -285,32 +285,61 @@ const ALGO_SETTINGS = {
     sizingFactor: 0.7,
   },
 
-  // ── 15-Point Guarantee Validator (CALIBRATED 2026-05-21 v2) ───────────
+  // ── 15-Point Guarantee Validator (CALIBRATED 2026-05-22) ───────────────
   // Indian-index + expiry-aware thresholds.
+  //
+  // 2026-05-22: Tightened after observed bleed pattern in chop:
+  //   • minAtrPts:     4 → 8     (rejects sub-8pt ATR; can't make 15pt premium)
+  //   • minVolSpikeMul: 0.5 → 0.8 (require real participation surge, not chop)
+  //   • effectiveDeltaMul: 0.85   (NEW — premium captures only 85% of
+  //                                delta×spotMove in low-IV regimes — was
+  //                                projecting 19pts but capturing 4pts)
+  //   • requirePositivePnlByMs: 60_000 (NEW — entries that haven't moved
+  //                                 in our favor by 60s are usually wrong)
   supportScalpValidator: {
-    minDeltaAbs:    0.30,       // 0.40→0.30 (allow slightly OTM)
-    minVolSpikeMul: 0.5,        // 1.5→0.5 (per-strike volume lower on indices)
-    minIv:          10,         // 40→10 (Indian indices trade 13-20%)
-    maxIv:          90,
-    maxSpreadPct:   2.0,        // 1.0→2.0 (fast-moving options)
-    maxThetaPct:    250,        // 5→250 (expiry-day theta is 100-200%/day)
-    minAtrPts:      4,          // 6→4 (allow tighter ranges)
-    minTfsAligned:  2,          // 3→2 (slow TFs lag fast breakouts)
-    requireMtfUtBot: true,
-    skipLast1mCheck: false,
+    minDeltaAbs:          0.30,    // 0.40→0.30 (allow slightly OTM)
+    minVolSpikeMul:       0.8,     // 0.5→0.8 (require real participation)
+    minIv:                10,      // 40→10 (Indian indices trade 13-20%)
+    maxIv:                90,
+    maxSpreadPct:         2.0,     // 1.0→2.0 (fast-moving options)
+    maxThetaPct:          250,     // 5→250 (expiry-day theta is 100-200%/day)
+    minAtrPts:            8,       // 4→8 (need real volatility for 15pt scalp)
+    minTfsAligned:        2,       // 3→2 (slow TFs lag fast breakouts)
+    requireMtfUtBot:      true,
+    skipLast1mCheck:      false,
+    effectiveDeltaMul:    0.85,    // damp expected premium move (low-IV reality)
   },
 
-  // ── Support Scalp EXIT Validator (2026-05-20) ──────────────────────────
+  // ── Support Scalp EXIT Validator (CALIBRATED 2026-05-22) ──────────────
   // Mirrors the entry validator — re-checks the same microstructure factors
-  // continuously to exit BEFORE SL hits if the trend reverses. Zero-loss
-  // tolerance philosophy: if 2 of 6 factors flip, cut and re-deploy.
+  // continuously to exit BEFORE SL hits if the trend reverses.
+  //
+  // 2026-05-22 changes (after 7-trade bleed pattern observed):
+  //   • IV check now uses entryIv baseline + 25% drop, not absolute floor
+  //     (was firing on every trade because Indian IV is 13-18%, well below
+  //      the old "< 25%" absolute floor).
+  //   • Added postLossCooldownSec: skip new entries on the SAME strike
+  //     for 5 min after a losing exit (was re-firing identical setup
+  //     every cycle, racking up 5+ losses on the same thesis).
+  //   • Added quickFailSec/quickFailPnlPts: if the trade hasn't moved in
+  //     our favor by 60s, the setup is wrong — exit immediately rather
+  //     than waiting for time_decay at 180s.
   supportScalpExit: {
-    minHoldSec:        30,      // Below this only hard SL exits allowed
-    maxHoldSec:        300,     // Hard ceiling regardless of P&L
-    peakGiveBackPct:   0.50,    // Exit if peak gave back ≥50%
-    minProfitToTrail:  10,      // Lift SL to breakeven once +10pts profit
-    minTfsAligned:     2,       // Exit if <2 of 4 TFs still in direction
-    maxFailedFactors:  2,       // Exit if 2+ of 6 microstructure factors flip
+    minHoldSec:           30,      // Below this only hard SL exits allowed
+    maxHoldSec:           300,     // Hard ceiling regardless of P&L
+    peakGiveBackPct:      0.50,    // Exit if peak gave back ≥50%
+    minProfitToTrail:     10,      // Lift SL to breakeven once +10pts profit
+    minTfsAligned:        2,       // Exit if <2 of 4 TFs still in direction
+    maxFailedFactors:     2,       // Exit if 2+ of 6 microstructure factors flip
+    ivDropExitPct:        0.25,    // 25% relative drop from entry IV → exit
+    // Post-loss cooldown — block new entries on the same strike for this
+    // many seconds after a loss. Prevents "re-fire same losing thesis"
+    // pattern. Honored by entry engine via state.lastLossByStrike map.
+    postLossCooldownSec:  300,
+    // Quick-fail: if trade hasn't reached this P&L within this time, exit
+    // — the directional thesis is wrong, don't ride it to time_decay loss.
+    quickFailSec:         60,
+    quickFailMinPnlPts:   0.5,
   },
 
   // ── Trading symbols (for multi-symbol routing) ─────────────────────────

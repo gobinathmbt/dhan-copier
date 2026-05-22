@@ -137,22 +137,26 @@ const ScalpingSessionSchema = new mongoose.Schema(
         targetMin: 15, targetMax: 22, sizingFactor: 0.7,
       }) },
 
-      // ── 15-Point Guarantee Validator (CALIBRATED 2026-05-21 v2) ────
+      // ── 15-Point Guarantee Validator (CALIBRATED 2026-05-22) ───────
       supportScalpValidator: { type: mongoose.Schema.Types.Mixed, default: () => ({
-        minDeltaAbs: 0.30, minVolSpikeMul: 0.5,
+        minDeltaAbs: 0.30, minVolSpikeMul: 0.8,
         minIv: 10, maxIv: 90, maxSpreadPct: 2.0,
-        maxThetaPct: 250, minAtrPts: 4,
+        maxThetaPct: 250, minAtrPts: 8,
         minTfsAligned: 2, requireMtfUtBot: true,
         skipLast1mCheck: false,
+        effectiveDeltaMul: 0.85,
       }) },
 
-      // ── Support Scalp EXIT Validator (2026-05-20) ──────────────────
+      // ── Support Scalp EXIT Validator (CALIBRATED 2026-05-22) ───────
       // Mirrors the entry validator — re-checks the same microstructure
       // factors mid-trade. If 2+ of 6 flip, exit fast (zero-loss tolerance).
       supportScalpExit: { type: mongoose.Schema.Types.Mixed, default: () => ({
         minHoldSec: 30, maxHoldSec: 300,
         peakGiveBackPct: 0.50, minProfitToTrail: 10,
         minTfsAligned: 2, maxFailedFactors: 2,
+        ivDropExitPct: 0.25,
+        postLossCooldownSec: 300,
+        quickFailSec: 60, quickFailMinPnlPts: 0.5,
       }) },
 
       // ── TRADING SYMBOLS (NEW 2026-05-19) ─────────────────────────────

@@ -41,6 +41,13 @@ const ScalpingTradeSchema = new mongoose.Schema(
     // Per-trade AI overrides (set at entry by entryEngine)
     maxHoldSeconds: { type: Number, default: 180 },
     aiEntryDecision: { type: mongoose.Schema.Types.Mixed },
+    // ── Entry IV baseline (NEW 2026-05-22) ────────────────────────────
+    // The exit validator compares current IV to this entry baseline to
+    // decide if IV has *meaningfully crashed* (≥ 25% relative drop).
+    // Without it the validator falls back to an absolute floor that
+    // doesn't suit Indian indices (which trade 13-18% IV all day).
+    entryIv:        { type: Number },
+    entrySpotAtm:   { type: Number },
     // Hybrid engine snapshot — captured at entry, used by hybrid monitor for decay analysis
     hybridEntrySnapshot: { type: mongoose.Schema.Types.Mixed },
     hasReachedTarget: { type: Boolean, default: false },
