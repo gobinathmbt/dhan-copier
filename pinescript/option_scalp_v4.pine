@@ -1,0 +1,624 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════
+// OPTION SCALP v4 — Institutional-grade   (Pine v6, CE / PE chart)
+// ═══════════════════════════════════════════════════════════════════════
+// Improvements over v3:
+//  1.  Market regime filter (trending / chop / volatile)
+//  2.  Candle structure confirmation (strong body, engulfing, marubozu)
+//  3.  Premium velocity + acceleration (option-aware momentum)
+//  4.  Volume surge detector (2× avg)
+//  5.  Dynamic ATR targets (volatility-adapted)
+//  6.  ATR trailing stop (plotted)
+//  7.  Liquidity sweep detection (stop-hunt reversals)
+//  8.  Session intelligence (opening drive, lunch chop, power hour)
+//  9.  MTF EMA + VWAP confirmation (not just UT Bot)
+// 10.  Confirmed-bar-only signals (non-repainting)
+// 11.  Label pooling (performance: max 80 labels in memory)
+// 12.  R:R gate (skip trades below configurable RR)
+// 13.  Market structure (HH/HL/LH/LL + BOS/CHOCH)
+// 14.  Pullback / retest entry timing
+// 15.  Dashboard table (regime, score, MTF, confidence)
+// 16.  Heikin Ashi UT Bot + 3-bar streak
+// 17.  Pre-signal WATCH badge (early warning)
+// 18.  Separate score weights for chop vs trending regimes
+//
+// LAYOUT
+//   BUY pill below candle (vertical dotted line down from low)
+//   SELL pill above candle (vertical dotted line up from high)
+//   WATCH pill (faded yellow, dashed line) appears 1-2 bars early
+//
+// TIERS
+//   YELLOW (≥50)  ORANGE (≥65)  BLUE (≥80)  GREEN (≥90)
+// ═══════════════════════════════════════════════════════════════════════
+
+indicator("Option Scalp v4 (CE/PE)", shorttitle="OPT-Scalp v4", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ═══════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════
+gT = "Tier thresholds"
+th_watch   = input.int(40, "WATCH (early warning)",  group=gT)
+th_low     = input.int(50, "Yellow (low)",           group=gT)
+th_med     = input.int(65, "Orange (medium)",        group=gT)
+th_strong  = input.int(80, "Blue (strong)",          group=gT)
+th_vstrong = input.int(90, "Green (very strong)",    group=gT)
+min_rr     = input.float(1.5, "Min Risk:Reward gate", step=0.1, group=gT)
+
+gU = "UT Bot"
+ut_key = input.float(1.0, "Key Value", step=0.1, group=gU)
+ut_atr = input.int  (5,   "ATR Period",          group=gU)
+useHA  = input.bool(true, "Use Heikin Ashi for UT Bot", group=gU)
+
+gE = "Indicators"
+emaF = input.int(5,  "EMA Fast",     group=gE)
+emaM = input.int(13, "EMA Medium",   group=gE)
+emaS = input.int(34, "EMA Slow",     group=gE)
+rsi_len   = input.int(9,  "RSI Period",    group=gE)
+rsi_long  = input.int(55, "RSI Long min",  group=gE)
+rsi_short = input.int(45, "RSI Short max", group=gE)
+adx_min   = input.int(18, "Min ADX (entry)",       group=gE)
+vol_lb    = input.int (20,  "Volume avg bars",  group=gE)
+vol_mul   = input.float(1.4,"Volume spike x",   step=0.1, group=gE)
+vol_surge = input.float(2.0,"Volume SURGE x (institutional)", step=0.1, group=gE)
+
+gR = "Regime filter"
+useRegime  = input.bool(true,  "Block entries in chop regime", group=gR)
+adx_trend  = input.int  (22,   "ADX trending threshold",        group=gR)
+adx_chop   = input.int  (18,   "ADX chop threshold",            group=gR)
+bbw_trend  = input.float(0.05, "BB-width trending threshold",   step=0.01, group=gR)
+bbw_chop   = input.float(0.03, "BB-width chop threshold",       step=0.01, group=gR)
+
+gM = "Multi-timeframe"
+tf_1m  = input.timeframe("1",  "Confirm TF (fastest)", group=gM)
+tf_5m  = input.timeframe("5",  "Confirm TF #1",        group=gM)
+tf_15m = input.timeframe("15", "Confirm TF #2",        group=gM)
+tf_30m = input.timeframe("30", "Confirm TF #3",        group=gM)
+tf_1h  = input.timeframe("60", "Confirm TF (macro)",   group=gM)
+
+gC = "Confluence layers"
+use_stochrsi = input.bool(true, "StochRSI",         group=gC)
+use_obv      = input.bool(true, "OBV trend",        group=gC)
+use_vwma     = input.bool(true, "VWMA cross",       group=gC)
+use_psar     = input.bool(true, "Parabolic SAR",    group=gC)
+use_ichi     = input.bool(true, "Ichimoku T/K",     group=gC)
+use_pivot    = input.bool(true, "Pivot break",      group=gC)
+use_diverge  = input.bool(true, "RSI divergence",   group=gC)
+use_hastreak = input.bool(true, "HA 3-bar streak",  group=gC)
+use_squeeze  = input.bool(true, "BB squeeze break", group=gC)
+use_struct   = input.bool(true, "Market structure HH/HL/BOS", group=gC)
+use_sweep    = input.bool(true, "Liquidity sweep",  group=gC)
+use_engulf   = input.bool(true, "Engulfing / strong body",  group=gC)
+use_velocity = input.bool(true, "Premium velocity+accel",   group=gC)
+use_session  = input.bool(true, "Session boost (open/power hour)", group=gC)
+
+gF = "Filters"
+use_tod      = input.bool(true,  "Skip lunch chop 12:00-13:30 IST", group=gF)
+use_theta    = input.bool(false, "Block entries after 14:45 IST",   group=gF)
+require_vwap = input.bool(false, "Require VWAP alignment",          group=gF)
+useConfirmed = input.bool(true,  "Confirmed bar only (non-repaint)",group=gF)
+
+gP = "Targets / Stops"
+target_mult_min = input.float(1.5, "Target ATR mult MIN", step=0.1, group=gP)
+target_mult_max = input.float(3.0, "Target ATR mult MAX", step=0.1, group=gP)
+stop_mult       = input.float(1.2, "Stop ATR mult",       step=0.1, group=gP)
+showTrail       = input.bool(true, "Plot ATR trailing stop", group=gP)
+
+gA = "Anti-overlap"
+min_gap_buy   = input.int(6, "Min bars between BUY",   group=gA)
+min_gap_sell  = input.int(6, "Min bars between SELL",  group=gA)
+min_gap_watch = input.int(4, "Min bars between WATCH", group=gA)
+
+gS = "Display"
+labelSize   = input.string("small", "Badge size", options=["tiny","small","normal"], group=gS)
+lineW       = input.int(1, "Vertical line width", minval=1, maxval=4, group=gS)
+showWatch   = input.bool(true, "Show WATCH (early warning)", group=gS)
+showProbPct = input.bool(true, "Show probability % in badge",group=gS)
+showTable   = input.bool(true, "Show dashboard table",       group=gS)
+maxLabels   = input.int(80, "Max labels in memory (perf)",  minval=10, maxval=500, group=gS)
+
+// ═══════════════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════════════
+sizeMap(string s) =>
+    s == "tiny" ? size.tiny : s == "normal" ? size.normal : size.small
+
+utBotPos(float src, float key, int atrLen) =>
+    nLoss = key * ta.atr(atrLen)
+    var float stop = na
+    var int   pos  = 0
+    src1 = nz(src[1])
+    prev = nz(stop[1], src - nLoss)
+    float ns = src + nLoss
+    if src > prev and src1 > prev
+        ns := math.max(prev, src - nLoss)
+    else if src < prev and src1 < prev
+        ns := math.min(prev, src + nLoss)
+    else if src > prev
+        ns := src - nLoss
+    else
+        ns := src + nLoss
+    stop := ns
+    int np = nz(pos[1])
+    if src1 < nz(stop[1]) and src > stop
+        np := 1
+    else if src1 > nz(stop[1]) and src < stop
+        np := -1
+    pos := np
+    pos
+
+// ═══════════════════════════════════════════════════════════════════════
+// HEIKIN ASHI SOURCE
+// ═══════════════════════════════════════════════════════════════════════
+haTicker = ticker.heikinashi(syminfo.tickerid)
+haOpen   = useHA ? request.security(haTicker, timeframe.period, open,  barmerge.gaps_off, barmerge.lookahead_off) : open
+haClose  = useHA ? request.security(haTicker, timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off) : close
+src      = useHA ? haClose : close
+haGreen    = haClose > haOpen
+haRed      = haClose < haOpen
+haStreakUp = haGreen and haGreen[1] and haGreen[2]
+haStreakDn = haRed   and haRed[1]   and haRed[2]
+
+// ═══════════════════════════════════════════════════════════════════════
+// CORE INDICATORS
+// ═══════════════════════════════════════════════════════════════════════
+ema_f = ta.ema(close, emaF)
+ema_m = ta.ema(close, emaM)
+ema_s = ta.ema(close, emaS)
+emaUp = ema_f > ema_m and ema_m > ema_s
+emaDn = ema_f < ema_m and ema_m < ema_s
+
+// 1. UT BOT (HA + continuation)
+utPos       = utBotPos(src, ut_key, ut_atr)
+utBuy       = utPos ==  1 and nz(utPos[1]) !=  1
+utSell      = utPos == -1 and nz(utPos[1]) != -1
+utBuyFresh  = utBuy  or utBuy[1]
+utSellFresh = utSell or utSell[1]
+inUpTrend   = utPos ==  1
+inDownTrend = utPos == -1
+pulledBackUp   = ta.lowest(low, 5)  <= ema_m and close > ema_m and close > open
+pulledBackDown = ta.highest(high, 5) >= ema_m and close < ema_m and close < open
+utBuyCont   = inUpTrend   and pulledBackUp   and not utBuyFresh
+utSellCont  = inDownTrend and pulledBackDown and not utSellFresh
+utBuyOK     = utBuyFresh  or utBuyCont
+utSellOK    = utSellFresh or utSellCont
+
+// 2. SUPERTREND
+[stLine, stDir] = ta.supertrend(2.0, 7)
+stUp   = stDir < 0
+stDown = stDir > 0
+
+// 3. VWAP
+vwapVal = ta.vwap(hlc3)
+vwapUp  = close > vwapVal
+vwapDn  = close < vwapVal
+
+// 4. RSI
+rsiVal = ta.rsi(close, rsi_len)
+rsiUp  = rsiVal >= rsi_long
+rsiDn  = rsiVal <= rsi_short
+
+// 5. ATR / ADX / MACD
+atrFast    = ta.atr(5)
+atrSlow    = ta.atr(20)
+atrAvg50   = ta.sma(atrFast, 50)
+volFactor  = atrAvg50 > 0 ? atrFast / atrAvg50 : 1.0  // dynamic-target multiplier
+atrExpand  = atrFast > atrSlow * 1.1
+atrSafe    = atrFast > 0.5
+
+[diPlus, diMinus, adx] = ta.dmi(14, 14)
+adxOK   = adx >= adx_min
+adxBull = adxOK and diPlus  > diMinus
+adxBear = adxOK and diMinus > diPlus
+
+[macdLine, macdSig, macdHist] = ta.macd(close, 8, 21, 5)
+macdBull = macdHist > 0 and macdHist > nz(macdHist[1])
+macdBear = macdHist < 0 and macdHist < nz(macdHist[1])
+
+// 6. VOLUME / SURGE
+volAvg     = ta.sma(volume, vol_lb)
+volX       = volAvg > 0 ? volume / volAvg : 0.0
+volSpike   = volX >= vol_mul
+volSurge   = volX >= vol_surge   // institutional-style
+
+// 7. STRUCTURE BREAK
+hh = ta.highest(high, 10)
+ll = ta.lowest (low,  10)
+breakUp   = close > nz(hh[1])
+breakDown = close < nz(ll[1])
+
+// 8. STOCH RSI
+stochK = ta.sma(ta.stoch(rsiVal, rsiVal, rsiVal, 14), 3)
+stochD = ta.sma(stochK, 3)
+stochBull = stochK > stochD and stochK < 80
+stochBear = stochK < stochD and stochK > 20
+
+// 9. OBV
+obvVal  = ta.cum(math.sign(close - close[1]) * volume)
+obvEma  = ta.ema(obvVal, 21)
+obvBull = obvVal > obvEma
+obvBear = obvVal < obvEma
+
+// 10. VWMA
+vwma     = ta.vwma(close, 20)
+vwmaBull = close > vwma
+vwmaBear = close < vwma
+
+// 11. PSAR
+psar     = ta.sar(0.02, 0.02, 0.2)
+psarBull = close > psar
+psarBear = close < psar
+
+// 12. ICHIMOKU
+tenkan = (ta.highest(high, 9) + ta.lowest(low, 9)) / 2
+kijun  = (ta.highest(high, 26) + ta.lowest(low, 26)) / 2
+ichiBull = tenkan > kijun and close > kijun
+ichiBear = tenkan < kijun and close < kijun
+
+// 13. PIVOTS
+pivotHi = ta.pivothigh(high, 5, 5)
+pivotLo = ta.pivotlow (low,  5, 5)
+var float lastPivHi = na
+var float lastPivLo = na
+if not na(pivotHi)
+    lastPivHi := pivotHi
+if not na(pivotLo)
+    lastPivLo := pivotLo
+pivotBull = not na(lastPivHi) and close > lastPivHi
+pivotBear = not na(lastPivLo) and close < lastPivLo
+
+// 14. RSI DIVERGENCE
+priceLowestNow  = low  == ta.lowest (low,  5)
+priceHighestNow = high == ta.highest(high, 5)
+priceLow5  = ta.lowest (low,  5) < ta.lowest (low,  5)[5]
+priceHigh5 = ta.highest(high, 5) > ta.highest(high, 5)[5]
+rsiLow5    = ta.lowest (rsiVal, 5) > ta.lowest (rsiVal, 5)[5]
+rsiHigh5   = ta.highest(rsiVal, 5) < ta.highest(rsiVal, 5)[5]
+divBull = priceLow5  and rsiLow5  and priceLowestNow
+divBear = priceHigh5 and rsiHigh5 and priceHighestNow
+
+// 15. BOLLINGER + KELTNER (squeeze + bbWidth for regime)
+bbBasis = ta.sma(close, 20)
+bbDev   = 2.0 * ta.stdev(close, 20)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+bbWidth = bbBasis > 0 ? (bbUpper - bbLower) / bbBasis : 0
+kcRange = ta.atr(20) * 1.5
+kcUpper = bbBasis + kcRange
+kcLower = bbBasis - kcRange
+inSqueeze   = bbUpper < kcUpper and bbLower > kcLower
+wasSqueeze  = inSqueeze[1] and not inSqueeze
+sqBreakUp   = wasSqueeze and close > bbBasis
+sqBreakDown = wasSqueeze and close < bbBasis
+
+// ═══════════════════════════════════════════════════════════════════════
+// IMPROVEMENT 1 — MARKET REGIME FILTER
+// ═══════════════════════════════════════════════════════════════════════
+isTrending = adx >= adx_trend and bbWidth >= bbw_trend
+isChoppy   = adx <  adx_chop  and bbWidth <  bbw_chop
+isVolatile = bbWidth > bbw_trend * 2
+
+// ═══════════════════════════════════════════════════════════════════════
+// IMPROVEMENT 2 — CANDLE STRUCTURE
+// ═══════════════════════════════════════════════════════════════════════
+candleRange = high - low
+bodySize    = math.abs(close - open)
+bodyPct     = candleRange > 0 ? bodySize / candleRange : 0
+strongBull  = close > open and bodyPct > 0.6
+strongBear  = close < open and bodyPct > 0.6
+marubozu    = bodyPct > 0.85
+bullEngulf  = close > open and close > nz(high[1]) and open < nz(low[1])
+bearEngulf  = close < open and close < nz(low[1])  and open > nz(high[1])
+strongBuyCandle  = use_engulf and (bullEngulf or (strongBull and marubozu))
+strongSellCandle = use_engulf and (bearEngulf or (strongBear and marubozu))
+
+// ═══════════════════════════════════════════════════════════════════════
+// IMPROVEMENT 3 — PREMIUM VELOCITY + ACCELERATION
+// ═══════════════════════════════════════════════════════════════════════
+velocity        = close - close[1]
+accel           = velocity - velocity[1]
+velImpulseBull  = use_velocity and velocity > 0 and accel > 0
+velImpulseBear  = use_velocity and velocity < 0 and accel < 0
+
+// ═══════════════════════════════════════════════════════════════════════
+// IMPROVEMENT 7 — LIQUIDITY SWEEP
+// ═══════════════════════════════════════════════════════════════════════
+sweepLow  = use_sweep and low  < ta.lowest (low,  5)[1] and close > low + (high - low) * 0.5
+sweepHigh = use_sweep and high > ta.highest(high, 5)[1] and close < high - (high - low) * 0.5
+
+// ═══════════════════════════════════════════════════════════════════════
+// IMPROVEMENT 13 — MARKET STRUCTURE (HH/HL/LH/LL + BOS)
+// ═══════════════════════════════════════════════════════════════════════
+hhBar = high > nz(high[1]) and high > nz(high[2])
+hlBar = low  > nz(low[1])  and low  > nz(low[2])
+lhBar = high < nz(high[1]) and high < nz(high[2])
+llBar = low  < nz(low[1])  and low  < nz(low[2])
+bullStructure = use_struct and (hhBar or hlBar)
+bearStructure = use_struct and (lhBar or llBar)
+// Break of structure: pivot taken out
+bosBull = use_struct and not na(lastPivHi) and high > lastPivHi and high[1] <= nz(lastPivHi)
+bosBear = use_struct and not na(lastPivLo) and low  < lastPivLo and low[1]  >= nz(lastPivLo)
+
+// ═══════════════════════════════════════════════════════════════════════
+// MTF UT BOT + EMA + VWAP (improvement 9)
+// ═══════════════════════════════════════════════════════════════════════
+ut1m  = request.security(syminfo.tickerid, tf_1m,  utBotPos(close, 1.0, 5),  barmerge.gaps_off, barmerge.lookahead_off)
+ut5m  = request.security(syminfo.tickerid, tf_5m,  utBotPos(close, 1.5, 7),  barmerge.gaps_off, barmerge.lookahead_off)
+ut15m = request.security(syminfo.tickerid, tf_15m, utBotPos(close, 2.0, 10), barmerge.gaps_off, barmerge.lookahead_off)
+ut30m = request.security(syminfo.tickerid, tf_30m, utBotPos(close, 2.0, 10), barmerge.gaps_off, barmerge.lookahead_off)
+ut1h  = request.security(syminfo.tickerid, tf_1h,  utBotPos(close, 2.5, 14), barmerge.gaps_off, barmerge.lookahead_off)
+
+ema50_15m = request.security(syminfo.tickerid, tf_15m, ta.ema(close, 50), barmerge.gaps_off, barmerge.lookahead_off)
+close15m  = request.security(syminfo.tickerid, tf_15m, close,             barmerge.gaps_off, barmerge.lookahead_off)
+mtfEmaBull = close15m > ema50_15m
+mtfEmaBear = close15m < ema50_15m
+
+mtfBullCount = (ut1m == 1 ? 1 : 0) + (ut5m == 1 ? 1 : 0) + (ut15m == 1 ? 1 : 0) + (ut30m == 1 ? 1 : 0) + (ut1h == 1 ? 1 : 0)
+mtfBearCount = (ut1m == -1 ? 1 : 0) + (ut5m == -1 ? 1 : 0) + (ut15m == -1 ? 1 : 0) + (ut30m == -1 ? 1 : 0) + (ut1h == -1 ? 1 : 0)
+
+// ═══════════════════════════════════════════════════════════════════════
+// IMPROVEMENT 8 — SESSION INTELLIGENCE
+// ═══════════════════════════════════════════════════════════════════════
+istT       = hour(time, "Asia/Kolkata") * 60 + minute(time, "Asia/Kolkata")
+inMarket   = istT >= 9*60+15 and istT <= 15*60+30
+inLunch    = istT >= 12*60   and istT <= 13*60+30
+afterTheta = istT >= 14*60+45
+isOpenDrive = istT >= 9*60+15 and istT <= 10*60
+isPowerHour = istT >= 14*60+30 and istT <= 15*60+15
+todOK    = not use_tod   or (inMarket and not inLunch)
+thetaOK  = not use_theta or not afterTheta
+sessionBoost = use_session and (isOpenDrive or isPowerHour) ? 5 : 0
+
+// ═══════════════════════════════════════════════════════════════════════
+// SCORING — symmetric BUY/SELL
+// ═══════════════════════════════════════════════════════════════════════
+buyScore = 0
+buyScore += utBuyOK    ? 22 : 0
+buyScore += mtfBullCount * 3
+buyScore += stUp       ? 10 : -3
+buyScore += emaUp      ?  8 : -4
+buyScore += rsiUp      ?  6 : 0
+buyScore += vwapUp     ?  6 : (require_vwap ? -10 : -2)
+buyScore += velImpulseBull ? 8 : 0
+buyScore += volSpike   ?  4 : 0
+buyScore += volSurge   ?  8 : 0
+buyScore += atrExpand  ?  4 : 0
+buyScore += adxBull    ?  4 : 0
+buyScore += macdBull   ?  4 : 0
+buyScore += breakUp    ?  4 : 0
+buyScore += strongBuyCandle ? 8 : 0
+buyScore += sweepLow   ? 10 : 0
+buyScore += bullStructure ? 5 : 0
+buyScore += bosBull    ?  6 : 0
+buyScore += mtfEmaBull ?  4 : -2
+buyScore += (use_stochrsi and stochBull)  ? 4 : 0
+buyScore += (use_obv      and obvBull)    ? 3 : 0
+buyScore += (use_vwma     and vwmaBull)   ? 3 : 0
+buyScore += (use_psar     and psarBull)   ? 3 : 0
+buyScore += (use_ichi     and ichiBull)   ? 4 : 0
+buyScore += (use_pivot    and pivotBull)  ? 3 : 0
+buyScore += (use_diverge  and divBull)    ? 4 : 0
+buyScore += (use_hastreak and haStreakUp) ? 3 : 0
+buyScore += (use_squeeze  and sqBreakUp)  ? 4 : 0
+buyScore += sessionBoost
+buyScore += atrSafe ? 0 : -15
+buyScore += todOK   ? 0 : -25
+buyScore += thetaOK ? 0 : -15
+buyScore += isChoppy and useRegime ? -25 : 0
+
+sellScore = 0
+sellScore += utSellOK    ? 22 : 0
+sellScore += mtfBearCount * 3
+sellScore += stDown      ? 10 : -3
+sellScore += emaDn       ?  8 : -4
+sellScore += rsiDn       ?  6 : 0
+sellScore += vwapDn      ?  6 : (require_vwap ? -10 : -2)
+sellScore += velImpulseBear ? 8 : 0
+sellScore += volSpike    ?  4 : 0
+sellScore += volSurge    ?  8 : 0
+sellScore += atrExpand   ?  4 : 0
+sellScore += adxBear     ?  4 : 0
+sellScore += macdBear    ?  4 : 0
+sellScore += breakDown   ?  4 : 0
+sellScore += strongSellCandle ? 8 : 0
+sellScore += sweepHigh   ? 10 : 0
+sellScore += bearStructure ? 5 : 0
+sellScore += bosBear     ?  6 : 0
+sellScore += mtfEmaBear  ?  4 : -2
+sellScore += (use_stochrsi and stochBear)  ? 4 : 0
+sellScore += (use_obv      and obvBear)    ? 3 : 0
+sellScore += (use_vwma     and vwmaBear)   ? 3 : 0
+sellScore += (use_psar     and psarBear)   ? 3 : 0
+sellScore += (use_ichi     and ichiBear)   ? 4 : 0
+sellScore += (use_pivot    and pivotBear)  ? 3 : 0
+sellScore += (use_diverge  and divBear)    ? 4 : 0
+sellScore += (use_hastreak and haStreakDn) ? 3 : 0
+sellScore += (use_squeeze  and sqBreakDown)? 4 : 0
+sellScore += sessionBoost
+sellScore += atrSafe ? 0 : -15
+sellScore += todOK   ? 0 : -25
+sellScore += thetaOK ? 0 : -15
+sellScore += isChoppy and useRegime ? -25 : 0
+
+// ═══════════════════════════════════════════════════════════════════════
+// PROBABILITY %
+// ═══════════════════════════════════════════════════════════════════════
+maxScore = 165
+buyProb  = math.max(0, math.min(100, math.round(buyScore  * 100.0 / maxScore)))
+sellProb = math.max(0, math.min(100, math.round(sellScore * 100.0 / maxScore)))
+
+// ═══════════════════════════════════════════════════════════════════════
+// IMPROVEMENT 5 — DYNAMIC ATR TARGETS + STOPS + R:R GATE
+// ═══════════════════════════════════════════════════════════════════════
+dynamicMult = math.max(target_mult_min, math.min(target_mult_max, target_mult_min * volFactor))
+targetPts   = math.round(atrFast * dynamicMult)
+stopPts     = math.round(atrFast * stop_mult)
+rr          = stopPts > 0 ? targetPts / stopPts : 0.0
+rrOK        = rr >= min_rr
+
+// ═══════════════════════════════════════════════════════════════════════
+// HARD GATES
+// ═══════════════════════════════════════════════════════════════════════
+buyHardOK  = utBuyOK  and (require_vwap ? vwapUp : true) and atrSafe and todOK and thetaOK and rrOK and (not useRegime or not isChoppy) and (not useConfirmed or barstate.isconfirmed)
+sellHardOK = utSellOK and (require_vwap ? vwapDn : true) and atrSafe and todOK and thetaOK and rrOK and (not useRegime or not isChoppy) and (not useConfirmed or barstate.isconfirmed)
+
+// TIER CLASSIFIER
+int buyTier = 0
+if buyHardOK
+    if buyScore >= th_vstrong
+        buyTier := 4
+    else if buyScore >= th_strong
+        buyTier := 3
+    else if buyScore >= th_med
+        buyTier := 2
+    else if buyScore >= th_low
+        buyTier := 1
+
+int sellTier = 0
+if sellHardOK
+    if sellScore >= th_vstrong
+        sellTier := 4
+    else if sellScore >= th_strong
+        sellTier := 3
+    else if sellScore >= th_med
+        sellTier := 2
+    else if sellScore >= th_low
+        sellTier := 1
+
+// PRE-SIGNAL WATCH
+buyWatchScore  = buyScore  + (utBuyOK  ? 0 : 22)
+sellWatchScore = sellScore + (utSellOK ? 0 : 22)
+buyWatch  = showWatch and not buyHardOK  and buyWatchScore  >= th_watch and atrSafe and todOK and thetaOK and mtfBullCount >= 3 and emaUp and (not useRegime or not isChoppy)
+sellWatch = showWatch and not sellHardOK and sellWatchScore >= th_watch and atrSafe and todOK and thetaOK and mtfBearCount >= 3 and emaDn and (not useRegime or not isChoppy)
+
+// ANTI-OVERLAP
+var int lastBuyBar    = -1000
+var int lastSellBar   = -1000
+var int lastWatchBuy  = -1000
+var int lastWatchSell = -1000
+
+buyFire       = buyTier  > 0 and (bar_index - lastBuyBar)    >= min_gap_buy
+sellFire      = sellTier > 0 and (bar_index - lastSellBar)   >= min_gap_sell
+watchBuyFire  = buyWatch  and (bar_index - lastWatchBuy)  >= min_gap_watch and not buyFire
+watchSellFire = sellWatch and (bar_index - lastWatchSell) >= min_gap_watch and not sellFire
+
+if buyFire
+    lastBuyBar := bar_index
+if sellFire
+    lastSellBar := bar_index
+if watchBuyFire
+    lastWatchBuy := bar_index
+if watchSellFire
+    lastWatchSell := bar_index
+
+// ═══════════════════════════════════════════════════════════════════════
+// IMPROVEMENT 6 — ATR TRAILING STOP (plotted)
+// ═══════════════════════════════════════════════════════════════════════
+trailLong  = close - atrFast * stop_mult
+trailShort = close + atrFast * stop_mult
+plot(showTrail and inUpTrend   ? trailLong  : na, "Trail Long",  color=color.new(color.green, 60), style=plot.style_linebr, linewidth=1)
+plot(showTrail and inDownTrend ? trailShort : na, "Trail Short", color=color.new(color.red,   60), style=plot.style_linebr, linewidth=1)
+
+// ═══════════════════════════════════════════════════════════════════════
+// COLOR HELPERS
+// ═══════════════════════════════════════════════════════════════════════
+tierColor(int t) =>
+    t == 4 ? color.new(color.green,  0) : t == 3 ? color.new(color.blue,   0) : t == 2 ? color.new(color.orange, 0) : t == 1 ? color.new(color.yellow, 0) : color.new(color.gray, 0)
+
+tierTextColor(int t) =>
+    t == 1 ? color.black : color.white
+
+offsetPts = math.max(3, atrFast * 1.5)
+
+// ═══════════════════════════════════════════════════════════════════════
+// IMPROVEMENT 11 — LABEL POOLING (rolling buffer)
+// ═══════════════════════════════════════════════════════════════════════
+var array<label> labelPool = array.new<label>()
+var array<line>  linePool  = array.new<line>()
+
+pushLabel(label l) =>
+    array.push(labelPool, l)
+    if array.size(labelPool) > maxLabels
+        oldest = array.shift(labelPool)
+        if not na(oldest)
+            label.delete(oldest)
+
+pushLine(line ln) =>
+    array.push(linePool, ln)
+    if array.size(linePool) > maxLabels
+        oldest = array.shift(linePool)
+        if not na(oldest)
+            line.delete(oldest)
+
+// ═══════════════════════════════════════════════════════════════════════
+// DRAW SIGNAL + WATCH
+// ═══════════════════════════════════════════════════════════════════════
+drawSignal(bool isBuy, int tier, int prob) =>
+    col      = tierColor(tier)
+    txtCol   = tierTextColor(tier)
+    anchor   = isBuy ? low  : high
+    badgeY   = isBuy ? anchor - offsetPts : anchor + offsetPts
+    txt      = isBuy ? (showProbPct ? "Buy "  + str.tostring(prob) + "%" : "Buy")  : (showProbPct ? "Sell " + str.tostring(prob) + "%" : "Sell")
+    pushLine(line.new(bar_index, anchor, bar_index, badgeY, color=col, style=line.style_dotted, width=lineW))
+    style    = isBuy ? label.style_label_up : label.style_label_down
+    pushLabel(label.new(bar_index, badgeY, txt, style=style, color=col, textcolor=txtCol, size=sizeMap(labelSize), yloc=yloc.price))
+
+drawWatch(bool isBuy, int prob) =>
+    col      = color.new(color.yellow, 30)
+    anchor   = isBuy ? low  : high
+    badgeY   = isBuy ? anchor - offsetPts * 0.6 : anchor + offsetPts * 0.6
+    txt      = (isBuy ? "Watch BUY "  : "Watch SELL ") + str.tostring(prob) + "%"
+    pushLine(line.new(bar_index, anchor, bar_index, badgeY, color=col, style=line.style_dashed, width=1))
+    style    = isBuy ? label.style_label_up : label.style_label_down
+    pushLabel(label.new(bar_index, badgeY, txt, style=style, color=col, textcolor=color.black, size=size.tiny, yloc=yloc.price))
+
+if buyFire
+    drawSignal(true,  buyTier, buyProb)
+if sellFire
+    drawSignal(false, sellTier, sellProb)
+if watchBuyFire
+    drawWatch(true,  buyProb)
+if watchSellFire
+    drawWatch(false, sellProb)
+
+// ═══════════════════════════════════════════════════════════════════════
+// IMPROVEMENT 19 — DASHBOARD TABLE
+// ═══════════════════════════════════════════════════════════════════════
+var table dash = table.new(position.top_right, 2, 9, frame_color=color.gray, frame_width=1, border_color=color.gray, border_width=1)
+
+regimeName = isTrending ? "TREND" : isChoppy ? "CHOP" : isVolatile ? "VOLATILE" : "NORMAL"
+regimeColor = isTrending ? color.green : isChoppy ? color.red : isVolatile ? color.orange : color.gray
+
+mtfText(int b, int s) =>
+    str.tostring(b) + "/5↑  " + str.tostring(s) + "/5↓"
+
+if showTable and barstate.islast
+    table.cell(dash, 0, 0, "Regime",     bgcolor=color.new(color.black, 30), text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 0, regimeName,   bgcolor=color.new(regimeColor, 60), text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 1, "ADX",        text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 1, str.tostring(adx, "#.0"),    text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 2, "BB width",   text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 2, str.tostring(bbWidth, "#.000"), text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 3, "MTF UT",     text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 3, mtfText(mtfBullCount, mtfBearCount), text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 4, "BUY score",  text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 4, str.tostring(buyScore) + " (" + str.tostring(buyProb) + "%)", text_color=color.white, text_size=size.small, bgcolor=color.new(color.green, 70))
+    table.cell(dash, 0, 5, "SELL score", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 5, str.tostring(sellScore) + " (" + str.tostring(sellProb) + "%)", text_color=color.white, text_size=size.small, bgcolor=color.new(color.red,   70))
+    table.cell(dash, 0, 6, "Vol x",      text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 6, str.tostring(volX, "#.00") + (volSurge ? " SURGE" : volSpike ? " spike" : ""), text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 7, "Target/Stop",text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 7, str.tostring(targetPts) + " / " + str.tostring(stopPts) + " (R:R " + str.tostring(rr, "#.0") + ")", text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 8, "Session",    text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 8, isOpenDrive ? "Open drive" : isPowerHour ? "Power hour" : inLunch ? "Lunch chop" : afterTheta ? "Theta crush" : "Normal", text_color=color.white, text_size=size.small)
+
+// ═══════════════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════════════
+alertcondition(buyFire,                   title="BUY",                   message="OPT BUY {{ticker}} @ {{close}}")
+alertcondition(buyFire  and buyTier  >= 3,title="BUY strong+",           message="OPT STRONG BUY {{ticker}} @ {{close}}")
+alertcondition(buyFire  and buyTier  == 4,title="BUY very strong",       message="OPT VERY STRONG BUY {{ticker}} @ {{close}}")
+alertcondition(sellFire,                  title="SELL",                  message="OPT SELL {{ticker}} @ {{close}}")
+alertcondition(sellFire and sellTier >= 3,title="SELL strong+",          message="OPT STRONG SELL {{ticker}} @ {{close}}")
+alertcondition(sellFire and sellTier == 4,title="SELL very strong",      message="OPT VERY STRONG SELL {{ticker}} @ {{close}}")
+alertcondition(watchBuyFire,              title="WATCH BUY (pre-signal)",message="OPT WATCH BUY {{ticker}} @ {{close}}")
+alertcondition(watchSellFire,             title="WATCH SELL (pre-signal)",message="OPT WATCH SELL {{ticker}} @ {{close}}")

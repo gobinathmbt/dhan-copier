@@ -1,0 +1,343 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════
+// ULTIMATE TRADE SIGNAL — Scalp / Intraday / Holding   (Pine v6)
+// ═══════════════════════════════════════════════════════════════════════
+// Three-mode signal engine on a single chart. Each candle can fire any
+// combination of:
+//
+//   • BUY/SELL SCALP       — 3m primary TF,  target ≈ 10–15 pts
+//   • BUY/SELL INTRADAY    — 15m primary TF, target ≈ 25–60 pts
+//   • BUY/SELL HOLDING     — Daily TF,       target ≈ 80–250 pts (multi-day)
+//
+// Each label shows:    "BUY SCALP +15pts  120→135"
+//
+// Modes are scored independently from the same confluence stack
+// (UT Bot, Supertrend, VWAP, EMA, RSI, MTF, Volume, Momentum, ATR,
+// ADX, MACD, OI/Gamma proxies). All three labels can appear on the
+// same candle when conditions align.
+//
+// COLORS
+//   Scalp BUY   → green pill   |  Scalp SELL  → red pill
+//   Intraday BUY→ blue pill    |  Intraday SELL → orange pill
+//   Holding BUY → purple pill  |  Holding SELL → maroon pill
+//
+// ═══════════════════════════════════════════════════════════════════════
+
+indicator("Ultimate Scalp / Intraday / Holding", shorttitle="Ultimate-SIH", overlay=true, max_labels_count=500)
+
+// ─── INPUTS ───────────────────────────────────────────────────────────
+gMode = "Modes ON/OFF"
+useScalp    = input.bool(true, "Show SCALP signals (3m TF, ~10–15 pts)",   group=gMode)
+useIntraday = input.bool(true, "Show INTRADAY signals (15m TF, ~25–60 pts)",group=gMode)
+useHolding  = input.bool(true, "Show HOLDING signals (Daily TF, multi-day)",group=gMode)
+
+gThr = "Score thresholds"
+thrScalp    = input.int(70, "Scalp min score",     group=gThr)
+thrIntraday = input.int(75, "Intraday min score",  group=gThr)
+thrHolding  = input.int(80, "Holding min score",   group=gThr)
+
+gTf = "Timeframes"
+tf_5m   = input.timeframe("5",   "5m TF",    group=gTf)
+tf_15m  = input.timeframe("15",  "15m TF",   group=gTf)
+tf_1h   = input.timeframe("60",  "1H TF",    group=gTf)
+tf_d    = input.timeframe("D",   "Daily TF", group=gTf)
+
+gFlt = "Filters"
+adx_min = input.int (20,   "Min ADX (trending regime)", group=gFlt)
+use_tod = input.bool(true, "Skip lunch chop 12:00–13:30 IST", group=gFlt)
+
+gMul = "Target multipliers (× ATR)"
+mScalp    = input.float(2.5, "Scalp target ×ATR(5m)",      step=0.1, group=gMul)
+mIntraday = input.float(2.5, "Intraday target ×ATR(15m)",  step=0.1, group=gMul)
+mHolding  = input.float(2.5, "Holding target ×ATR(D)",     step=0.1, group=gMul)
+
+gSty = "Label style"
+labelSize  = input.string("normal", "Label size", options=["tiny","small","normal","large"], group=gSty)
+showArrows = input.bool(false, "Also plot tiny arrow shapes", group=gSty)
+
+// ─── HELPERS ──────────────────────────────────────────────────────────
+sizeMap(string s) =>
+    s == "tiny" ? size.tiny : s == "small" ? size.small : s == "large" ? size.large : size.normal
+
+utBotPos(float src, float key, int atrLen) =>
+    nLoss = key * ta.atr(atrLen)
+    var float stop = na
+    var int   pos  = 0
+    src1 = nz(src[1])
+    prev = nz(stop[1], src - nLoss)
+    float ns = src + nLoss
+    if src > prev and src1 > prev
+        ns := math.max(prev, src - nLoss)
+    else if src < prev and src1 < prev
+        ns := math.min(prev, src + nLoss)
+    else if src > prev
+        ns := src - nLoss
+    else
+        ns := src + nLoss
+    stop := ns
+    int np = nz(pos[1])
+    if src1 < nz(stop[1]) and src > stop
+        np := 1
+    else if src1 > nz(stop[1]) and src < stop
+        np := -1
+    pos := np
+    pos
+
+// ─── CORE INDICATORS (chart TF) ───────────────────────────────────────
+utPos    = utBotPos(close, 1.5, 10)
+utBuy    = utPos ==  1 and nz(utPos[1]) !=  1
+utSell   = utPos == -1 and nz(utPos[1]) != -1
+utBuyOK  = utBuy  or utBuy[1]
+utSellOK = utSell or utSell[1]
+
+[stLine, stDir] = ta.supertrend(2.5, 10)
+stUp   = stDir < 0
+stDown = stDir > 0
+
+vwapVal = ta.vwap(hlc3)
+vwapUp  = close > vwapVal
+vwapDn  = close < vwapVal
+
+ema9    = ta.ema(close, 9)
+ema20   = ta.ema(close, 20)
+ema50   = ta.ema(close, 50)
+emaUp   = ema9 > ema20 and ema20 > ema50
+emaDn   = ema9 < ema20 and ema20 < ema50
+
+rsiVal = ta.rsi(close, 14)
+rsiUp  = rsiVal >= 55
+rsiDn  = rsiVal <= 45
+
+volAvg   = ta.sma(volume, 20)
+volX     = volAvg > 0 ? volume / volAvg : 0.0
+volSpike = volX >= 1.5
+
+mom3  = (close - close[3]) / close[3] * 100
+momUp = mom3 >=  0.08
+momDn = mom3 <= -0.08
+
+[diPlus, diMinus, adx] = ta.dmi(14, 14)
+adxOK   = adx >= adx_min
+adxBull = adxOK and diPlus  > diMinus
+adxBear = adxOK and diMinus > diPlus
+
+[macdLine, macdSig, macdHist] = ta.macd(close, 12, 26, 9)
+macdBull = macdHist > 0 and macdHist > nz(macdHist[1])
+macdBear = macdHist < 0 and macdHist < nz(macdHist[1])
+
+signedVol = (close > open ? 1 : close < open ? -1 : 0) * volume
+oiFlow    = ta.sma(signedVol, 5)
+oiBull    = oiFlow > 0
+oiBear    = oiFlow < 0
+
+gammaUp = ta.atr(5) > ta.atr(20)
+
+// ─── HIGHER TF SECURITY READS ─────────────────────────────────────────
+// 5m
+ut5m       = request.security(syminfo.tickerid, tf_5m,  utBotPos(close, 2.0, 10), barmerge.gaps_off, barmerge.lookahead_off)
+atr5m      = request.security(syminfo.tickerid, tf_5m,  ta.atr(14),               barmerge.gaps_off, barmerge.lookahead_off)
+// 15m
+ut15m      = request.security(syminfo.tickerid, tf_15m, utBotPos(close, 2.5, 14), barmerge.gaps_off, barmerge.lookahead_off)
+atr15m     = request.security(syminfo.tickerid, tf_15m, ta.atr(14),               barmerge.gaps_off, barmerge.lookahead_off)
+ema50_15m  = request.security(syminfo.tickerid, tf_15m, ta.ema(close, 50),        barmerge.gaps_off, barmerge.lookahead_off)
+close15m   = request.security(syminfo.tickerid, tf_15m, close,                    barmerge.gaps_off, barmerge.lookahead_off)
+// 1H macro
+htfClose   = request.security(syminfo.tickerid, tf_1h,  close,                    barmerge.gaps_off, barmerge.lookahead_off)
+htfEma     = request.security(syminfo.tickerid, tf_1h,  ta.ema(close, 50),        barmerge.gaps_off, barmerge.lookahead_off)
+macroUp    = htfClose > htfEma
+macroDn    = htfClose < htfEma
+// Daily for HOLDING mode
+dayClose   = request.security(syminfo.tickerid, tf_d,   close,                    barmerge.gaps_off, barmerge.lookahead_off)
+dayEma20   = request.security(syminfo.tickerid, tf_d,   ta.ema(close, 20),        barmerge.gaps_off, barmerge.lookahead_off)
+dayEma50   = request.security(syminfo.tickerid, tf_d,   ta.ema(close, 50),        barmerge.gaps_off, barmerge.lookahead_off)
+dayAtr     = request.security(syminfo.tickerid, tf_d,   ta.atr(14),               barmerge.gaps_off, barmerge.lookahead_off)
+dayUtPos   = request.security(syminfo.tickerid, tf_d,   utBotPos(close, 3.0, 14), barmerge.gaps_off, barmerge.lookahead_off)
+dayBull    = dayClose > dayEma20 and dayEma20 > dayEma50 and dayUtPos == 1
+dayBear    = dayClose < dayEma20 and dayEma20 < dayEma50 and dayUtPos == -1
+
+// ─── TIME-OF-DAY ──────────────────────────────────────────────────────
+istT     = hour(time, "Asia/Kolkata") * 60 + minute(time, "Asia/Kolkata")
+inMarket = istT >= 9*60+15 and istT <= 15*60+30
+inLunch  = istT >= 12*60   and istT <= 13*60+30
+todOK    = not use_tod or (inMarket and not inLunch)
+
+// ═══════════════════════════════════════════════════════════════════════
+// SCORING — three independent mode scores (max ≈ 100)
+// ═══════════════════════════════════════════════════════════════════════
+
+// SCALP — fast 3m / chart-TF confluence
+scalpBull() =>
+    s = 0
+    s += utBuyOK   ? 30 : 0
+    s += ut5m  ==  1 ? 10 : 0
+    s += ut15m ==  1 ? 10 : 0
+    s += stUp      ? 10 : -3
+    s += emaUp     ?  8 : -4
+    s += rsiUp     ?  7 : 0
+    s += vwapUp    ?  8 : -4
+    s += momUp     ? 10 : 0
+    s += volSpike  ?  6 : 0
+    s += oiBull    ?  4 : 0
+    s += adxBull   ?  4 : 0
+    s += macdBull  ?  4 : 0
+    s += macroUp   ?  3 : -2
+    s += gammaUp   ?  3 : 0
+    s += todOK     ?  0 : -25
+    s
+
+scalpBear() =>
+    s = 0
+    s += utSellOK  ? 30 : 0
+    s += ut5m  == -1 ? 10 : 0
+    s += ut15m == -1 ? 10 : 0
+    s += stDown    ? 10 : -3
+    s += emaDn     ?  8 : -4
+    s += rsiDn     ?  7 : 0
+    s += vwapDn    ?  8 : -4
+    s += momDn     ? 10 : 0
+    s += volSpike  ?  6 : 0
+    s += oiBear    ?  4 : 0
+    s += adxBear   ?  4 : 0
+    s += macdBear  ?  4 : 0
+    s += macroDn   ?  3 : -2
+    s += gammaUp   ?  3 : 0
+    s += todOK     ?  0 : -25
+    s
+
+// INTRADAY — needs 15m UT Bot + 1H macro alignment + ADX trending
+intradayBull() =>
+    s = 0
+    s += ut15m ==  1 ? 30 : -10
+    s += ut5m  ==  1 ? 10 : 0
+    s += utBuyOK   ? 10 : 0
+    s += stUp      ?  8 : -4
+    s += close > ema50_15m ? 10 : -5
+    s += emaUp     ?  6 : -3
+    s += vwapUp    ?  6 : -3
+    s += rsiUp     ?  6 : 0
+    s += macroUp   ? 10 : -5
+    s += adxBull   ?  8 : -4
+    s += volSpike  ?  4 : 0
+    s += todOK     ?  0 : -15
+    s
+
+intradayBear() =>
+    s = 0
+    s += ut15m == -1 ? 30 : -10
+    s += ut5m  == -1 ? 10 : 0
+    s += utSellOK  ? 10 : 0
+    s += stDown    ?  8 : -4
+    s += close < ema50_15m ? 10 : -5
+    s += emaDn     ?  6 : -3
+    s += vwapDn    ?  6 : -3
+    s += rsiDn     ?  6 : 0
+    s += macroDn   ? 10 : -5
+    s += adxBear   ?  8 : -4
+    s += volSpike  ?  4 : 0
+    s += todOK     ?  0 : -15
+    s
+
+// HOLDING — daily trend + structure
+holdingBull() =>
+    s = 0
+    s += dayBull   ? 35 : -15
+    s += ut15m ==  1 ? 15 : 0
+    s += macroUp   ? 15 : -8
+    s += stUp      ?  8 : -4
+    s += emaUp     ?  8 : -4
+    s += close > dayEma20 ? 10 : -5
+    s += rsiUp     ?  5 : 0
+    s += adxBull   ?  4 : 0
+    s
+
+holdingBear() =>
+    s = 0
+    s += dayBear   ? 35 : -15
+    s += ut15m == -1 ? 15 : 0
+    s += macroDn   ? 15 : -8
+    s += stDown    ?  8 : -4
+    s += emaDn     ?  8 : -4
+    s += close < dayEma20 ? 10 : -5
+    s += rsiDn     ?  5 : 0
+    s += adxBear   ?  4 : 0
+    s
+
+scalpBuyScore     = scalpBull()
+scalpSellScore    = scalpBear()
+intradayBuyScore  = intradayBull()
+intradaySellScore = intradayBear()
+holdingBuyScore   = holdingBull()
+holdingSellScore  = holdingBear()
+
+// ─── FIRE CONDITIONS ──────────────────────────────────────────────────
+scalpBuyFire     = useScalp    and scalpBuyScore     >= thrScalp    and utBuyOK  and todOK
+scalpSellFire    = useScalp    and scalpSellScore    >= thrScalp    and utSellOK and todOK
+intradayBuyFire  = useIntraday and intradayBuyScore  >= thrIntraday and ut15m ==  1 and todOK
+intradaySellFire = useIntraday and intradaySellScore >= thrIntraday and ut15m == -1 and todOK
+holdingBuyFire   = useHolding  and holdingBuyScore   >= thrHolding  and dayBull
+holdingSellFire  = useHolding  and holdingSellScore  >= thrHolding  and dayBear
+
+// Don't double-fire on consecutive bars (one label per swing leg)
+scalpBuyFire    := scalpBuyFire    and not scalpBuyFire[1]
+scalpSellFire   := scalpSellFire   and not scalpSellFire[1]
+intradayBuyFire := intradayBuyFire and not intradayBuyFire[1]
+intradaySellFire:= intradaySellFire and not intradaySellFire[1]
+holdingBuyFire  := holdingBuyFire  and not holdingBuyFire[1]
+holdingSellFire := holdingSellFire and not holdingSellFire[1]
+
+// ─── TARGET PROJECTIONS ──────────────────────────────────────────────
+// Scalp:    spot move ≈ ATR(5m) × mScalp     ⇒ 10–15 pt range typical on NIFTY
+// Intraday: spot move ≈ ATR(15m) × mIntraday ⇒ 25–60 pts
+// Holding:  spot move ≈ ATR(D)  × mHolding   ⇒ 80–250 pts
+scalpTgtPts    = math.round(atr5m  * mScalp)
+intradayTgtPts = math.round(atr15m * mIntraday)
+holdingTgtPts  = math.round(dayAtr * mHolding)
+
+// ─── LABEL HELPERS ───────────────────────────────────────────────────
+fmtTgt(float entry, int pts, bool isBuy) =>
+    tgt = isBuy ? entry + pts : entry - pts
+    str.tostring(math.round(entry)) + "→" + str.tostring(math.round(tgt))
+
+drawBuyLabel(float yPos, string mode, int pts, color bg) =>
+    txt = "BUY " + mode + " +" + str.tostring(pts) + "pts  " + fmtTgt(close, pts, true)
+    label.new(bar_index, yPos, txt, style=label.style_label_up, color=bg, textcolor=color.white, size=sizeMap(labelSize), yloc=yloc.price)
+
+drawSellLabel(float yPos, string mode, int pts, color bg) =>
+    txt = "SELL " + mode + " +" + str.tostring(pts) + "pts  " + fmtTgt(close, pts, false)
+    label.new(bar_index, yPos, txt, style=label.style_label_down, color=bg, textcolor=color.white, size=sizeMap(labelSize), yloc=yloc.price)
+
+// ─── DRAW LABELS (stack vertically with ATR-spaced offsets) ──────────
+atrChart = ta.atr(14)
+offset1 = atrChart * 0.6
+offset2 = atrChart * 1.6
+offset3 = atrChart * 2.7
+
+if scalpBuyFire
+    drawBuyLabel(low - offset1, "SCALP",    scalpTgtPts,    color.new(color.green,  0))
+if intradayBuyFire
+    drawBuyLabel(low - offset2, "INTRADAY", intradayTgtPts, color.new(color.blue,   0))
+if holdingBuyFire
+    drawBuyLabel(low - offset3, "HOLDING",  holdingTgtPts,  color.new(color.purple, 0))
+
+if scalpSellFire
+    drawSellLabel(high + offset1, "SCALP",    scalpTgtPts,    color.new(color.red,    0))
+if intradaySellFire
+    drawSellLabel(high + offset2, "INTRADAY", intradayTgtPts, color.new(color.orange, 0))
+if holdingSellFire
+    drawSellLabel(high + offset3, "HOLDING",  holdingTgtPts,  color.new(color.maroon, 0))
+
+// Optional tiny shape arrows on the bar itself
+plotshape(showArrows and scalpBuyFire,    "Scalp BUY",    location=location.belowbar, style=shape.triangleup,   color=color.new(color.green,  0), size=size.tiny)
+plotshape(showArrows and intradayBuyFire, "Intraday BUY", location=location.belowbar, style=shape.triangleup,   color=color.new(color.blue,   0), size=size.tiny)
+plotshape(showArrows and holdingBuyFire,  "Holding BUY",  location=location.belowbar, style=shape.triangleup,   color=color.new(color.purple, 0), size=size.tiny)
+plotshape(showArrows and scalpSellFire,   "Scalp SELL",   location=location.abovebar, style=shape.triangledown, color=color.new(color.red,    0), size=size.tiny)
+plotshape(showArrows and intradaySellFire,"Intraday SELL",location=location.abovebar, style=shape.triangledown, color=color.new(color.orange, 0), size=size.tiny)
+plotshape(showArrows and holdingSellFire, "Holding SELL", location=location.abovebar, style=shape.triangledown, color=color.new(color.maroon, 0), size=size.tiny)
+
+// ─── ALERTS ──────────────────────────────────────────────────────────
+alertcondition(scalpBuyFire,     title="BUY SCALP",     message="BUY SCALP {{ticker}} @ {{close}}")
+alertcondition(scalpSellFire,    title="SELL SCALP",    message="SELL SCALP {{ticker}} @ {{close}}")
+alertcondition(intradayBuyFire,  title="BUY INTRADAY",  message="BUY INTRADAY {{ticker}} @ {{close}}")
+alertcondition(intradaySellFire, title="SELL INTRADAY", message="SELL INTRADAY {{ticker}} @ {{close}}")
+alertcondition(holdingBuyFire,   title="BUY HOLDING",   message="BUY HOLDING {{ticker}} @ {{close}}")
+alertcondition(holdingSellFire,  title="SELL HOLDING",  message="SELL HOLDING {{ticker}} @ {{close}}")
