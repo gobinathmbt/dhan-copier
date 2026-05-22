@@ -261,15 +261,25 @@ const ALGO_SETTINGS = {
     supertrend: { atrPeriod: 10, multiplier: 2.5 },
     ema:   { fastPeriod: 9, slowPeriod: 20, tolerancePct: 0.01 },
     rsi:   { period: 14, longMin: 52, shortMax: 48 },
-    // Scoring system (NEW 2026-05-21)
-    // Threshold tuned via replay against today's logs:
-    //   60 → 76% pass (too loose, will fire on weak setups)
-    //   65 → 55% pass (still too many)
-    //   70 → 20% pass (sweet spot — 87 entries on 430 triggers)
-    //   75 → 19% pass (essentially same as 70)
-    // The validator's 15-pt premium gate filters out the rest.
+    // Scoring system (CALIBRATED 2026-05-22)
+    //
+    // 2026-05-21 set threshold = 70 to filter low-quality fires after
+    // observing scoring=60 leaked too many losers. Today's logs (300+
+    // cycles, 0 trades) showed the OPPOSITE problem: a bimodal score
+    // distribution clustered at 30-49 (clear noise) and 50-59 (clean
+    // 4-of-5 factor agreement that Supertrend's slow flip pushed below
+    // 60). Threshold 70 caught NEITHER cohort.
+    //
+    // Calibration: lower to 55. The Supertrend opposite-count change
+    // (see supportScalpEngine.js — slow flip no longer increments
+    // oppositeCount) plus this lower bar lets the genuinely-clean
+    // 50-59 setups fire while the 30-49 noise stays blocked.
+    //
+    //   55 → fires 4-of-5 factor setups even with Supertrend lagging
+    //   60 → would have caught only 1 of today's NIFTY setups
+    //   70 → caught 0 of today's NIFTY setups (300 cycles, 0 fires)
     scoring: {
-      minScore:        70,    // pass threshold — tuned via replay
+      minScore:        55,    // 70→55 (slow-flip Supertrend no longer blocks)
       wUtBot:          30,    // mandatory entry trigger
       wMtfTrend:       20,    // 5m+15m supertrend confirmation
       wSupertrend:     15,    // primary TF supertrend

@@ -129,7 +129,7 @@ const ScalpingSessionSchema = new mongoose.Schema(
         ema:   { fastPeriod: 9, slowPeriod: 20, tolerancePct: 0.01 },
         rsi:   { period: 14, longMin: 52, shortMax: 48 },
         scoring: {
-          minScore: 70, wUtBot: 30, wMtfTrend: 20,
+          minScore: 55, wUtBot: 30, wMtfTrend: 20,
           wSupertrend: 15, wMomentum: 15, wVwap: 10,
           wEmaAlign: 10, wRsi: 10, allowOppositeOf: 1,
         },

@@ -281,11 +281,14 @@ function decide({
   }
 
   // 3) Supertrend on primary TF — bonus only
-  // CALIBRATED 2026-05-21: penalty for opposite Supertrend reduced from
-  // -50% to -20% of weight. Supertrend is a SLOW trailing stop by design;
-  // it commonly stays "green" for 5-10 minutes after a real bearish flip
-  // begins on faster indicators. We don't want it to drag a strong UT
-  // Bot + EMA + RSI setup below threshold just because it hasn't caught up.
+  // CALIBRATED 2026-05-22: Supertrend is the slowest factor in the stack
+  // (a trailing-stop volatility band, lags trend changes by 5-10 min).
+  // When opposite, it only contributes -3 points (20% of 15) but was
+  // ALSO counted toward `oppositeCount`, pushing setups past
+  // `allowOppositeOf=1`. Today's logs showed 43 NIFTY setups blocked at
+  // exactly 57/70 with all four faster factors agreeing — Supertrend
+  // hadn't caught up yet. Removing it from the opposite-count keeps the
+  // small score penalty but stops it from being a hard block on its own.
   const stPrimary = _supertrend(
     primary.map(c => ({ h: c.h ?? c.high, l: c.l ?? c.low, c: c.c ?? c.close })),
     stCfg.atrPeriod, stCfg.multiplier
@@ -300,9 +303,10 @@ function decide({
         detail.supertrend = { trend: stPrimary.trend, weight: wSupertrend, contribution: wSupertrend };
       } else {
         // Supertrend opposite — small penalty (it flips late by design)
+        // 2026-05-22: NO LONGER counts toward oppositeCount because it's
+        // structurally lagging. Only the score penalty applies.
         const penalty = Math.floor(wSupertrend * 0.2);
         score -= penalty;
-        oppositeCount++;
         reasons.push(`Supertrend ${stPrimary.trend} (slow flip) [-${penalty}]`);
         detail.supertrend = { trend: stPrimary.trend, weight: wSupertrend, contribution: -penalty };
       }

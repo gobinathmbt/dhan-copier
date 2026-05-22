@@ -122,10 +122,32 @@ async function decide(params) {
   const sessionPhase = params.sessionPhase || null;
 
   const futuresData = params.futuresData || null;
+  // Opening strike anchor — used by strike selectors as the centre of
+  // the candidate window (±5 strikes). The professionalTrader service
+  // tracks a SINGLE global session object, which is initialised against
+  // whichever symbol the engine first ran on. In multi-symbol mode that
+  // anchor is wrong for the non-NIFTY market — e.g. NIFTY opening of
+  // 23,700 used as anchor for a SENSEX trade puts the candidate window
+  // at [23,450 – 23,950] when SENSEX strikes are at 75,000+, producing
+  // "no viable support-scalp strike" on every cycle.
+  //
+  // FIX 2026-05-22: only honour `professionalTrader.openingStrike` when
+  // it's plausibly close to today's ATM (within ~10% of spot). For any
+  // other market we fall back to live ATM as the anchor — which is what
+  // the strike selector window math already assumes.
   const openingStrike = (() => {
     try {
       const profSession = require('../professionalTrader.service').getMarketSession();
-      return Number(profSession?.openingStrike) || atmStrike;
+      const ps = Number(profSession?.openingStrike);
+      const a  = Number(atmStrike);
+      if (!Number.isFinite(ps) || ps <= 0) return atmStrike;
+      // Sanity gate — prof session anchor must be within ±10% of live ATM.
+      // SENSEX (~75k) ATM with a NIFTY (~23k) prof anchor fails this hard
+      // and falls back to the live ATM.
+      if (!Number.isFinite(a) || a <= 0) return ps;
+      const drift = Math.abs(ps - a) / a;
+      if (drift > 0.10) return a;
+      return ps;
     } catch (_) { return atmStrike; }
   })();
 
