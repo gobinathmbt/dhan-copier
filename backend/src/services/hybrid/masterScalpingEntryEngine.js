@@ -89,6 +89,39 @@ async function decide(params) {
     return _noTrade('all engines disabled', { engineType: 'NONE', market });
   }
 
+  // ── Daily kill-switch — block everything if today's loss budget is hit
+  // (consecutive losses or net daily loss). Resets on session start.
+  try {
+    const ks = require('./dailyKillSwitch');
+    if (ks.isKilled(settings)) {
+      const st = ks.getState();
+      hybridLogger.info({
+        sessionId, event: 'master_kill_switch',
+        message: `daily kill switch active: ${st.killedReason}`,
+        data: { ...st },
+      });
+      return _noTrade(`daily kill switch: ${st.killedReason}`, { engineType: 'NONE', market });
+    }
+  } catch (_) { /* dailyKillSwitch optional */ }
+
+  // ── Session regime adapter — disable entries during midday chop / close
+  // chaos windows; otherwise compute regime overrides for downstream use.
+  let regime = { enabled: false, regime: 'unconditioned', allowEntries: true,
+                 minScoreOverride: null, targetMinOverride: null,
+                 targetMaxOverride: null, sizingFactorMul: 1.0 };
+  try {
+    regime = require('./sessionRegimeAdapter').getRegime(settings);
+    if (!regime.allowEntries) {
+      hybridLogger.info({
+        sessionId, event: 'master_session_regime_blocked',
+        message: `entries disabled by regime: ${regime.reasoning}`,
+        data: { regime },
+      });
+      return _noTrade(`session regime blocks entries: ${regime.reasoning}`,
+                      { engineType: 'NONE', market });
+    }
+  } catch (_) { /* sessionRegimeAdapter optional */ }
+
   // ── Extract candles / context from aggregator ─────────────────────────
   // Core engine expects { aggregator, algorithmOutputs, ... } directly.
   // Ultra & support engines expect raw candle arrays — we pull them from
@@ -194,6 +227,38 @@ async function decide(params) {
   // ── 2. SUPPORT SCALP ENGINE (priority 2) ────────────────────────────
   if (supportOn) {
     try {
+      // Build conditioned settings for this cycle. The session regime
+      // adapter may raise/lower minScore and target/Max for the current
+      // time-of-day window. Deep-merge into a per-cycle copy so the
+      // mongoose-backed settings doc isn't mutated.
+      const conditionedSettings = (() => {
+        if (!regime.enabled) return settings;
+        const out = { ...settings, supportScalp: { ...(settings.supportScalp || {}) } };
+        if (regime.minScoreOverride != null) {
+          out.supportScalp.scoring = {
+            ...(settings.supportScalp?.scoring || {}),
+            minScore: regime.minScoreOverride,
+          };
+        }
+        if (regime.targetMinOverride != null) out.supportScalp.targetMin = regime.targetMinOverride;
+        if (regime.targetMaxOverride != null) out.supportScalp.targetMax = regime.targetMaxOverride;
+        if (Number.isFinite(regime.sizingFactorMul) && regime.sizingFactorMul !== 1.0) {
+          const base = Number(settings.supportScalp?.sizingFactor) || 0.7;
+          out.supportScalp.sizingFactor = Math.max(0, base * regime.sizingFactorMul);
+        }
+        return out;
+      })();
+
+      // Optionally compute futures leadership for this candidate (we
+      // don't yet know direction, so we run it post-fire below). For now
+      // we forward futures candles into the engine so it can use them
+      // when scoring, and the leadership engine result for direction
+      // confirmation when fired.
+      const futCandles1m = aggCandles['futures_1m']
+        || params.aggregator?.futuresCandles?.['1m'] || [];
+      const futCandles5m = aggCandles['futures_5m']
+        || params.aggregator?.futuresCandles?.['5m'] || [];
+
       const sup = supportScalpEngine.decide({
         candles1m, candles3m, candles5m, candles15m,
         vwap, spotPrice, atr: { atr_5m: volatilityRegime?.atr5m },
@@ -205,8 +270,11 @@ async function decide(params) {
         primaryStrikes,
         atmStrike,
         futuresData,
+        // Pass futures candles for leadership scoring inside the engine
+        futuresCandles1m: futCandles1m,
+        futuresCandles5m: futCandles5m,
         market,
-        settings,
+        settings: conditionedSettings,
       });
       hybridLogger.info({
         sessionId, event: 'master_support_scalp',

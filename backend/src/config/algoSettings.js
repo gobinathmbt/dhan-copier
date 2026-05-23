@@ -352,6 +352,57 @@ const ALGO_SETTINGS = {
     quickFailMinPnlPts:   0.5,
   },
 
+  // ── Premium Velocity Gate (NEW 2026-05-22) ────────────────────────────
+  // After a fresh entry, measure premium acceleration in real-time.
+  // If by checkAtSec the trade hasn't built minPnlAt30s and isn't moving
+  // at minVelocityPtsPerSec in our favour, the setup is dead — exit
+  // before time-decay erodes more.
+  // Also caps absolute drawdown via maxNegativePts (-2.5pts default).
+  // Opt-in via enabled flag.
+  premiumVelocityGate: {
+    enabled:                  true,
+    checkAtSec:               30,
+    minVelocityPtsPerSec:     0.05,    // 0.05 pt/s sustained = 15pt in 5min
+    minPnlAt30s:              0.5,     // need at least 0.5pt by 30s
+    maxNegativePts:           -2.5,    // hard floor below entry
+    onlyEvaluateAtCheckSec:   false,   // keep evaluating after checkSec
+  },
+
+  // ── Session Regime Adapter (NEW 2026-05-22) ───────────────────────────
+  // Time-of-day-conditioned thresholds for support scalp. Different IST
+  // session windows behave differently — opening volatility, trend
+  // continuation, midday chop, afternoon reversal, close chaos. Default
+  // table disables entries during 11:30-13:30 IST (chop) and 14:30-15:30
+  // IST (close chaos). Override via regimeTable if needed.
+  sessionRegimeAdapter: {
+    enabled: true,
+    // regimeTable: <use defaults from sessionRegimeAdapter.js>
+  },
+
+  // ── Daily Kill Switch (NEW 2026-05-22) ────────────────────────────────
+  // Operational-safety gate. After N consecutive losses or net daily loss
+  // exceeding maxDailyLossPct of starting capital, blocks new entries for
+  // the rest of the day. Resets on session start.
+  dailyKillSwitch: {
+    enabled:                true,
+    maxConsecutiveLosses:   3,
+    maxDailyLossPct:        2.0,    // 2% of starting capital
+  },
+
+  // ── Futures Leadership Filter (NEW 2026-05-22) ────────────────────────
+  // Wires the existing hybrid/futuresLeadershipEngine into the support
+  // scalp scoring path. Adds a positive bonus when futures lead spot in
+  // our direction; soft penalty when futures oppose. Lead-lag, basis
+  // expansion/contraction, and aggressive futures candles all feed in.
+  futuresLeadershipFilter: {
+    enabled:           true,
+    minScoreToBonus:   60,    // futures score ≥ 60 → bonus
+    maxScoreToPenalty: 35,    // futures score ≤ 35 → penalty
+    bonusPoints:       10,
+    penaltyPoints:     8,
+    countAsOpposite:   true,  // penalty also bumps oppositeCount
+  },
+
   // ── Trading symbols (for multi-symbol routing) ─────────────────────────
   // Each entry routes the engine pipeline against that symbol. Default is
   // NIFTY_50 only. Adding 'SENSEX' here will wire the engines to also run

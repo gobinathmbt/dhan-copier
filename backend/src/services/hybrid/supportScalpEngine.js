@@ -190,6 +190,9 @@ function decide({
   primaryStrikes = null,         // option chain rows
   atmStrike  = null,             // current ATM strike
   futuresData = null,            // futures premium / lead-lag (best-effort)
+  // NEW (2026-05-22) — futures candles for the leadership filter
+  futuresCandles1m = [],
+  futuresCandles5m = [],
   market     = null,             // active symbol key (NIFTY_50 / SENSEX)
   settings   = {},
 } = {}) {
@@ -413,6 +416,56 @@ function decide({
       score -= Math.floor(wMomentum * 0.7);
       oppositeCount++;
       reasons.push(`Momentum opposite ${(movePct * 100).toFixed(2)}% [-${Math.floor(wMomentum * 0.7)}]`);
+    }
+  }
+
+  // 8) Futures leadership filter (NEW 2026-05-22) ─────────────────────
+  // The existing futuresLeadershipEngine measures whether NIFTY futures
+  // are leading spot in our direction (lead-lag, basis trend, aggressive
+  // futures candle, futures delta velocity). Score is 0-100; ≥60 means
+  // futures confirm, ≤35 means futures oppose.
+  //
+  // For SENSEX we have no NSE futures contract, so the engine will
+  // return `available: false` and we silently skip the bonus/penalty.
+  // This is opt-in via settings.futuresLeadershipFilter.enabled.
+  const fcfg = settings?.futuresLeadershipFilter || {};
+  if (fcfg.enabled !== false && Array.isArray(futuresCandles1m) && futuresCandles1m.length > 0) {
+    try {
+      const futLead = require('./futuresLeadershipEngine').analyze({
+        futuresData,
+        futuresCandles1m: futuresCandles1m.map(c => ({
+          o: c.o ?? c.open, h: c.h ?? c.high, l: c.l ?? c.low,
+          c: c.c ?? c.close, v: c.v ?? c.volume ?? 0,
+        })),
+        futuresCandles5m: futuresCandles5m.map(c => ({
+          o: c.o ?? c.open, h: c.h ?? c.high, l: c.l ?? c.low,
+          c: c.c ?? c.close, v: c.v ?? c.volume ?? 0,
+        })),
+        candles1m: closesPrimary.map((c, i) => ({
+          c, h: c, l: c, o: c, v: 0,  // best-effort: only c is needed for lead-lag
+        })),
+        candles5m,
+        spotPrice,
+        direction,
+      });
+      detail.futuresLead = futLead;
+      const fScore = Number(futLead?.leadLagScore) || 50;
+      const minBonus    = Number(fcfg.minScoreToBonus ?? 60);
+      const maxPenalty  = Number(fcfg.maxScoreToPenalty ?? 35);
+      const bonusPts    = Number(fcfg.bonusPoints ?? 10);
+      const penaltyPts  = Number(fcfg.penaltyPoints ?? 8);
+      if (futLead?.available) {
+        if (fScore >= minBonus) {
+          score += bonusPts;
+          reasons.push(`Futures leading (${fScore}) [+${bonusPts}]`);
+        } else if (fScore <= maxPenalty) {
+          score -= penaltyPts;
+          if (fcfg.countAsOpposite !== false) oppositeCount++;
+          reasons.push(`Futures opposing (${fScore}) [-${penaltyPts}]`);
+        }
+      }
+    } catch (e) {
+      // futures lead-lag is best-effort; never let it crash the engine
     }
   }
 

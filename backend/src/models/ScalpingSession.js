@@ -159,6 +159,38 @@ const ScalpingSessionSchema = new mongoose.Schema(
         quickFailSec: 60, quickFailMinPnlPts: 0.5,
       }) },
 
+      // ── Premium Velocity Gate (NEW 2026-05-22) ─────────────────────
+      premiumVelocityGate: { type: mongoose.Schema.Types.Mixed, default: () => ({
+        enabled: true,
+        checkAtSec: 30,
+        minVelocityPtsPerSec: 0.05,
+        minPnlAt30s: 0.5,
+        maxNegativePts: -2.5,
+        onlyEvaluateAtCheckSec: false,
+      }) },
+
+      // ── Session Regime Adapter (NEW 2026-05-22) ────────────────────
+      sessionRegimeAdapter: { type: mongoose.Schema.Types.Mixed, default: () => ({
+        enabled: true,
+      }) },
+
+      // ── Daily Kill Switch (NEW 2026-05-22) ─────────────────────────
+      dailyKillSwitch: { type: mongoose.Schema.Types.Mixed, default: () => ({
+        enabled: true,
+        maxConsecutiveLosses: 3,
+        maxDailyLossPct: 2.0,
+      }) },
+
+      // ── Futures Leadership Filter (NEW 2026-05-22) ─────────────────
+      futuresLeadershipFilter: { type: mongoose.Schema.Types.Mixed, default: () => ({
+        enabled: true,
+        minScoreToBonus: 60,
+        maxScoreToPenalty: 35,
+        bonusPoints: 10,
+        penaltyPoints: 8,
+        countAsOpposite: true,
+      }) },
+
       // ── TRADING SYMBOLS (NEW 2026-05-19) ─────────────────────────────
       // Each symbol routes the engine pipeline against that market.
       // Default NIFTY_50 only. SENSEX requires Sensex live feed wiring.

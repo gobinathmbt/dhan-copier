@@ -216,6 +216,26 @@ function decide({
     };
   }
 
+  // ── E2.7 Premium velocity gate (NEW 2026-05-22) ─────────────────────
+  // Even before quick-fail's 60s window, a sluggish premium response in
+  // the first 30s is a definitive signal the option-spot translation is
+  // dead. Returns EXIT with source 'velocity_gate:*' if so.
+  try {
+    const velGate = require('./premiumVelocityGate');
+    const vg = velGate.evaluate({
+      trade, cur, elapsedSec: elapsed, settings,
+    });
+    if (vg.action === 'EXIT') {
+      Object.assign(factors, { velocityGate: vg.factors });
+      return {
+        action: 'EXIT',
+        reasoning: vg.reasoning,
+        source: vg.source,
+        factors,
+      };
+    }
+  } catch (_) { /* velocity gate optional */ }
+
   // ── E3. Multi-TF UT Bot reversal ─────────────────────────────────────
   // Re-run the same UT Bot reads the entry validator used.
   // Treat 'neutral' as insufficient data — only count ACTIVE reversal

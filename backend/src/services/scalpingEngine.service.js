@@ -402,6 +402,13 @@ async function start({ authKey, settings, aiModel }) {
     logger.warn({ err: e.message }, '[engine] liveFeedIntegrity start failed');
   }
 
+  // Reset daily kill switch for this fresh session — clears any prior
+  // session's loss counter and net P&L so today starts with a clean slate.
+  try {
+    const ks = require('./hybrid/dailyKillSwitch');
+    ks.reset(Number(settings.capital) || 0);
+  } catch (_) { /* dailyKillSwitch optional */ }
+
   logger.info({ sessionId: session._id }, '[engine] started');
   
   // Log engine start event
@@ -3464,6 +3471,27 @@ async function closeTrade(trade, exitPrice, reason) {
     logger.warn({ err: e.message }, '[engine] post-loss cooldown registration failed');
   }
 
+  // ── Daily kill switch (NEW 2026-05-22) ─────────────────────────────
+  // Record the trade outcome with the kill switch. After 3 consecutive
+  // losses or net daily loss > 2% capital, new entries get blocked.
+  try {
+    if (trade.engineType === 'SUPPORT_SCALP') {
+      const ks = require('./hybrid/dailyKillSwitch');
+      const r = ks.recordTradeClose({
+        result: trade.result,
+        pnl: pnlForCapital,
+        settings: state.session?.settings || {},
+      });
+      if (r.killed) {
+        logger.warn({
+          tradeId: trade._id, reason: r.reason,
+        }, '[engine] DAILY KILL SWITCH activated');
+      }
+    }
+  } catch (e) {
+    logger.warn({ err: e.message }, '[engine] kill-switch update failed');
+  }
+
   // LIVE FEED: unsubscribe this option — no need to keep receiving ticks for a closed trade
   try {
     const { instance: liveFeedProd } = require('./dhanLiveFeedProd.service');
@@ -3578,8 +3606,29 @@ async function _executeFastPathTrade({
     const active = symbolRegistry.getSymbol(state.activeSymbolKey || symbolRegistry.getActiveSymbol());
     if (Number.isFinite(active?.lotSize) && active.lotSize > 0) originalLotSize = active.lotSize;
   } catch (_) {}
+
+  // ── Confidence-tier sizing (NEW 2026-05-22) ────────────────────────
+  // Bigger size on stronger setups, smaller on weaker. Tiers are mapped
+  // off the engine confidence score (0-95):
+  //   ≥ 85  → elite     (full configured size)
+  //   70-84 → standard  (60% of full)
+  //   55-69 → probe     (35% of full)
+  //   < 55  → minLots only
+  // Opt-in via settings.enableTierSizing (defaults true). The minLots
+  // floor is always honoured.
   const minLots = Number(settings.minLots) || 1;
-  const lots = minLots;
+  let lots = minLots;
+  if (settings.enableTierSizing !== false) {
+    const conf = Number(decision.confidence) || 0;
+    const maxLots = Math.max(minLots, Number(settings.maxLots) || minLots);
+    let tierMul = 0.35;
+    if (conf >= 85) tierMul = 1.0;
+    else if (conf >= 70) tierMul = 0.6;
+    else if (conf >= 55) tierMul = 0.35;
+    else tierMul = 0;  // below 55 → minLots floor
+    const tierLots = Math.max(minLots, Math.round(maxLots * tierMul));
+    lots = tierLots;
+  }
   const qty = lots * originalLotSize;
 
   const targetPoints = decision.target_points || settings.targetPoints || 10;
