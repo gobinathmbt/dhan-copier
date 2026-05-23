@@ -570,6 +570,18 @@ function decide({
       utBot: utRead, supertrend: stPrimary,
       ema9: lastEma9, ema20: lastEma20, rsi: rsiVal,
       vwap: vwapPos, primaryTf, confirmTf,
+      // NEW 2026-05-22: surface futures leadership in pillars so it
+      // gets persisted to the trade record and shows in engine logs.
+      // detail.futuresLead is the full analyze() output; we copy the
+      // important fields up here for quick access.
+      futuresLead: detail.futuresLead
+        ? {
+            available:      detail.futuresLead.available,
+            direction:      detail.futuresLead.futuresDirection,
+            leadLagScore:   detail.futuresLead.leadLagScore,
+            leadLagScore5m: detail.futuresLead.leadLagScore5m,
+          }
+        : { available: false },
     },
     timeframe: primaryTf,
     family: 'support_scalp',
