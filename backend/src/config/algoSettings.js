@@ -439,6 +439,9 @@ const ALGO_SETTINGS = {
     // OI cascade settings — for re-arming after a primary trade SLs
     enableCascade:             true,
     cascadeMaxLegs:            2,         // up to 2 cascade re-entries per direction
+    // 2026-05-23 — multi-layer confirmation gate
+    requireConfirmation:       true,
+    minConfirmationTier:       'STANDARD', // STANDARD = score≥50; ELITE = ≥65
   },
   premiumSwingExit: {
     minHoldSec:                5 * 60,    // 5 min before non-SL exits allowed
@@ -448,6 +451,38 @@ const ALGO_SETTINGS = {
     stallMinutes:              3,         // stall window
     stallMoveAbs:              1.0,       // pts — premium must move > this in stall window
     adverseBreakBuffer:        1.5,       // pts above OPPOSITE-leg range high → regime broken
+    // 2026-05-23 — confirmation collapse exit. Re-runs the same 9-layer
+    // confirmation continuously during the trade. If score drops below
+    // this threshold, exit (only if not yet partial-booked).
+    exitOnScoreBelow:          25,
+  },
+
+  // ── Premium Swing Confirmation (NEW 2026-05-23) ────────────────────────
+  // Multi-layer institutional confirmation engine. Used both as a fire
+  // gate and as a continuous monitor during the trade. Tier mapping
+  // (calibrated against historical replay — observed score range is
+  // roughly -30 to +35 due to fewer base points than scalp engine):
+  //   ≥25 ELITE     full size
+  //   ≥15 STANDARD  60% size
+  //   ≥5  PROBE     35% size, only after 10:30 IST
+  //   <5  NO_TRADE  skip
+  premiumSwingConfirmation: {
+    eliteScore:    25,
+    standardScore: 15,
+    probeScore:    5,
+    // Per-factor weights (default 1.0 each). Reduce / zero out a factor
+    // here without code changes if it proves noisy in production.
+    weights: {
+      premiumExpansion:  1.0,   // most important — institutional tell
+      futuresLeadership: 1.0,
+      vwapSustain:       1.0,
+      mtfStructure:      1.0,
+      volatilityRegime:  1.0,
+      oiFlow:            1.0,
+      trapRisk:          1.0,
+      gammaRegime:       1.0,
+      crossMarket:       1.0,   // requires explicit cross-market candles
+    },
   },
 
 

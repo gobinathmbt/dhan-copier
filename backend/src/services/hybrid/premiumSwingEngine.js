@@ -48,6 +48,7 @@
 
 const tracker        = require('./premiumSwingRangeTracker');
 const oiZoneMapper   = require('./oiZoneMapper');
+const swingConfirmation = require('./premiumSwingConfirmation');
 
 function _safe(n) { const x = Number(n); return Number.isFinite(x) ? x : 0; }
 
@@ -91,7 +92,10 @@ function _readSide(strikes, strike, side) {
  *
  * @param {{
  *   market, primaryStrikes, atmStrike, spotPrice, settings, sessionId,
- *   prevTrades?: Array,   // closed swing trades today (for cascade tracking)
+ *   prevSwingTrades?: Array,   // closed swing trades today (for cascade tracking)
+ *   candles1m?, candles3m?, candles5m?, candles15m?,
+ *   vwap?, futuresData?, futuresCandles1m?, futuresCandles5m?,
+ *   crossMarketCandles5m?,    // for SENSEX→NIFTY or vice-versa divergence
  * }} args
  *
  * @returns Decision payload (same shape as supportScalpEngine.decide)
@@ -104,6 +108,16 @@ function decide({
   settings = {},
   sessionId = null,
   prevSwingTrades = [],
+  // Confirmation inputs (NEW 2026-05-23)
+  candles1m  = [],
+  candles3m  = [],
+  candles5m  = [],
+  candles15m = [],
+  vwap = null,
+  futuresData = null,
+  futuresCandles1m = [],
+  futuresCandles5m = [],
+  crossMarketCandles5m = [],
 } = {}) {
   const cfg = settings?.premiumSwing || {};
   const minutes = _istMinutesNow();
@@ -167,8 +181,55 @@ function decide({
     return { fired: false, reasoning: `swing: ${play.reason}`, pillars: { range, zones, candidates: play.candidates } };
   }
 
-  // 7) Convert play into a decision payload
-  return _buildDecision({ play, range, cfg, market, atmStrike, primaryStrikes, zones });
+  // 7) MULTI-LAYER INSTITUTIONAL CONFIRMATION (NEW 2026-05-23)
+  // Even if the play passes structural rules, we now demand a minimum
+  // confirmation score across 9 independent layers (premium expansion,
+  // futures lead, VWAP sustain, MTF structure, vol regime, OI flow,
+  // trap risk, gamma regime, cross-market). Tier mapping:
+  //   ELITE    ≥ 65  full size
+  //   STANDARD ≥ 50  60% size
+  //   PROBE    ≥ 35  35% size + only after 10:30 IST
+  //   NO_TRADE < 35  skip
+  let confirmation = { score: 0, tier: 'STANDARD', factors: {}, reasoning: 'confirmation disabled' };
+  if (cfg.requireConfirmation !== false) {
+    confirmation = swingConfirmation.analyze({
+      side: play.side,
+      strike: play.strike,
+      direction: play.direction,
+      delta: play.delta,
+      range,
+      spotPrice,
+      primaryStrikes,
+      atmStrike,
+      vwap,
+      futuresData,
+      futuresCandles1m,
+      futuresCandles5m,
+      candles1m, candles3m, candles5m, candles15m,
+      crossMarketCandles5m,
+      settings,
+    });
+    const minTier = cfg.minConfirmationTier || 'STANDARD';
+    const tierRank = { 'ELITE': 4, 'STANDARD': 3, 'PROBE': 2, 'NO_TRADE': 1 };
+    if (tierRank[confirmation.tier] < tierRank[minTier]) {
+      return {
+        fired: false,
+        reasoning: `swing CONFIRMATION FAILED — ${play.regime} setup rejected (score ${confirmation.score}, tier ${confirmation.tier} < ${minTier}). ${confirmation.reasoning}`,
+        pillars: { range, zones, play, confirmation },
+      };
+    }
+    // PROBE tier — only allowed after 10:30 IST (when opening volatility settled)
+    if (confirmation.tier === 'PROBE' && minutes < 10 * 60 + 30) {
+      return {
+        fired: false,
+        reasoning: `swing PROBE tier only allowed after 10:30 IST (current ${Math.floor(minutes/60)}:${String(minutes%60).padStart(2,'0')})`,
+        pillars: { range, zones, play, confirmation },
+      };
+    }
+  }
+
+  // 8) Convert play into a decision payload (now carries tier-based sizing)
+  return _buildDecision({ play, range, cfg, market, atmStrike, primaryStrikes, zones, confirmation });
 }
 
 /**
@@ -296,7 +357,7 @@ function _selectPlay({
 /**
  * Wrap play details into the decision shape the master engine expects.
  */
-function _buildDecision({ play, range, cfg, market, atmStrike, primaryStrikes, zones }) {
+function _buildDecision({ play, range, cfg, market, atmStrike, primaryStrikes, zones, confirmation }) {
   const targetMin = _safe(cfg.targetMin || 25);
   const targetMax = _safe(cfg.targetMax || 70);
   // Premium points the strategy projects (T1) — used by sizing
@@ -305,18 +366,28 @@ function _buildDecision({ play, range, cfg, market, atmStrike, primaryStrikes, z
   const rrTarget   = Number((target_pts / Math.max(1, sl_pts)).toFixed(2));
   const maxHoldSec = _safe(cfg.maxHoldSec || 4 * 60 * 60);  // 4 hours
 
-  // Confidence — high baseline because the regime is locked + structural
-  // levels exist. Bump for ATM, healthy delta, tight spread.
-  let confidence = 75;
-  if (play.moneyness === 'ATM') confidence += 6;
-  if (Math.abs(play.delta) >= 0.45 && Math.abs(play.delta) <= 0.60) confidence += 5;
+  // Confidence — now driven primarily by the confirmation score.
+  // Base 60, add up to 30 from confirmation (max +30 at score=100), bonus for ATM/RR.
+  const confScore = _safe(confirmation?.score, 0);
+  let confidence = 60 + Math.min(30, Math.max(-20, Math.round(confScore * 0.4)));
+  if (play.moneyness === 'ATM') confidence += 4;
+  if (Math.abs(play.delta) >= 0.45 && Math.abs(play.delta) <= 0.60) confidence += 3;
   if (play.bid > 0 && play.ask > 0) {
     const spreadPct = (play.ask - play.bid) / ((play.ask + play.bid) / 2) * 100;
-    if (spreadPct <= 0.5) confidence += 4;
+    if (spreadPct <= 0.5) confidence += 3;
     else if (spreadPct >= 2.0) confidence -= 6;
   }
-  if (rrTarget >= 2) confidence += 3;
+  if (rrTarget >= 2) confidence += 2;
   confidence = Math.min(95, Math.max(50, confidence));
+
+  // Tier-based sizing factor — ELITE = full, STANDARD = 60%, PROBE = 35%
+  const baseSizing = _safe(cfg.sizingFactor || 0.7);
+  const tier = confirmation?.tier || 'STANDARD';
+  const tierMul = tier === 'ELITE' ? 1.0
+                : tier === 'STANDARD' ? 0.6
+                : tier === 'PROBE' ? 0.35
+                : 0.35;
+  const sizingFactor = baseSizing * tierMul;
 
   return {
     fired: true,
@@ -334,14 +405,16 @@ function _buildDecision({ play, range, cfg, market, atmStrike, primaryStrikes, z
     maxHoldSec,
     rrTarget,
     confidence,
-    reasoning: play.reasoning,
+    confirmationScore: confScore,
+    confirmationTier: tier,
+    reasoning: `${play.reasoning} | CONFIRM ${confScore} (${tier}): ${(confirmation?.reasoning || '').slice(0, 200)}`,
     timeframe: '5m_open_range',
     family: 'premium_swing',
-    name: `PREMIUM_SWING_${play.regime.toUpperCase()}_${play.kind.toUpperCase()}`,
+    name: `PREMIUM_SWING_${play.regime.toUpperCase()}_${play.kind.toUpperCase()}_${tier}`,
     holdProfile: { tradeType: 'SWING', maxHoldSec, rrTarget },
-    riskProfile: { slPct: 0.15, sizingFactor: cfg.sizingFactor || 0.7 },
-    confluenceTier: 'standard',
-    consensusScore: 80,
+    riskProfile: { slPct: 0.15, sizingFactor, tier },
+    confluenceTier: tier.toLowerCase(),
+    consensusScore: Math.min(100, 50 + confScore),
     pillars: {
       range,
       regime: play.regime,
@@ -352,6 +425,7 @@ function _buildDecision({ play, range, cfg, market, atmStrike, primaryStrikes, z
       delta: play.delta,
       iv: play.iv,
       bid: play.bid, ask: play.ask,
+      confirmation: confirmation || null,
     },
     smartTrail: {
       mode: 'structural',

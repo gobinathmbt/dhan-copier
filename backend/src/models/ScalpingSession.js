@@ -207,6 +207,8 @@ const ScalpingSessionSchema = new mongoose.Schema(
         sidewaysFadeBuffer: 1.0,
         enableCascade: true,
         cascadeMaxLegs: 2,
+        requireConfirmation: true,
+        minConfirmationTier: 'STANDARD',
       }) },
       premiumSwingExit: { type: mongoose.Schema.Types.Mixed, default: () => ({
         minHoldSec: 5 * 60, maxHoldSec: 4 * 60 * 60,
@@ -214,6 +216,15 @@ const ScalpingSessionSchema = new mongoose.Schema(
         partialBookPct: 0.50,
         stallMinutes: 3, stallMoveAbs: 1.0,
         adverseBreakBuffer: 1.5,
+        exitOnScoreBelow: 25,
+      }) },
+      premiumSwingConfirmation: { type: mongoose.Schema.Types.Mixed, default: () => ({
+        eliteScore: 25, standardScore: 15, probeScore: 5,
+        weights: {
+          premiumExpansion: 1.0, futuresLeadership: 1.0, vwapSustain: 1.0,
+          mtfStructure: 1.0, volatilityRegime: 1.0, oiFlow: 1.0,
+          trapRisk: 1.0, gammaRegime: 1.0, crossMarket: 1.0,
+        },
       }) },
 
       // ── TRADING SYMBOLS (NEW 2026-05-19) ─────────────────────────────

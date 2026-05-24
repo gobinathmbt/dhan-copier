@@ -220,6 +220,53 @@ function decide({
     }
   }
 
+  // ── E9. Confirmation collapse (NEW 2026-05-23) ────────────────────
+  // Continuously re-run the multi-layer confirmation that validated the
+  // entry. If score drops below `exitOnScoreBelow` (default 25), the
+  // institutional thesis has broken — exit before SL hits.
+  // Skip if we've already partial-booked T1 (let the runner work).
+  const exitOnScoreBelow = _safe(cfg.exitOnScoreBelow, 25);
+  if (!trade?.partialBooked && exitOnScoreBelow > 0 && elapsed >= minHoldSec) {
+    try {
+      const swingConfirmation = require('./premiumSwingConfirmation');
+      const range = trade?.aiEntryDecision?.pillars?.range
+                 || trade?.hybridEntrySnapshot?.range;
+      const strike = Number(trade?.strike);
+      const side = isCE ? 'CE' : 'PE';
+      const direction = isCE ? 'bullish' : 'bearish';
+      const payload = aggregator?.payload || {};
+      const optionChain = aggregator?.optionChain || payload?.options_chain;
+      const strikes = optionChain?.strikes;
+      if (range && strikes && strike) {
+        const r = swingConfirmation.analyze({
+          side, strike, direction,
+          delta: trade?.aiEntryDecision?.pillars?.delta || 0.5,
+          range,
+          spotPrice: payload?.spot_data?.ltp || aggregator?.spotPrice,
+          primaryStrikes: strikes,
+          atmStrike: payload?.actual_atm_strike || optionChain?.atm_strike,
+          vwap: payload?.vwap_analysis ? {
+            vwap: payload.vwap_analysis.vwap,
+            position: payload.vwap_analysis.position || payload.vwap_analysis.price_vs_vwap,
+          } : null,
+          futuresData: aggregator?.futuresData || payload?.futures_data,
+          futuresCandles1m: payload?.candles?.['futures_1m'] || aggregator?.futuresCandles?.['1m'] || [],
+          futuresCandles5m: payload?.candles?.['futures_5m'] || aggregator?.futuresCandles?.['5m'] || [],
+          candles1m, candles3m, candles5m, candles15m,
+          settings,
+        });
+        if (r.score < exitOnScoreBelow) {
+          return {
+            action: 'EXIT',
+            reasoning: `[SWING-EXIT] Confirmation collapsed — score ${r.score} < ${exitOnScoreBelow} (was ${trade?.aiEntryDecision?.confirmationScore || '?'} at entry). ${(r.reasoning || '').slice(0, 200)}`,
+            source: 'swing_exit:confirmation_collapse',
+            factors: { ...factors, confirmationNow: r.score, confirmationTier: r.tier },
+          };
+        }
+      }
+    } catch (_) { /* best effort */ }
+  }
+
   return { action: 'HOLD', source: 'swing_exit:hold', factors };
 }
 

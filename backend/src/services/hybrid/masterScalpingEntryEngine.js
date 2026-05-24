@@ -241,6 +241,16 @@ async function decide(params) {
       // Best-effort: pull today's already-closed swing trades from
       // the session state for max-trades cap and cascade tracking.
       const prevSwingTrades = params.prevSwingTrades || [];
+      // Forward all candle / futures / VWAP data to the engine — the
+      // multi-layer confirmation needs the same context the support
+      // scalp engine gets.
+      const swFutCandles1m = aggCandles['futures_1m']
+        || params.aggregator?.futuresCandles?.['1m'] || [];
+      const swFutCandles5m = aggCandles['futures_5m']
+        || params.aggregator?.futuresCandles?.['5m'] || [];
+      // Cross-market candles (e.g. SENSEX 5m when running NIFTY)
+      const crossMarketCandles5m = params.crossMarketCandles5m || [];
+
       const sw = premiumSwingEngine.decide({
         market,
         primaryStrikes,
@@ -249,11 +259,18 @@ async function decide(params) {
         settings,
         sessionId,
         prevSwingTrades,
+        candles1m, candles3m, candles5m, candles15m,
+        vwap,
+        futuresData,
+        futuresCandles1m: swFutCandles1m,
+        futuresCandles5m: swFutCandles5m,
+        crossMarketCandles5m,
       });
       hybridLogger.info({
         sessionId, event: 'master_premium_swing',
         message: sw.fired
           ? `[SWING] ${sw.signal} ${sw.direction} ${sw.name} conf=${sw.confidence} ` +
+            `confirm=${sw.confirmationScore}/${sw.confirmationTier} ` +
             `T1=${sw.target1_premium?.toFixed(1)} T2=${sw.target2_premium?.toFixed(1)} SL=${sw.sl_premium?.toFixed(1)}`
           : `swing not fired: ${(sw.reasoning || '').slice(0, 240)}`,
         data: { fired: sw.fired, market, reasoning: sw.reasoning },
