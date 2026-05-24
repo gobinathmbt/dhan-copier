@@ -1,12 +1,13 @@
 /**
  * Master Scalping Entry Engine
  * ============================
- * Routes every cycle to one of three independent engines based on
+ * Routes every cycle to one of FOUR independent engines based on
  * settings flags:
  *
  *   ultraScalpingEngine  (priority 1) → ultraScalpEngine + ultraScalpStrikeSelector
- *   supportScalpEngine   (priority 2) → supportScalpEngine + supportScalpStrikeSelector
- *   coreEngine           (priority 3) → hybridEntryEngine (full institutional pipeline)
+ *   premiumSwingEngine   (priority 2) → premiumSwingEngine + premiumSwingStrikeSelector
+ *   supportScalpEngine   (priority 3) → supportScalpEngine + supportScalpStrikeSelector
+ *   coreEngine           (priority 4) → hybridEntryEngine (full institutional pipeline)
  *
  * If multiple are enabled, takes the FIRST valid signal in priority order.
  * If none enabled or none fire, returns NO_TRADE.
@@ -19,6 +20,8 @@ const ultraScalpEngine        = require('./ultraScalpEngine');
 const ultraScalpStrikeSelector = require('./ultraScalpStrikeSelector');
 const supportScalpEngine      = require('./supportScalpEngine');
 const supportScalpStrikeSelector = require('./supportScalpStrikeSelector');
+const premiumSwingEngine      = require('./premiumSwingEngine');
+const premiumSwingStrikeSelector = require('./premiumSwingStrikeSelector');
 const symbolRegistry          = require('../../config/symbolRegistry');
 // Core engine — the full institutional hybrid pipeline. Lazy-required so
 // when coreEngine=false we don't pull in the heavy graph.
@@ -83,9 +86,10 @@ async function decide(params) {
 
   const ultraOn   = settings.ultraScalpingEngine !== false;
   const supportOn = settings.supportScalpEngine === true;
+  const swingOn   = settings.premiumSwingEngine === true;
   const coreOn    = settings.coreEngine === true;
 
-  if (!ultraOn && !supportOn && !coreOn) {
+  if (!ultraOn && !supportOn && !swingOn && !coreOn) {
     return _noTrade('all engines disabled', { engineType: 'NONE', market });
   }
 
@@ -224,7 +228,69 @@ async function decide(params) {
     }
   }
 
-  // ── 2. SUPPORT SCALP ENGINE (priority 2) ────────────────────────────
+  // ── 2. PREMIUM SWING ENGINE (priority 2) ────────────────────────────
+  // Opening-range breakout strategy. Captures primary-strike CE+PE
+  // ranges in the first 5 minutes (09:15-09:20 IST), classifies the
+  // regime (bullish/bearish reversal or sideways), and arms one of
+  // three play archetypes. Targets are STRUCTURAL (T1/T2 = opposite
+  // leg's range levels), not point-based. Hold is 5min-4hr with a
+  // 14:30 IST hard cutoff. Distinct sizing and exit pipeline from the
+  // scalp engines — see premiumSwingExitValidator.
+  if (swingOn) {
+    try {
+      // Best-effort: pull today's already-closed swing trades from
+      // the session state for max-trades cap and cascade tracking.
+      const prevSwingTrades = params.prevSwingTrades || [];
+      const sw = premiumSwingEngine.decide({
+        market,
+        primaryStrikes,
+        atmStrike,
+        spotPrice,
+        settings,
+        sessionId,
+        prevSwingTrades,
+      });
+      hybridLogger.info({
+        sessionId, event: 'master_premium_swing',
+        message: sw.fired
+          ? `[SWING] ${sw.signal} ${sw.direction} ${sw.name} conf=${sw.confidence} ` +
+            `T1=${sw.target1_premium?.toFixed(1)} T2=${sw.target2_premium?.toFixed(1)} SL=${sw.sl_premium?.toFixed(1)}`
+          : `swing not fired: ${(sw.reasoning || '').slice(0, 240)}`,
+        data: { fired: sw.fired, market, reasoning: sw.reasoning },
+      });
+      if (sw.fired) {
+        const playKind = sw.pillars?.kind || 'primary';
+        const strikeRes = premiumSwingStrikeSelector.select({
+          namedStrike:    sw.strike,
+          side:           sw.optionType,
+          atmStrike,
+          primaryStrikes,
+          playKind,
+          hhmm:           sessionPhase?.hhmm,
+        });
+        if (strikeRes.ok) {
+          // Swing decisions carry their own structural sl/target premiums
+          // — pass them through via the wrapped decision.
+          const wrapped = _wrapDecision(sw, strikeRes, 'PREMIUM_SWING', market);
+          wrapped.target_pts = sw.target_pts;
+          wrapped.sl_points  = sw.sl_pts;
+          wrapped.target1_premium = sw.target1_premium;
+          wrapped.target2_premium = sw.target2_premium;
+          wrapped.sl_premium      = sw.sl_premium;
+          // hybridSnapshot = pillars + structural levels for the exit validator
+          wrapped.hybridSnapshot = { ...wrapped.hybridSnapshot, range: sw.pillars?.range, regime: sw.pillars?.regime };
+          return wrapped;
+        }
+        hybridLogger.warn({ sessionId, event: 'master_premium_swing_strike_failed',
+          message: strikeRes.reason, data: { strikeRes } });
+      }
+    } catch (e) {
+      hybridLogger.warn({ sessionId, event: 'master_premium_swing_error',
+        message: e.message, data: { err: e.message, stack: e.stack?.slice(0, 500) } });
+    }
+  }
+
+  // ── 3. SUPPORT SCALP ENGINE (priority 3) ────────────────────────────
   if (supportOn) {
     try {
       // Build conditioned settings for this cycle. The session regime
@@ -334,7 +400,10 @@ async function decide(params) {
   }
 
   return _noTrade('no engine produced a signal this cycle',
-    { engineType: ultraOn ? 'ULTRA_SCALP' : (supportOn ? 'SUPPORT_SCALP' : 'CORE'), market });
+    { engineType: ultraOn ? 'ULTRA_SCALP'
+                  : (swingOn ? 'PREMIUM_SWING'
+                  : (supportOn ? 'SUPPORT_SCALP' : 'CORE')),
+      market });
 }
 
 // ────────────────────────────────────────────────────────────────────────

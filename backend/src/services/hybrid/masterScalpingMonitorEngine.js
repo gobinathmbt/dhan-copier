@@ -18,6 +18,7 @@
 
 const runnerExitEngine = require('./runnerExitEngine');
 const supportScalpExitValidator = require('./supportScalpExitValidator');
+const premiumSwingExitValidator = require('./premiumSwingExitValidator');
 
 // Lazy-required heavy deps
 let _coreMonitor = null;
@@ -111,6 +112,66 @@ async function decide(args) {
         message: e.message, data: { err: e.message },
       });
       return _hold(`core monitor error: ${e.message}`, 'master:core_error');
+    }
+  }
+
+  // ── PREMIUM_SWING — structural-target exit validator ─────────────────
+  // Distinct lifecycle from scalps: 5min min hold, 4hr max hold, 14:30
+  // hard cutoff, target ladder T1/T2, peak-giveback only after T1,
+  // adverse range break detection, and velocity stall guard. Returns
+  // PARTIAL_BOOK at T1, EXIT at T2 / SL / cutoff / stall.
+  if (engineType === 'PREMIUM_SWING') {
+    try {
+      const payload = args?.aggregator?.payload || {};
+      const candles = payload?.candles || {};
+      const candles1m  = candles['1m']  || [];
+      const candles5m  = candles['5m']  || [];
+      const candles15m = candles['15m'] || [];
+      const candles3m  = _build3m(candles1m);
+
+      const exitDecision = premiumSwingExitValidator.decide({
+        trade,
+        aggregator: args.aggregator,
+        candles1m, candles3m, candles5m, candles15m,
+        settings,
+      });
+
+      hybridLogger.info({
+        sessionId: trade.sessionId, tradeId: trade._id,
+        event: 'master_premium_swing_exit',
+        message: exitDecision.reasoning,
+        data: {
+          action: exitDecision.action,
+          source: exitDecision.source,
+          factors: exitDecision.factors,
+        },
+      });
+
+      if (exitDecision.action === 'EXIT') {
+        return _exit(exitDecision.reasoning, exitDecision.source);
+      }
+      if (exitDecision.action === 'TRAIL_SL') {
+        return _trail(exitDecision.new_sl, exitDecision.reasoning, exitDecision.source);
+      }
+      if (exitDecision.action === 'PARTIAL_BOOK') {
+        // Surface partial-book intent to the caller. scalpingEngine
+        // will execute the partial sell + SL adjustment.
+        return {
+          action: 'PARTIAL_BOOK',
+          partial_pct: exitDecision.partial_pct,
+          new_sl: exitDecision.new_sl,
+          reasoning: exitDecision.reasoning,
+          source: exitDecision.source,
+        };
+      }
+      return _hold(exitDecision.reasoning, exitDecision.source);
+    } catch (e) {
+      hybridLogger.warn({
+        sessionId: trade.sessionId, tradeId: trade._id,
+        event: 'master_premium_swing_exit_error',
+        message: e.message, data: { err: e.message, stack: e.stack?.slice(0, 400) },
+      });
+      // Fall through to generic runner exit as safety net
     }
   }
 

@@ -3633,8 +3633,17 @@ async function _executeFastPathTrade({
 
   const targetPoints = decision.target_points || settings.targetPoints || 10;
   const slPoints = decision.sl_points || settings.slPoints || 15;
-  const targetPremium = premium + targetPoints;
-  const slPremium = premium - slPoints;
+  // For PREMIUM_SWING trades the engine carries STRUCTURAL premium levels
+  // (target1_premium / target2_premium / sl_premium) — the SL ladder is
+  // not point-derived. Use those directly so the trade record reflects
+  // the actual exit validator targets.
+  const isSwing = decision.engineType === 'PREMIUM_SWING';
+  const targetPremium = isSwing && Number.isFinite(decision.target1_premium)
+    ? decision.target1_premium
+    : premium + targetPoints;
+  const slPremium = isSwing && Number.isFinite(decision.sl_premium)
+    ? decision.sl_premium
+    : premium - slPoints;
   const ensembleConfidence = decision.confidence;
 
   // Capture the entry IV from the active strike's selected leg (CE/PE).
@@ -3687,6 +3696,13 @@ async function _executeFastPathTrade({
     // Entry IV baseline — used by exit validator (relative-drop check)
     entryIv: entryIv,
     entrySpotAtm: payload?.actual_atm_strike || payload?.options_chain?.atm_strike,
+    // ── Premium Swing structural targets (NEW 2026-05-22) ───────────
+    // For PREMIUM_SWING trades, decision carries target1_premium /
+    // target2_premium / sl_premium. We keep the canonical `target`
+    // field as T1 (so existing UI continues to work) and store the
+    // full ladder for the swing exit validator.
+    swingTarget1: Number.isFinite(decision.target1_premium) ? Number(decision.target1_premium.toFixed(2)) : undefined,
+    swingTarget2: Number.isFinite(decision.target2_premium) ? Number(decision.target2_premium.toFixed(2)) : undefined,
     hasReachedTarget: false,
     maxPriceReached: premium,
     futuresConfirmed: false,

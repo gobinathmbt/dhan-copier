@@ -191,6 +191,31 @@ const ScalpingSessionSchema = new mongoose.Schema(
         countAsOpposite: true,
       }) },
 
+      // ── Premium Swing Engine (NEW 2026-05-22) ──────────────────────
+      // Opening-range breakout swing engine. OFF by default — opt in
+      // via `premiumSwingEngine: true` once tested.
+      premiumSwingEngine: { type: Boolean, default: false },
+      premiumSwing: { type: mongoose.Schema.Types.Mixed, default: () => ({
+        targetMin: 25, targetMax: 70,
+        maxHoldSec: 4 * 60 * 60,
+        maxTradesPerDay: 4,
+        sizingFactor: 0.7,
+        allowReversalRegimes: true,
+        allowBullishReversal: true,
+        allowBearishReversal: false,
+        allowSidewaysRegime: false,
+        sidewaysFadeBuffer: 1.0,
+        enableCascade: true,
+        cascadeMaxLegs: 2,
+      }) },
+      premiumSwingExit: { type: mongoose.Schema.Types.Mixed, default: () => ({
+        minHoldSec: 5 * 60, maxHoldSec: 4 * 60 * 60,
+        peakGiveBackPct: 0.60,
+        partialBookPct: 0.50,
+        stallMinutes: 3, stallMoveAbs: 1.0,
+        adverseBreakBuffer: 1.5,
+      }) },
+
       // ── TRADING SYMBOLS (NEW 2026-05-19) ─────────────────────────────
       // Each symbol routes the engine pipeline against that market.
       // Default NIFTY_50 only. SENSEX requires Sensex live feed wiring.

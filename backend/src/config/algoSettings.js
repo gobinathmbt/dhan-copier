@@ -403,6 +403,54 @@ const ALGO_SETTINGS = {
     countAsOpposite:   true,  // penalty also bumps oppositeCount
   },
 
+  // ============================================================
+  // PREMIUM SWING ENGINE (NEW 2026-05-22)
+  // ============================================================
+  // Opening-range breakout strategy distinct from the support scalper.
+  // Captures primary-strike (ATM-at-9:15) CE+PE H/L over the first 5
+  // minutes, then arms one of three play archetypes:
+  //   • bullish_reversal — PE range above CE range, BUY CE on CE-high break
+  //   • bearish_reversal — CE range above PE range, BUY PE on PE-high break
+  //   • sideways         — overlapping ranges, fade extremes
+  //
+  // Targets are STRUCTURAL (T1/T2 = opposite leg's range levels).
+  // Hold 5min-4hr with 14:30 IST hard cutoff. Distinct strike selector
+  // (premiumSwingStrikeSelector — wider delta band, ITM allowed) and
+  // exit validator (premiumSwingExitValidator — partial book at T1,
+  // peak giveback after T1, adverse range break, velocity stall).
+  premiumSwingEngine: false,    // OFF by default — opt in to test on Monday
+  premiumSwing: {
+    targetMin:                 25,        // pts (T1 minimum)
+    targetMax:                 70,        // pts (T2 maximum cap)
+    maxHoldSec:                4 * 60 * 60, // 4 hours
+    maxTradesPerDay:           4,
+    sizingFactor:              0.7,
+    // 2026-05-22 calibration after 41-day historical replay:
+    //   • bullish_reversal: 67% win rate, +46pts net → KEEP
+    //   • bearish_reversal: 46% win rate, −128pts net → DISABLED until
+    //     futures-confirmation gate is added
+    //   • sideways:        26% win rate, −116pts net → DISABLED
+    //     (theta grind beats fade-buy strategy on flat days)
+    allowReversalRegimes:      true,      // bullish only by default below
+    allowBullishReversal:      true,
+    allowBearishReversal:      false,     // disabled until calibration improves
+    allowSidewaysRegime:       false,     // disabled — theta bleeds in flat tape
+    sidewaysFadeBuffer:        1.0,       // pts within range low to fade-buy
+    // OI cascade settings — for re-arming after a primary trade SLs
+    enableCascade:             true,
+    cascadeMaxLegs:            2,         // up to 2 cascade re-entries per direction
+  },
+  premiumSwingExit: {
+    minHoldSec:                5 * 60,    // 5 min before non-SL exits allowed
+    maxHoldSec:                4 * 60 * 60,
+    peakGiveBackPct:           0.60,      // exit remainder if 60% of peak gone post-T1
+    partialBookPct:            0.50,      // book 50% at T1
+    stallMinutes:              3,         // stall window
+    stallMoveAbs:              1.0,       // pts — premium must move > this in stall window
+    adverseBreakBuffer:        1.5,       // pts above OPPOSITE-leg range high → regime broken
+  },
+
+
   // ── Trading symbols (for multi-symbol routing) ─────────────────────────
   // Each entry routes the engine pipeline against that symbol. Default is
   // NIFTY_50 only. Adding 'SENSEX' here will wire the engines to also run

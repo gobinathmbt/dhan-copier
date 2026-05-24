@@ -34,10 +34,18 @@ const ScalpingTradeSchema = new mongoose.Schema(
     // engineType: which engine produced this trade — surfaced in UI table.
     // 'ULTRA_SCALP'   — UT Bot multi-timeframe (ultraScalpEngine)
     // 'SUPPORT_SCALP' — UT+Supertrend+VWAP+EMA+RSI confluence
+    // 'PREMIUM_SWING' — Opening-range CE/PE breakout (premiumSwingEngine)
     // 'CORE'          — full institutional hybrid pipeline
-    engineType: { type: String, enum: ['ULTRA_SCALP', 'SUPPORT_SCALP', 'CORE'], default: 'CORE', index: true },
+    engineType: { type: String, enum: ['ULTRA_SCALP', 'SUPPORT_SCALP', 'PREMIUM_SWING', 'CORE'], default: 'CORE', index: true },
     // market: which symbol this trade was placed on (NIFTY_50 / SENSEX / etc.)
     market:     { type: String, default: 'NIFTY_50', index: true },
+    // ── Premium Swing structural targets (NEW 2026-05-22) ─────────────
+    // For PREMIUM_SWING trades we carry a ladder of structural premium
+    // levels (T1 = first target, T2 = second target). The standard
+    // `target` field stores T1 (so existing UI continues to work);
+    // these mirror that with the full ladder for the exit validator.
+    swingTarget1: { type: Number },
+    swingTarget2: { type: Number },
     // Per-trade AI overrides (set at entry by entryEngine)
     maxHoldSeconds: { type: Number, default: 180 },
     aiEntryDecision: { type: mongoose.Schema.Types.Mixed },
