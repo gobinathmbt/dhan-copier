@@ -324,8 +324,10 @@ setInterval(async () => {
 
 async function start() {
   await connectDB();
-  server.listen(env.port, 'localhost', () => {
-    logger.info(`Server listening on http://localhost:${env.port} (${env.nodeEnv})`);
+  // Bind to 0.0.0.0 so the backend is reachable on the LAN. Any device on
+  // the same network can hit http://<this-machine-ip>:<port>.
+  server.listen(env.port, '0.0.0.0', () => {
+    logger.info(`Server listening on http://0.0.0.0:${env.port} (${env.nodeEnv}) — LAN reachable`);
     logger.info('WebSocket server ready');
   });
 

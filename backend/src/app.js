@@ -24,9 +24,13 @@ const intelRoutes = require('./routes/intel.routes');
 const app = express();
 
 app.use(helmet());
+// Wide-open CORS — frontend can be served from any LAN host (e.g.
+// http://192.168.0.104:5173) and still hit this API. The backend itself
+// is auth-protected per route, so origin restriction would only block
+// legitimate dev/LAN access.
 app.use(
   cors({
-
+    origin: true,
     credentials: false,
   })
 );

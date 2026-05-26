@@ -363,15 +363,35 @@ export interface IntelSnapshot {
       ce: { oi: number; oiChg: number; ltp: number; iv: number; delta: number };
       pe: { oi: number; oiChg: number; ltp: number; iv: number; delta: number };
     }>;
-    topStrikeSelections: Array<{
-      strike: number;
-      side: "CE" | "PE";
-      label: string;
-      type: "BUY" | "SELL" | "AVOID" | "WATCH";
-      score: number;
-      confidence: number;
-      reason: string;
-    }>;
+    topStrikeSelections: {
+      ce: Array<{
+        strike: number;
+        side: "CE" | "PE";
+        label: string;
+        type: "BUY" | "SELL" | "AVOID" | "WATCH";
+        score: number;
+        confidence: number;
+        reason: string;
+      }>;
+      pe: Array<{
+        strike: number;
+        side: "CE" | "PE";
+        label: string;
+        type: "BUY" | "SELL" | "AVOID" | "WATCH";
+        score: number;
+        confidence: number;
+        reason: string;
+      }>;
+      all: Array<{
+        strike: number;
+        side: "CE" | "PE";
+        label: string;
+        type: "BUY" | "SELL" | "AVOID" | "WATCH";
+        score: number;
+        confidence: number;
+        reason: string;
+      }>;
+    };
     riskManagement: {
       entryPrice: number;
       stopLoss: number;

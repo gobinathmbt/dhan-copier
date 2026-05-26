@@ -3,6 +3,18 @@ import { io, Socket } from 'socket.io-client';
 import { API_BASE_URL } from '@/lib/api';
 import { getDhanBypassKey } from '@/lib/dhanBypass';
 
+// Resolve fresh from window.location each connection so the socket
+// follows the page host on the LAN.
+function getSocketUrl(): string {
+  if (import.meta.env.VITE_API_BASE_URL) return String(import.meta.env.VITE_API_BASE_URL);
+  const port = import.meta.env.VITE_BACKEND_PORT || '3000';
+  if (typeof window !== 'undefined' && window.location?.hostname) {
+    const proto = window.location.protocol === 'https:' ? 'https' : 'http';
+    return `${proto}://${window.location.hostname}:${port}`;
+  }
+  return API_BASE_URL;
+}
+
 interface Candle {
   time: number;
   open: number;
@@ -64,7 +76,7 @@ export function useMarketDataSocket({
 
   // Initialize socket connection
   useEffect(() => {
-    const socket = io(API_BASE_URL, {
+    const socket = io(getSocketUrl(), {
       transports: ['websocket', 'polling'],
       reconnection: true,
       reconnectionDelay: 1000,

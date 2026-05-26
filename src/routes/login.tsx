@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState, useEffect, type FormEvent } from "react";
-import { api, apiErrorMessage } from "@/lib/api";
+import { api, apiErrorMessage, API_BASE_URL } from "@/lib/api";
 import { setToken, isAuthenticated } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -70,7 +70,8 @@ function LoginPage() {
               Sign in
             </Button>
             <p className="text-center text-xs text-muted-foreground">
-              Backend must be running at <code className="text-foreground">http://localhost:5000</code>
+              Backend must be reachable at{" "}
+              <code className="text-foreground">{API_BASE_URL}</code>
             </p>
           </form>
         </CardContent>

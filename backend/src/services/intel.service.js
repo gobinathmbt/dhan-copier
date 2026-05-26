@@ -763,10 +763,10 @@ function _optionChainSnapshot(strikes, atmStrike) {
  * score, confidence%, and reason. For option BUYERS we only emit BUY or AVOID.
  */
 function _topStrikeSelections(ladder, atmStrike, verdict, oiBlock) {
-  if (!ladder?.length || !atmStrike) return [];
+  const empty = { ce: [], pe: [], all: [] };
+  if (!ladder?.length || !atmStrike) return empty;
   const cePct = verdict?.cePct ?? 50;
   const pePct = verdict?.pePct ?? 50;
-  const out = [];
 
   const buildRow = (row, side) => {
     const leg = side === 'CE' ? row.ce : row.pe;
@@ -803,15 +803,14 @@ function _topStrikeSelections(ladder, atmStrike, verdict, oiBlock) {
     };
   };
 
-  // Score every strike on each side, take the top 3 CE + top 2 PE (or vice versa
-  // depending on bias). Always order by score desc.
-  const all = [];
-  for (const row of ladder) {
-    all.push(buildRow(row, 'CE'));
-    all.push(buildRow(row, 'PE'));
-  }
-  all.sort((a, b) => b.score - a.score);
-  return all.slice(0, 5);
+  // Build CE and PE separately — top 5 of each by score.
+  const ceRows = ladder.map((r) => buildRow(r, 'CE')).sort((a, b) => b.score - a.score).slice(0, 5);
+  const peRows = ladder.map((r) => buildRow(r, 'PE')).sort((a, b) => b.score - a.score).slice(0, 5);
+
+  // Keep the legacy combined `all` field for any consumer that still reads
+  // a flat array (top 5 mixed by score).
+  const all = [...ceRows, ...peRows].sort((a, b) => b.score - a.score).slice(0, 5);
+  return { ce: ceRows, pe: peRows, all };
 }
 
 /**

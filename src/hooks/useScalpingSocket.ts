@@ -8,8 +8,20 @@
 import { useEffect, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { useQueryClient } from '@tanstack/react-query';
+import { API_BASE_URL } from '@/lib/api';
 
-const SOCKET_URL = import.meta.env.VITE_API_URL || import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+// Resolve fresh from window.location at connection time. Module-load
+// resolution captures the SSR-time fallback value (localhost) and never
+// updates after hydration on a LAN host.
+function getSocketUrl(): string {
+  if (import.meta.env.VITE_API_BASE_URL) return String(import.meta.env.VITE_API_BASE_URL);
+  const port = import.meta.env.VITE_BACKEND_PORT || '3000';
+  if (typeof window !== 'undefined' && window.location?.hostname) {
+    const proto = window.location.protocol === 'https:' ? 'https' : 'http';
+    return `${proto}://${window.location.hostname}:${port}`;
+  }
+  return API_BASE_URL;
+}
 
 interface ScalpingSessionUpdate {
   session: any;
@@ -70,7 +82,7 @@ export function useScalpingSocket(options: UseScalpingSocketOptions = {}) {
 
     console.log('[useScalpingSocket] Connecting to WebSocket...');
 
-    const socket = io(SOCKET_URL, {
+    const socket = io(getSocketUrl(), {
       transports: ['websocket', 'polling'],
       reconnection: true,
       reconnectionDelay: 2000,
