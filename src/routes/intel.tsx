@@ -3,26 +3,25 @@ import { useEffect, useState } from "react";
 import { isAuthenticated } from "@/lib/auth";
 import { useIntelSnapshot } from "@/hooks/useIntelSnapshot";
 import type { SymbolKey } from "@/lib/intelTypes";
-import { TopBar } from "@/components/intel/TopBar";
-import { MasterVerdictCard, TradePlanCard } from "@/components/intel/MasterVerdictCard";
-import { MacroPanel } from "@/components/intel/MacroPanel";
-import { ConfluencePanel } from "@/components/intel/ConfluencePanel";
-import { StrikeProbability } from "@/components/intel/StrikeProbability";
-import { FactorBreakdown } from "@/components/intel/FactorBreakdown";
-import { FlowEnginePanel } from "@/components/intel/FlowEnginePanel";
-import { RegimeStrip } from "@/components/intel/RegimeStrip";
-import { DebugPanel } from "@/components/intel/DebugPanel";
-import { cn } from "@/lib/utils";
-import { Wifi, WifiOff, RefreshCw } from "lucide-react";
+
+import { TopHeader } from "@/components/intel/dash/TopHeader";
+import { StatusStrip } from "@/components/intel/dash/StatusStrip";
+import { SpotFutCard } from "@/components/intel/dash/SpotFutCard";
+import { OiAnalysisCard } from "@/components/intel/dash/OiAnalysisCard";
+import { DeltaVolumeCard } from "@/components/intel/dash/DeltaVolumeCard";
+import { FrvpCard } from "@/components/intel/dash/FrvpCard";
+import { BreadthCard } from "@/components/intel/dash/BreadthCard";
+import { HeavyweightsCard } from "@/components/intel/dash/HeavyweightsCard";
+import { IvCard } from "@/components/intel/dash/IvCard";
+import { TrapDetectorCard, MarketRegimeCard } from "@/components/intel/dash/TrapAndRegimeCard";
+import { OptionChainSnapshotCard } from "@/components/intel/dash/OptionChainSnapshotCard";
+import { TopStrikeCard } from "@/components/intel/dash/TopStrikeCard";
+import { RiskCard } from "@/components/intel/dash/RiskCard";
+import { AlertsTicker } from "@/components/intel/dash/AlertsTicker";
 
 export const Route = createFileRoute("/intel")({
   component: IntelPage,
 });
-
-const SYMBOLS: { key: SymbolKey; label: string }[] = [
-  { key: "NIFTY_50", label: "NIFTY 50" },
-  { key: "SENSEX", label: "SENSEX" },
-];
 
 function IntelPage() {
   const navigate = useNavigate();
@@ -33,155 +32,63 @@ function IntelPage() {
   }, [navigate]);
 
   const [symbol, setSymbol] = useState<SymbolKey>("NIFTY_50");
-  const [intervalMs, setIntervalMs] = useState(2000);
-
-  const { data, loading, error, lastFetchAt, refetch } = useIntelSnapshot({
-    symbol,
-    intervalMs,
-  });
-
-  const stale = lastFetchAt && Date.now() - lastFetchAt > 6000;
+  const { data } = useIntelSnapshot({ symbol, intervalMs: 2000 });
 
   return (
-    <div
-      className="relative min-h-[calc(100vh-4rem)] w-full bg-[#0a0a0b] text-white"
-      style={{
-        backgroundImage:
-          "radial-gradient(circle at 50% -20%, rgba(168,85,247,0.06), transparent 50%), radial-gradient(circle at 100% 100%, rgba(59,130,246,0.04), transparent 60%)",
-      }}
-    >
-      {/* Header strip */}
-      <div className="sticky top-0 z-30 flex flex-wrap items-center gap-2 border-b border-white/[0.06] bg-[#0a0a0b]/85 px-4 py-2 backdrop-blur-md">
-        <h1 className="text-sm font-bold uppercase tracking-[0.18em] text-white/85">
-          Intel Terminal
-        </h1>
-        <span className="hidden text-[10px] text-white/35 md:inline">
-          option-buyer intelligence dashboard
-        </span>
+    <div className="fixed inset-0 left-16 flex flex-col bg-[#070a0e] text-white">
+      <TopHeader data={data} symbol={symbol} onSymbol={setSymbol} />
+      <main className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden p-2">
+        <StatusStrip data={data} />
 
-        <div className="ml-2 flex items-center gap-1 rounded-md border border-white/[0.08] bg-black/30 p-0.5">
-          {SYMBOLS.map((s) => (
-            <button
-              key={s.key}
-              onClick={() => setSymbol(s.key)}
-              className={cn(
-                "rounded px-3 py-1 text-[11px] font-semibold uppercase tracking-wider transition-colors",
-                symbol === s.key
-                  ? "bg-white/10 text-white"
-                  : "text-white/45 hover:text-white/85",
-              )}
-            >
-              {s.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="ml-auto flex flex-wrap items-center gap-3 text-[10px] text-white/55">
-          <select
-            value={intervalMs}
-            onChange={(e) => setIntervalMs(Number(e.target.value))}
-            className="rounded border border-white/[0.08] bg-black/30 px-2 py-1 text-[10px] text-white/85"
-          >
-            <option value={1000}>1s</option>
-            <option value={2000}>2s</option>
-            <option value={5000}>5s</option>
-            <option value={15000}>15s</option>
-          </select>
-
-          <button
-            onClick={() => refetch()}
-            className="flex items-center gap-1 rounded border border-white/[0.08] px-2 py-1 hover:bg-white/[0.04]"
-            disabled={loading}
-          >
-            <RefreshCw size={11} className={loading ? "animate-spin" : ""} />
-            refresh
-          </button>
-
-          <span className="flex items-center gap-1">
-            {data?.ok && !error ? (
-              <>
-                <Wifi size={11} className={cn("text-emerald-400", stale && "text-amber-400")} />
-                <span className={stale ? "text-amber-400" : "text-emerald-400"}>
-                  {stale ? "stale" : "live"}
-                </span>
-              </>
-            ) : (
-              <>
-                <WifiOff size={11} className="text-rose-400" />
-                <span className="text-rose-400">offline</span>
-              </>
-            )}
-          </span>
-          {data?.market.isOpen ? (
-            <span className="rounded bg-emerald-500/15 px-2 py-0.5 text-emerald-400">market open</span>
-          ) : (
-            <span className="rounded bg-rose-500/15 px-2 py-0.5 text-rose-400">market closed</span>
-          )}
-          {data?.dataSource === "closed-market-fallback" ? (
-            <span
-              className="rounded bg-amber-500/15 px-2 py-0.5 text-amber-300"
-              title="Showing last trading day's data"
-            >
-              last-session view
-            </span>
-          ) : null}
-        </div>
-      </div>
-
-      {error ? (
-        <div className="mx-4 mt-3 rounded-md border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
-          {error}
-        </div>
-      ) : null}
-
-      <div className="space-y-3 p-3">
-        {/* TOP BAR — fast-glance widgets */}
-        <TopBar data={data} />
-
-        {/* PRIMARY DECISION ROW: Master Verdict + Trade Plan + Macro */}
-        <div className="grid gap-3 lg:grid-cols-12">
-          <div className="lg:col-span-4">
-            <MasterVerdictCard data={data} />
+        {/* Row 2 — 4 quad cards */}
+        <div className="grid min-h-0 grid-cols-12 gap-2" style={{ flex: "1.15 1 0" }}>
+          <div className="col-span-3 min-h-0">
+            <SpotFutCard data={data} />
           </div>
-          <div className="lg:col-span-4">
-            <TradePlanCard data={data} />
+          <div className="col-span-3 min-h-0">
+            <OiAnalysisCard data={data} />
           </div>
-          <div className="lg:col-span-4">
-            <MacroPanel data={data} />
+          <div className="col-span-3 min-h-0">
+            <DeltaVolumeCard data={data} />
+          </div>
+          <div className="col-span-3 min-h-0">
+            <FrvpCard data={data} />
           </div>
         </div>
 
-        {/* SECONDARY ROW: Strike Probability (the core of the option-buyer dashboard) */}
-        <div className="grid gap-3 lg:grid-cols-12">
-          <div className="lg:col-span-7">
-            <StrikeProbability data={data} />
+        {/* Row 3 — Breadth, Heavyweights, IV, Trap+Regime */}
+        <div className="grid min-h-0 grid-cols-12 gap-2" style={{ flex: "1 1 0" }}>
+          <div className="col-span-2 min-h-0">
+            <BreadthCard data={data} />
           </div>
-          <div className="lg:col-span-5">
-            <FactorBreakdown data={data} />
+          <div className="col-span-3 min-h-0">
+            <HeavyweightsCard data={data} />
+          </div>
+          <div className="col-span-3 min-h-0">
+            <IvCard data={data} />
+          </div>
+          <div className="col-span-2 min-h-0">
+            <TrapDetectorCard data={data} />
+          </div>
+          <div className="col-span-2 min-h-0">
+            <MarketRegimeCard data={data} />
           </div>
         </div>
 
-        {/* TERTIARY ROW: Confluence + Flow */}
-        <div className="grid gap-3 lg:grid-cols-12">
-          <div className="lg:col-span-7">
-            <ConfluencePanel data={data} />
+        {/* Row 4 — Option chain, Top strikes, Risk mgmt */}
+        <div className="grid min-h-0 grid-cols-12 gap-2" style={{ flex: "1.05 1 0" }}>
+          <div className="col-span-5 min-h-0">
+            <OptionChainSnapshotCard data={data} />
           </div>
-          <div className="lg:col-span-5">
-            <FlowEnginePanel data={data} />
+          <div className="col-span-4 min-h-0">
+            <TopStrikeCard data={data} />
+          </div>
+          <div className="col-span-3 min-h-0">
+            <RiskCard data={data} />
           </div>
         </div>
-
-        {/* REGIME STACK (single line) */}
-        <RegimeStrip data={data} />
-
-        {/* Debug */}
-        <DebugPanel
-          data={data}
-          lastFetchAt={lastFetchAt}
-          loading={loading}
-          error={error}
-        />
-      </div>
+      </main>
+      <AlertsTicker data={data} />
     </div>
   );
 }

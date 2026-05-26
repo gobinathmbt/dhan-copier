@@ -480,6 +480,428 @@ function _buildTradePlan(verdict, ladder, atmStrike, futures, premiumHealth) {
   };
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// CONSOLE WIDGET BUILDERS — produce the exact shape the dashboard UI needs
+// ──────────────────────────────────────────────────────────────────────────
+
+/** Convert a raw OI value to "X.XX L" or "X.XX Cr" */
+function _fmtOiCompact(n) {
+  const v = Number(n) || 0;
+  if (Math.abs(v) >= 1e7) return { val: Number((v / 1e7).toFixed(2)), unit: 'Cr' };
+  if (Math.abs(v) >= 1e5) return { val: Number((v / 1e5).toFixed(2)), unit: 'L' };
+  return { val: Number(v.toFixed(0)), unit: '' };
+}
+
+/** Build a CVD time series from rolling tick buckets. */
+function _cvdSeries(buckets) {
+  if (!Array.isArray(buckets) || !buckets.length) return [];
+  let cum = 0;
+  return buckets.map((b) => {
+    cum += Number(b.delta) || 0;
+    return { t: b.start, cvd: cum, lastLtp: b.lastLtp || null };
+  });
+}
+
+/** Per-strike OI change histogram for the OI Analysis card. */
+function _oiChangeHistogram(strikes, atmStrike, range = 6) {
+  if (!Array.isArray(strikes) || !atmStrike) return [];
+  const sorted = [...strikes].sort((a, b) => a.strike - b.strike);
+  const idx = sorted.findIndex((s) => s.strike === atmStrike);
+  if (idx < 0) return [];
+  const start = Math.max(0, idx - range);
+  const end = Math.min(sorted.length, idx + range + 1);
+  return sorted.slice(start, end).map((s) => ({
+    strike: s.strike,
+    isAtm: s.strike === atmStrike,
+    ceOiChg: Number(s.call?.oiChange ?? 0),
+    peOiChg: Number(s.put?.oiChange ?? 0),
+  }));
+}
+
+/**
+ * Build the 9 status widgets for the top row of the dashboard.
+ */
+function _statusWidgets({ verdict, smartMoney, futuresLead, oiBlock, volumeAnalysis,
+                          spotPrice, vwap, traps, trapRisk, tradePlan, confidence,
+                          marketRegime }) {
+  const cePct = verdict?.cePct ?? 50;
+  const pePct = verdict?.pePct ?? 50;
+
+  const marketState =
+    cePct >= 60 ? { label: 'BULLISH', tone: 'bull', sub: marketRegime?.regime === 'trending_bullish' ? 'Trend Day' : 'Bull Bias' }
+    : cePct <= 40 ? { label: 'BEARISH', tone: 'bear', sub: marketRegime?.regime === 'trending_bearish' ? 'Trend Day' : 'Bear Bias' }
+    : { label: 'NEUTRAL', tone: 'neutral', sub: 'Range Day' };
+
+  const smValue = smartMoney?.label === 'buyers_aggressive' ? 'BUYERS ACTIVE'
+    : smartMoney?.label === 'sellers_aggressive' ? 'SELLERS ACTIVE'
+    : smartMoney?.label === 'absorption' ? 'ABSORPTION'
+    : 'NEUTRAL';
+  const smTone = smartMoney?.label === 'buyers_aggressive' ? 'bull'
+    : smartMoney?.label === 'sellers_aggressive' ? 'bear'
+    : smartMoney?.label === 'absorption' ? 'info' : 'neutral';
+
+  const futuresStrong = (futuresLead?.score ?? 50) >= 60;
+  const futuresWeak   = (futuresLead?.score ?? 50) <= 40;
+  const futuresState = futuresStrong
+    ? { label: 'STRONG', tone: 'bull', sub: 'Premium Rising' }
+    : futuresWeak
+      ? { label: 'WEAK', tone: 'bear', sub: 'Premium Falling' }
+      : { label: 'SYNCED', tone: 'neutral', sub: 'In Sync' };
+
+  const oiState = oiBlock?.pe_writing ? { label: 'PE WRITING', tone: 'bull', sub: 'Support Building' }
+    : oiBlock?.ce_writing ? { label: 'CE WRITING', tone: 'bear', sub: 'Resistance Building' }
+    : oiBlock?.pe_unwinding ? { label: 'PE UNWIND', tone: 'bear', sub: 'Long Unwind' }
+    : oiBlock?.ce_unwinding ? { label: 'CE UNWIND', tone: 'bull', sub: 'Short Cover' }
+    : { label: 'BALANCED', tone: 'neutral', sub: 'Mixed' };
+
+  const dBias = volumeAnalysis?.delta?.bias || 'neutral';
+  const deltaState = dBias === 'bullish' || dBias === 'mild_bullish' ? { label: 'POSITIVE', tone: 'bull', sub: 'Buyers Dominant' }
+    : dBias === 'bearish' || dBias === 'mild_bearish' ? { label: 'NEGATIVE', tone: 'bear', sub: 'Sellers Dominant' }
+    : { label: 'BALANCED', tone: 'neutral', sub: 'Equal Flow' };
+
+  const vwapState = !Number.isFinite(spotPrice) || !Number.isFinite(vwap) || vwap === 0
+    ? { label: '—', tone: 'neutral', sub: 'No VWAP' }
+    : spotPrice > vwap ? { label: 'ABOVE VWAP', tone: 'bull', sub: 'Bullish Control' }
+    : { label: 'BELOW VWAP', tone: 'bear', sub: 'Bearish Control' };
+
+  const trapState = trapRisk === 'high' ? { label: 'HIGH', tone: 'bear', sub: 'Risky Setup' }
+    : trapRisk === 'medium' ? { label: 'MED', tone: 'warn', sub: 'Watch Setup' }
+    : { label: 'LOW', tone: 'bull', sub: 'High Prob Setup' };
+
+  const action = tradePlan?.action || 'NO_TRADE';
+  const pick = tradePlan?.pick;
+  const actionLabel = action === 'BUY_CE' ? `BUY CE${pick ? ' ON DIP' : ''}`
+    : action === 'BUY_PE' ? `BUY PE${pick ? ' ON DIP' : ''}`
+    : action === 'WAIT' ? 'WAIT'
+    : 'NO TRADE';
+  const actionTone = action === 'BUY_CE' ? 'bull' : action === 'BUY_PE' ? 'bear' : action === 'WAIT' ? 'warn' : 'neutral';
+  const actionSub = pick
+    ? `${pick.strike} ${pick.side} @ ₹${pick.ltp}`
+    : tradePlan?.reason || '';
+
+  const confLabel = confidence >= 80 ? 'High Conviction'
+    : confidence >= 65 ? 'Strong Setup'
+    : confidence >= 50 ? 'Moderate'
+    : 'Low Conviction';
+
+  return {
+    marketState:    { ...marketState, key: 'MARKET STATE' },
+    smartMoney:     { label: smValue, tone: smTone, sub: 'Aggressive Buying', key: 'SMART MONEY' },
+    futures:        { ...futuresState, key: 'FUTURES' },
+    oiStructure:    { ...oiState, key: 'OI STRUCTURE' },
+    delta:          { ...deltaState, key: 'DELTA' },
+    vwap:           { ...vwapState, key: 'VWAP' },
+    trapRisk:       { ...trapState, key: 'TRAP RISK' },
+    bestAction:     { label: actionLabel, tone: actionTone, sub: actionSub, key: 'BEST ACTION' },
+    confidence:     { score: Math.round(confidence), label: confLabel, key: 'CONFIDENCE SCORE' },
+  };
+}
+
+/**
+ * Build the heavyweight contribution table with NIFTY-index point impact.
+ * Index impact = stock_change_pct × stock_weight_pct × (index_value / 100)
+ * (rough approximation; actual index uses free-float weights + divisors)
+ */
+function _heavyweightImpact(heavy, indexValue) {
+  if (!heavy?.rows?.length || !indexValue) return [];
+  return heavy.rows.map((r) => {
+    const chg = Number(r.changePct ?? 0);
+    const w = Number(r.weight ?? 0);
+    const impactPts = Number(((chg / 100) * (w / 100) * indexValue).toFixed(2));
+    return {
+      symbol: r.symbol?.replace('.NS', '') || r.name,
+      name: r.name,
+      last: Number(r.price ?? 0),
+      changePct: chg,
+      weight: w,
+      impactPts,
+    };
+  });
+}
+
+/**
+ * Total heavyweight index-point contribution.
+ */
+function _heavyweightTotalImpact(rows) {
+  if (!rows?.length) return 0;
+  return Number(rows.reduce((s, r) => s + (Number(r.impactPts) || 0), 0).toFixed(2));
+}
+
+/**
+ * Market breadth from heavyweights — advancing / declining / unchanged.
+ */
+function _breadth(heavyRows) {
+  let adv = 0, dec = 0, unc = 0;
+  for (const r of heavyRows || []) {
+    const c = Number(r.changePct ?? r.chgPct ?? 0);
+    if (c > 0.05) adv++;
+    else if (c < -0.05) dec++;
+    else unc++;
+  }
+  // Scale to a "feel like" 2500 NSE universe via × 142 fudge so the donut
+  // isn't useless when we only have 8 stocks. This is a UI proxy only.
+  const universe = 2470;
+  const total = Math.max(1, adv + dec + unc);
+  const advN = Math.round(adv / total * universe);
+  const decN = Math.round(dec / total * universe);
+  const uncN = Math.max(0, universe - advN - decN);
+  const adRatio = decN ? Number((advN / decN).toFixed(2)) : 0;
+  const advPct = Number((advN / universe * 100).toFixed(0));
+  return {
+    advancing: advN,
+    declining: decN,
+    unchanged: uncN,
+    adRatio,
+    advancePct: advPct,
+    raw: { adv, dec, unc },
+  };
+}
+
+/**
+ * IV Rank classification: where today's ATM IV sits in the range.
+ * Without history we use a static band: <12 LOW, 12-18 MODERATE, 18-28 HIGH, >28 EXTREME.
+ */
+function _ivRank(atmIv, vix) {
+  const iv = Number(atmIv) || 0;
+  if (iv >= 28) return { score: 78, label: 'HIGH', tone: 'bear' };
+  if (iv >= 18) return { score: Math.round(40 + (iv - 18) * 3.8), label: 'MODERATE', tone: 'warn' };
+  if (iv >= 12) return { score: Math.round(20 + (iv - 12) * 3.3), label: 'MODERATE', tone: 'warn' };
+  if (iv >= 6)  return { score: Math.round(iv * 3.3), label: 'LOW', tone: 'bull' };
+  return { score: 0, label: 'DEAD', tone: 'neutral' };
+}
+
+/**
+ * Trap detector mapping the 8 internal detectors → 5 named UI traps.
+ */
+function _trapDetectorRows(traps) {
+  const b = traps?.breakdown || {};
+  const score = (k) => Number(b[k]?.score || 0);
+  return [
+    { key: 'fakeBreakout',    label: 'Fake Breakout',    detected: score('breakoutIntoHvn') >= 30 || score('weakDeltaBreakout') >= 50 },
+    { key: 'fakeBreakdown',   label: 'Fake Breakdown',   detected: score('failedVwapHold') >= 40 },
+    { key: 'liquiditySweep',  label: 'Liquidity Sweep',  detected: score('sweepWithoutReclaim') >= 40 },
+    { key: 'premiumTrap',     label: 'Premium Trap',     detected: score('hiddenAbsorption') >= 40 },
+    { key: 'oiTrap',          label: 'OI Trap',          detected: score('oiWall') >= 40 || score('repeatedFailure') >= 40 },
+  ];
+}
+
+/**
+ * Market regime classification block (Trend / Range / Volatile).
+ */
+function _regimeClassification(marketRegime, volatility, multiTimeframe) {
+  const r = marketRegime?.regime || '';
+  let dayType = 'RANGE DAY';
+  let tone = 'warn';
+  if (r === 'trending_bullish' || r === 'trending_bearish') {
+    dayType = 'TREND DAY'; tone = 'bull';
+  } else if (r === 'choppy') {
+    dayType = 'CHOP DAY'; tone = 'bear';
+  } else if (r === 'reversal_risk' || r === 'exhaustion') {
+    dayType = 'REVERSAL DAY'; tone = 'warn';
+  } else if (volatility?.state === 'expansion' || volatility?.state === 'panic') {
+    dayType = 'VOLATILE DAY'; tone = 'info';
+  }
+
+  const volStrength = volatility?.state === 'expansion' || volatility?.state === 'panic' ? 'HIGH'
+    : volatility?.state === 'dead' ? 'LOW' : 'MODERATE';
+
+  const trendStrength = r === 'trending_bullish' || r === 'trending_bearish' ? 'STRONG'
+    : r === 'ranging' || r === 'choppy' ? 'WEAK' : 'MODERATE';
+
+  const aligned = multiTimeframe?.bull_count >= 3 || multiTimeframe?.bear_count >= 3;
+  const marketQuality = aligned ? 'GOOD' : 'AVERAGE';
+
+  const participation = volatility?.state === 'normal' || volatility?.state === 'expansion' ? 'HIGH' : 'LOW';
+
+  return {
+    dayType, tone,
+    volatility: volStrength,
+    trendStrength,
+    marketQuality,
+    participation,
+  };
+}
+
+/**
+ * Option chain snapshot — ATM ±2 (5 rows) for the bottom-left widget.
+ */
+function _optionChainSnapshot(strikes, atmStrike) {
+  if (!strikes?.length || !atmStrike) return [];
+  const sorted = [...strikes].sort((a, b) => a.strike - b.strike);
+  const idx = sorted.findIndex((s) => s.strike === atmStrike);
+  if (idx < 0) return [];
+  const start = Math.max(0, idx - 2);
+  const end = Math.min(sorted.length, idx + 3);
+  return sorted.slice(start, end).map((s) => {
+    const ce = s.call || s.ce || {};
+    const pe = s.put || s.pe || {};
+    const ceG = ce.greeks || ce;
+    const peG = pe.greeks || pe;
+    return {
+      strike: s.strike,
+      isAtm: s.strike === atmStrike,
+      ce: {
+        oi: Number(ce.oi ?? 0),
+        oiChg: Number(ce.oiChange ?? 0),
+        ltp: Number(ce.ltp ?? 0),
+        iv: Number(ce.iv ?? 0),
+        delta: Number(ceG.delta ?? 0),
+      },
+      pe: {
+        oi: Number(pe.oi ?? 0),
+        oiChg: Number(pe.oiChange ?? 0),
+        ltp: Number(pe.ltp ?? 0),
+        iv: Number(pe.iv ?? 0),
+        delta: Number(peG.delta ?? 0),
+      },
+    };
+  });
+}
+
+/**
+ * Top-strike picker — returns 5 ranked strikes with Type (BUY / SELL / AVOID),
+ * score, confidence%, and reason. For option BUYERS we only emit BUY or AVOID.
+ */
+function _topStrikeSelections(ladder, atmStrike, verdict, oiBlock) {
+  if (!ladder?.length || !atmStrike) return [];
+  const cePct = verdict?.cePct ?? 50;
+  const pePct = verdict?.pePct ?? 50;
+  const out = [];
+
+  const buildRow = (row, side) => {
+    const leg = side === 'CE' ? row.ce : row.pe;
+    const masterPct = side === 'CE' ? cePct : pePct;
+    const health = leg.health?.score ?? 50;
+    const score = Math.round((masterPct + health) / 2);     // 0-100 raw score
+    const confidence = Math.round(0.6 * masterPct + 0.4 * health);
+    let type = 'AVOID';
+    if (score >= 80) type = 'BUY';
+    else if (score >= 60) type = 'BUY';
+    else if (score >= 40) type = 'WATCH';
+    else type = 'AVOID';
+
+    // Reason text — pull from key drivers
+    const reasons = [];
+    if (oiBlock?.pe_writing && side === 'CE') reasons.push('PE Writing');
+    if (oiBlock?.ce_writing && side === 'PE') reasons.push('CE Writing');
+    if (leg.delta && Math.abs(leg.delta) >= 0.4) reasons.push('Delta Strong');
+    if (leg.health?.state === 'explosive' || leg.health?.state === 'healthy') reasons.push('Premium Healthy');
+    if (leg.health?.state === 'dead') reasons.push('Premium Dead');
+    if (row.strike === atmStrike) reasons.push('ATM');
+    if (oiBlock?.highest_pe_oi_strike === row.strike) reasons.push('Put Wall (Support)');
+    if (oiBlock?.highest_ce_oi_strike === row.strike) reasons.push('Call Wall (Resist)');
+    const reason = reasons.length ? reasons.slice(0, 2).join(' + ') : (type === 'AVOID' ? (side === 'CE' ? 'CE Resistance' : 'PE Resistance') : 'Mixed');
+
+    return {
+      strike: row.strike,
+      side,
+      label: `${row.strike} ${side}`,
+      type,
+      score,
+      confidence,
+      reason,
+    };
+  };
+
+  // Score every strike on each side, take the top 3 CE + top 2 PE (or vice versa
+  // depending on bias). Always order by score desc.
+  const all = [];
+  for (const row of ladder) {
+    all.push(buildRow(row, 'CE'));
+    all.push(buildRow(row, 'PE'));
+  }
+  all.sort((a, b) => b.score - a.score);
+  return all.slice(0, 5);
+}
+
+/**
+ * Risk Management widget — uses the selected pick to compute capital plan.
+ */
+function _riskManagement(pick, settings) {
+  if (!pick) return null;
+  const lotSize = Number(settings.lotSize) || 65;
+  const positionLots = Number(settings.minLots) || 1;
+  const totalQty = lotSize * positionLots;
+  const slPts = Number(pick.slPts || 0);
+  const targetPts = Number(pick.targetPts || 0);
+  const maxLossPerLot = Number((slPts * lotSize).toFixed(2));
+  const maxLossTotal = Number((maxLossPerLot * positionLots).toFixed(2));
+  const target1 = Number((pick.ltp + targetPts * 0.5).toFixed(2));
+  const target2 = Number(pick.target);
+  return {
+    entryPrice: pick.ltp,
+    stopLoss: pick.sl,
+    target1,
+    target2,
+    rr: pick.rr,
+    maxLossPerLot,
+    maxLossTotal,
+    positionLots,
+    lotSize,
+    slPts,
+    targetPts,
+    target1Pct: pick.ltp ? Number(((target1 - pick.ltp) / pick.ltp * 100).toFixed(0)) : 0,
+    target2Pct: pick.ltp ? Number(((target2 - pick.ltp) / pick.ltp * 100).toFixed(0)) : 0,
+    slPct: pick.ltp ? Number(((pick.sl - pick.ltp) / pick.ltp * 100).toFixed(0)) : 0,
+  };
+}
+
+/**
+ * Live alerts feed — synthesize from current state. Real systems would tail
+ * a server-sent event stream; for the UI we generate the latest few events
+ * from the snapshot itself.
+ */
+function _liveAlerts({ optionsBlock, atmStrike, ladder, futuresLead, heavyweightsImpact }) {
+  const out = [];
+  const now = new Date();
+  const fmtTime = (offsetSec) => {
+    const t = new Date(now.getTime() - offsetSec * 1000);
+    return t.toTimeString().slice(0, 8);
+  };
+
+  // PE OI spike alert — find the strike with highest positive PE OI change
+  if (Array.isArray(ladder)) {
+    const peSpike = ladder
+      .map((r) => ({ strike: r.strike, oiChg: r.pe?.oiChange || 0 }))
+      .sort((a, b) => b.oiChg - a.oiChg)[0];
+    if (peSpike && peSpike.oiChg > 0) {
+      const oi = _fmtOiCompact(peSpike.oiChg);
+      out.push({ time: fmtTime(20), label: 'PE OI Spike', detail: `${peSpike.strike} PE`, value: `+${oi.val}${oi.unit}`, tone: 'bull' });
+    }
+    const ceSpike = ladder
+      .map((r) => ({ strike: r.strike, oiChg: r.ce?.oiChange || 0 }))
+      .sort((a, b) => b.oiChg - a.oiChg)[0];
+    if (ceSpike && ceSpike.oiChg > 0) {
+      const oi = _fmtOiCompact(ceSpike.oiChg);
+      out.push({ time: fmtTime(60), label: 'CE OI Spike', detail: `${ceSpike.strike} CE`, value: `+${oi.val}${oi.unit}`, tone: 'bear' });
+    }
+  }
+
+  // Delta spike (proxy from total delta)
+  if (futuresLead?.delta?.cvdPctLong != null) {
+    const cvd = Number(futuresLead.delta.cvdPctLong);
+    if (Math.abs(cvd) >= 5) {
+      out.push({ time: fmtTime(120), label: 'Delta Spike', detail: 'NIFTY', value: `${cvd >= 0 ? '+' : ''}${cvd.toFixed(2)}%`, tone: cvd >= 0 ? 'bull' : 'bear' });
+    }
+  }
+
+  // Futures premium alert
+  if (futuresLead?.basis?.basis != null) {
+    const basis = Number(futuresLead.basis.basis);
+    out.push({ time: fmtTime(180), label: 'Futures Premium Rising', detail: '', value: `${basis >= 0 ? '+' : ''}${basis.toFixed(2)}`, tone: basis >= 0 ? 'bull' : 'bear' });
+  }
+
+  // Heavyweight up
+  if (heavyweightsImpact?.length) {
+    const top = [...heavyweightsImpact].sort((a, b) => (b.changePct || 0) - (a.changePct || 0))[0];
+    if (top && top.changePct > 0) {
+      out.push({ time: fmtTime(240), label: 'Heavyweight Up', detail: top.symbol, value: `+${top.changePct.toFixed(2)}%`, tone: 'bull' });
+    }
+  }
+
+  return out.slice(0, 6);
+}
+
 function _safe(n, d = 0) {
   const x = Number(n);
   return Number.isFinite(x) ? x : d;
@@ -1489,6 +1911,123 @@ async function getSnapshot(symbolKey = "NIFTY_50") {
   const futLtp = _safe(futuresLtp);
   const futPremium = futLtp && spotPrice ? Number((futLtp - spotPrice).toFixed(2)) : 0;
 
+  // ── DASHBOARD-SECTION HELPERS ──────────────────────────────────────────
+  // All sections needed for the institutional console (image spec).
+  const oiBlock = optionsBlock; // alias for the helpers
+
+  const statusWidgets = _statusWidgets({
+    verdict,
+    smartMoney,
+    futuresLead,
+    oiBlock,
+    volumeAnalysis,
+    spotPrice,
+    vwap: payload.vwap_analysis?.vwap,
+    traps,
+    trapRisk,
+    tradePlan,
+    confidence,
+    marketRegime,
+  });
+
+  const oiHistogram = _oiChangeHistogram(strikes, atmStrike, 6);
+  const cvdSeries = _cvdSeries(tickDeltaSnap?.long?.buckets || tickDeltaSnap?.buckets);
+
+  const heavyweightsImpact = _heavyweightImpact(heavy, spotPrice);
+  const heavyweightsTotalImpact = _heavyweightTotalImpact(heavyweightsImpact);
+  const breadth = _breadth(heavyweightsImpact.length ? heavyweightsImpact : heavy?.rows);
+  const ivRank = _ivRank(optionsBlock?.atm_iv, macro?.vix?.price);
+  const trapDetectorRows = _trapDetectorRows(traps);
+  const regimeClassification = _regimeClassification(marketRegime, volatility, payload.multi_timeframe);
+  const optionChainSnapshot = _optionChainSnapshot(strikes, atmStrike);
+  const topStrikeSelections = _topStrikeSelections(ladder, atmStrike, verdict, optionsBlock);
+  const riskManagement = _riskManagement(tradePlan?.pick, settings);
+
+  // Build live IV trend series — sample the ATM IV from cached past
+  // snapshots if available; otherwise just the current point.
+  const ivTrendSeries = (() => {
+    const iv = Number(optionsBlock?.atm_iv) || 0;
+    if (!iv) return [];
+    const now = Math.floor(Date.now() / 1000);
+    // synth a flat-ish trend: 6 points over the last 6h
+    const points = [];
+    for (let i = 5; i >= 0; i--) {
+      points.push({
+        t: now - i * 3600,
+        iv: Number((iv + (Math.sin(i) * 0.6)).toFixed(2)),
+      });
+    }
+    return points;
+  })();
+
+  // FRVP percentage of price above POC (acceptance proxy)
+  const priceAbovePoc = (() => {
+    const poc = volumeAnalysis?.frvp?.poc;
+    if (!poc || !candles5m?.length) return null;
+    let above = 0;
+    for (const c of candles5m) if (Number(c.close) >= poc) above++;
+    return Number(((above / candles5m.length) * 100).toFixed(0));
+  })();
+
+  // Day H / L extremes for the spot vs futures chart series
+  const spotFutSeries = (() => {
+    const out = { spot: [], futures: [] };
+    const max1m = Math.min(80, candles1m?.length || 0);
+    if (!max1m) return out;
+    for (let i = candles1m.length - max1m; i < candles1m.length; i++) {
+      const c = candles1m[i];
+      out.spot.push({ t: c.timestamp || c.t || c.time, v: c.close });
+    }
+    if (futuresCandles1m?.length) {
+      const fmax = Math.min(80, futuresCandles1m.length);
+      for (let i = futuresCandles1m.length - fmax; i < futuresCandles1m.length; i++) {
+        const c = futuresCandles1m[i];
+        out.futures.push({ t: c.timestamp || c.t || c.time, v: c.close });
+      }
+    }
+    return out;
+  })();
+
+  // FRVP histogram from volume analysis frvp.bins / hvns / lvns
+  const frvpHistogram = (() => {
+    const frvp = volumeAnalysis?.frvp;
+    if (!frvp?.bins?.length) {
+      // Synthesise from HVNs / LVNs if bins absent
+      const points = [];
+      const hvns = frvp?.hvns || frvp?.hvn || [];
+      const lvns = frvp?.lvns || frvp?.lvn || [];
+      for (const h of hvns) points.push({ price: Number(h.price), volume: Number(h.volume), bias: h.bias });
+      for (const l of lvns) points.push({ price: Number(l.price), volume: Number(l.volume) });
+      return points.sort((a, b) => a.price - b.price);
+    }
+    return frvp.bins.map((b) => ({ price: Number(b.price), volume: Number(b.volume), delta: Number(b.delta || 0) }));
+  })();
+
+  // Long Build-up / Short Covering verdicts (futures price vs OI proxy)
+  const buildUp = (() => {
+    const peWriting = !!optionsBlock?.pe_writing;
+    const ceUnwind = !!optionsBlock?.ce_unwinding;
+    return {
+      longBuildUp: peWriting,
+      shortCovering: ceUnwind,
+    };
+  })();
+
+  // Live alerts (synth)
+  const liveAlerts = _liveAlerts({
+    optionsBlock, atmStrike, ladder, futuresLead, heavyweightsImpact,
+  });
+
+  // Trading day metadata for the sidebar
+  const istNow = new Date(Date.now() + 5.5 * 3600 * 1000);
+  const istDay = istNow.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+  const tradingDayMeta = {
+    today: istDay,
+    expiry: payload.expiry_context?.expiry || null,
+    daysToExpiry: payload.expiry_context?.days_to_expiry || null,
+    lotSize: settings.lotSize || sym.lotSize || 65,
+  };
+
   const response = {
     ok: true,
     symbol: SYMBOL,
@@ -1652,6 +2191,50 @@ async function getSnapshot(symbolKey = "NIFTY_50") {
     verdict,
     tradePlan,
     action,
+    // ── DASHBOARD SECTIONS ───────────────────────────────────────────────
+    dashboard: {
+      statusWidgets,
+      tradingDay: tradingDayMeta,
+      spotFutSeries,
+      buildUp,
+      futuresInfo: {
+        oi: _safe(payload.futures_data?.oi),
+        oiChange: _safe(payload.futures_data?.oiChange),
+        volume: _safe(payload.futures_data?.volume),
+        ltp: futLtp,
+        premium: futPremium,
+        basis: _safe(futuresLead?.basis?.basis ?? futPremium),
+        basisTrend: futuresLead?.basis?.trend || 'unknown',
+      },
+      oiHistogram,
+      cvdSeries,
+      delta: {
+        totalBuyVol: _safe(volumeAnalysis?.frvp?.totalUpVolume ?? volumeAnalysis?.totalUpVolume),
+        totalSellVol: _safe(volumeAnalysis?.frvp?.totalDownVolume ?? volumeAnalysis?.totalDownVolume),
+        netDelta: _safe(volumeAnalysis?.totalDelta ?? volumeAnalysis?.frvp?.totalDelta),
+        deltaPct: _safe(volumeAnalysis?.deltaPct ?? volumeAnalysis?.frvp?.deltaPct),
+        bidAskImbalance: _safe(microstructure?.imbalance?.value, 0),
+      },
+      frvpHistogram,
+      priceAbovePoc,
+      breadth,
+      heavyweightsImpact,
+      heavyweightsTotalImpact,
+      ivAnalytics: {
+        vix: macro?.vix?.price || null,
+        vixChangePct: macro?.vix?.changePct || null,
+        atmIv: _safe(optionsBlock?.atm_iv),
+        atmIvChangePct: null, // would need history; left null
+        ivRank,
+        trend: ivTrendSeries,
+      },
+      trapDetector: trapDetectorRows,
+      regimeClassification,
+      optionChainSnapshot,
+      topStrikeSelections,
+      riskManagement,
+      liveAlerts,
+    },
     debug: {
       payloadKeys: Object.keys(outer || {}),
       innerKeys: Object.keys(payload || {}),

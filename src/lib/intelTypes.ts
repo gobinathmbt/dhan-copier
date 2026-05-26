@@ -281,6 +281,122 @@ export interface IntelSnapshot {
     weights: Record<string, number>;
   };
 
+  dashboard?: {
+    statusWidgets: {
+      marketState: { label: string; tone: string; sub: string; key: string };
+      smartMoney: { label: string; tone: string; sub: string; key: string };
+      futures: { label: string; tone: string; sub: string; key: string };
+      oiStructure: { label: string; tone: string; sub: string; key: string };
+      delta: { label: string; tone: string; sub: string; key: string };
+      vwap: { label: string; tone: string; sub: string; key: string };
+      trapRisk: { label: string; tone: string; sub: string; key: string };
+      bestAction: { label: string; tone: string; sub: string; key: string };
+      confidence: { score: number; label: string; key: string };
+    };
+    tradingDay: {
+      today: string;
+      expiry: string | null;
+      daysToExpiry: number | null;
+      lotSize: number;
+    };
+    spotFutSeries: {
+      spot: Array<{ t: number; v: number }>;
+      futures: Array<{ t: number; v: number }>;
+    };
+    buildUp: { longBuildUp: boolean; shortCovering: boolean };
+    futuresInfo: {
+      oi: number;
+      oiChange: number;
+      volume: number;
+      ltp: number;
+      premium: number;
+      basis: number;
+      basisTrend: string;
+    };
+    oiHistogram: Array<{ strike: number; isAtm: boolean; ceOiChg: number; peOiChg: number }>;
+    cvdSeries: Array<{ t: number; cvd: number; lastLtp: number | null }>;
+    delta: {
+      totalBuyVol: number;
+      totalSellVol: number;
+      netDelta: number;
+      deltaPct: number;
+      bidAskImbalance: number;
+    };
+    frvpHistogram: Array<{ price: number; volume: number; delta?: number; bias?: string }>;
+    priceAbovePoc: number | null;
+    breadth: {
+      advancing: number;
+      declining: number;
+      unchanged: number;
+      adRatio: number;
+      advancePct: number;
+    };
+    heavyweightsImpact: Array<{
+      symbol: string;
+      name: string;
+      last: number;
+      changePct: number;
+      weight: number;
+      impactPts: number;
+    }>;
+    heavyweightsTotalImpact: number;
+    ivAnalytics: {
+      vix: number | null;
+      vixChangePct: number | null;
+      atmIv: number;
+      atmIvChangePct: number | null;
+      ivRank: { score: number; label: string; tone: string };
+      trend: Array<{ t: number; iv: number }>;
+    };
+    trapDetector: Array<{ key: string; label: string; detected: boolean }>;
+    regimeClassification: {
+      dayType: string;
+      tone: string;
+      volatility: string;
+      trendStrength: string;
+      marketQuality: string;
+      participation: string;
+    };
+    optionChainSnapshot: Array<{
+      strike: number;
+      isAtm: boolean;
+      ce: { oi: number; oiChg: number; ltp: number; iv: number; delta: number };
+      pe: { oi: number; oiChg: number; ltp: number; iv: number; delta: number };
+    }>;
+    topStrikeSelections: Array<{
+      strike: number;
+      side: "CE" | "PE";
+      label: string;
+      type: "BUY" | "SELL" | "AVOID" | "WATCH";
+      score: number;
+      confidence: number;
+      reason: string;
+    }>;
+    riskManagement: {
+      entryPrice: number;
+      stopLoss: number;
+      target1: number;
+      target2: number;
+      rr: number;
+      maxLossPerLot: number;
+      maxLossTotal: number;
+      positionLots: number;
+      lotSize: number;
+      slPts: number;
+      targetPts: number;
+      target1Pct: number;
+      target2Pct: number;
+      slPct: number;
+    } | null;
+    liveAlerts: Array<{
+      time: string;
+      label: string;
+      detail: string;
+      value: string;
+      tone: "bull" | "bear" | "warn" | "neutral";
+    }>;
+  };
+
   tradePlan?: {
     action: "BUY_CE" | "BUY_PE" | "NO_TRADE" | "WAIT";
     reason: string;
