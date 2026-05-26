@@ -1026,5 +1026,6 @@ function getDefaultMarketLeadership() {
 
 module.exports = {
   analyzeMarketInternals,
-  calculateMarketInternalsScoreForMaster
+  calculateMarketInternalsScoreForMaster,
+  fetchInstitutionalFlowData,
 };

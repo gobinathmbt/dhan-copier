@@ -26,7 +26,9 @@ export interface LadderRow {
     delta: number;
     gamma: number;
     theta: number;
+    vega?: number;
     volume: number;
+    health?: { state: "explosive" | "healthy" | "weak" | "dead" | "unknown"; score: number };
   };
   pe: {
     ltp: number;
@@ -36,7 +38,9 @@ export interface LadderRow {
     delta: number;
     gamma: number;
     theta: number;
+    vega?: number;
     volume: number;
+    health?: { state: "explosive" | "healthy" | "weak" | "dead" | "unknown"; score: number };
   };
 }
 
@@ -53,6 +57,7 @@ export interface IntelSnapshot {
   displayName: string;
   at: number;
   error?: string;
+  dataSource?: "live" | "closed-market-fallback";
 
   market: {
     isOpen: boolean;
@@ -69,6 +74,7 @@ export interface IntelSnapshot {
     dayLow: number;
     pdh: number;
     pdl: number;
+    priorClose?: number;
     openingRangeHigh: number;
     openingRangeLow: number;
     vwap: number;
@@ -203,6 +209,7 @@ export interface IntelSnapshot {
     dayLow: number;
     pdh: number;
     pdl: number;
+    priorClose?: number;
     orh: number;
     orl: number;
     swingHighs: Array<{ price: number; index: number }>;
@@ -212,9 +219,88 @@ export interface IntelSnapshot {
 
   ladder: LadderRow[];
 
-  chart: {
-    candles1m: IntelSparkCandle[];
-    candles5m: IntelSparkCandle[];
+  cpr?: {
+    pivot: number;
+    tc: number;
+    bc: number;
+    r1: number;
+    r2: number;
+    r3: number;
+    s1: number;
+    s2: number;
+    s3: number;
+    width: number;
+    widthPct: number;
+    widthClass: "narrow" | "normal" | "wide";
+  } | null;
+
+  avwap?: {
+    session: number | null;
+    priorDay: number | null;
+  };
+
+  macro?: {
+    vix?: { price: number; change: number; changePct: number; previousClose: number } | null;
+    giftNifty?: { price: number; change: number; changePct: number; previousClose: number } | null;
+    usFutures?: {
+      sp500?: { price: number; changePct: number } | null;
+      nasdaq?: { price: number; changePct: number } | null;
+    };
+    dxy?: { price: number; changePct: number } | null;
+    crude?: { price: number; changePct: number } | null;
+    nikkei?: { price: number; changePct: number } | null;
+    fiiDii?: {
+      date: string;
+      cash: {
+        fii: { buy_sell_difference: number; net_action: string };
+        dii: { buy_sell_difference: number; net_action: string };
+      };
+    } | null;
+  } | null;
+
+  heavyweights?: {
+    rows: Array<{
+      symbol: string;
+      name: string;
+      weight: number;
+      price?: number;
+      change?: number;
+      changePct?: number;
+    }>;
+    weightedAvgChangePct: number;
+    leaders: Array<{ name: string; changePct: number }>;
+    laggards: Array<{ name: string; changePct: number }>;
+  } | null;
+
+  verdict?: {
+    side: "CE" | "PE" | "NEUTRAL";
+    verdict: "STRONG_BULLISH" | "BULLISH" | "NEUTRAL" | "BEARISH" | "STRONG_BEARISH";
+    cePct: number;
+    pePct: number;
+    factors: Record<string, number>;
+    weights: Record<string, number>;
+  };
+
+  tradePlan?: {
+    action: "BUY_CE" | "BUY_PE" | "NO_TRADE" | "WAIT";
+    reason: string;
+    pick: {
+      side: "CE" | "PE";
+      strike: number;
+      ltp: number;
+      delta: number;
+      iv: number;
+      oi: number;
+      gamma: number;
+      theta: number;
+      health?: { state: string; score: number };
+      moneyness: "ITM" | "ATM" | "OTM";
+      sl: number;
+      target: number;
+      slPts: number;
+      targetPts: number;
+      rr: number;
+    } | null;
   };
 
   action: {
@@ -224,7 +310,10 @@ export interface IntelSnapshot {
 
   debug: {
     payloadKeys: string[];
+    innerKeys?: string[];
     candleCounts: Record<string, number>;
+    strikeCount?: number;
+    ladderCount?: number;
     tickDeltaActive: boolean;
     microstructureAvailable: boolean;
     futuresLeadAvailable: boolean;

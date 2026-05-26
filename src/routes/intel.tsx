@@ -4,12 +4,13 @@ import { isAuthenticated } from "@/lib/auth";
 import { useIntelSnapshot } from "@/hooks/useIntelSnapshot";
 import type { SymbolKey } from "@/lib/intelTypes";
 import { TopBar } from "@/components/intel/TopBar";
-import { PremiumHealthPanel } from "@/components/intel/PremiumHealthCard";
+import { MasterVerdictCard, TradePlanCard } from "@/components/intel/MasterVerdictCard";
+import { MacroPanel } from "@/components/intel/MacroPanel";
+import { ConfluencePanel } from "@/components/intel/ConfluencePanel";
+import { StrikeProbability } from "@/components/intel/StrikeProbability";
+import { FactorBreakdown } from "@/components/intel/FactorBreakdown";
 import { FlowEnginePanel } from "@/components/intel/FlowEnginePanel";
-import { MiniChart } from "@/components/intel/MiniChart";
-import { StrikeLadder } from "@/components/intel/StrikeLadder";
 import { RegimeStrip } from "@/components/intel/RegimeStrip";
-import { ExecutionTerminal } from "@/components/intel/ExecutionTerminal";
 import { DebugPanel } from "@/components/intel/DebugPanel";
 import { cn } from "@/lib/utils";
 import { Wifi, WifiOff, RefreshCw } from "lucide-react";
@@ -50,13 +51,15 @@ function IntelPage() {
       }}
     >
       {/* Header strip */}
-      <div className="sticky top-0 z-30 flex items-center gap-2 border-b border-white/[0.06] bg-[#0a0a0b]/85 px-4 py-2 backdrop-blur-md">
+      <div className="sticky top-0 z-30 flex flex-wrap items-center gap-2 border-b border-white/[0.06] bg-[#0a0a0b]/85 px-4 py-2 backdrop-blur-md">
         <h1 className="text-sm font-bold uppercase tracking-[0.18em] text-white/85">
           Intel Terminal
         </h1>
-        <span className="text-[10px] text-white/35">institutional intraday options intelligence</span>
+        <span className="hidden text-[10px] text-white/35 md:inline">
+          option-buyer intelligence dashboard
+        </span>
 
-        <div className="ml-4 flex items-center gap-1 rounded-md border border-white/[0.08] bg-black/30 p-0.5">
+        <div className="ml-2 flex items-center gap-1 rounded-md border border-white/[0.08] bg-black/30 p-0.5">
           {SYMBOLS.map((s) => (
             <button
               key={s.key}
@@ -73,7 +76,7 @@ function IntelPage() {
           ))}
         </div>
 
-        <div className="ml-auto flex items-center gap-3 text-[10px] text-white/55">
+        <div className="ml-auto flex flex-wrap items-center gap-3 text-[10px] text-white/55">
           <select
             value={intervalMs}
             onChange={(e) => setIntervalMs(Number(e.target.value))}
@@ -114,6 +117,14 @@ function IntelPage() {
           ) : (
             <span className="rounded bg-rose-500/15 px-2 py-0.5 text-rose-400">market closed</span>
           )}
+          {data?.dataSource === "closed-market-fallback" ? (
+            <span
+              className="rounded bg-amber-500/15 px-2 py-0.5 text-amber-300"
+              title="Showing last trading day's data"
+            >
+              last-session view
+            </span>
+          ) : null}
         </div>
       </div>
 
@@ -124,34 +135,44 @@ function IntelPage() {
       ) : null}
 
       <div className="space-y-3 p-3">
-        {/* Top widgets */}
+        {/* TOP BAR — fast-glance widgets */}
         <TopBar data={data} />
 
-        {/* Regime strip */}
-        <RegimeStrip data={data} />
-
-        {/* Main grid: left CE/PE health, center chart, right flow */}
+        {/* PRIMARY DECISION ROW: Master Verdict + Trade Plan + Macro */}
         <div className="grid gap-3 lg:grid-cols-12">
-          <div className="lg:col-span-3 lg:max-h-[640px]">
-            <PremiumHealthPanel data={data} />
+          <div className="lg:col-span-4">
+            <MasterVerdictCard data={data} />
           </div>
-          <div className="lg:col-span-6 lg:max-h-[640px]">
-            <MiniChart data={data} />
+          <div className="lg:col-span-4">
+            <TradePlanCard data={data} />
           </div>
-          <div className="lg:col-span-3 lg:max-h-[640px]">
+          <div className="lg:col-span-4">
+            <MacroPanel data={data} />
+          </div>
+        </div>
+
+        {/* SECONDARY ROW: Strike Probability (the core of the option-buyer dashboard) */}
+        <div className="grid gap-3 lg:grid-cols-12">
+          <div className="lg:col-span-7">
+            <StrikeProbability data={data} />
+          </div>
+          <div className="lg:col-span-5">
+            <FactorBreakdown data={data} />
+          </div>
+        </div>
+
+        {/* TERTIARY ROW: Confluence + Flow */}
+        <div className="grid gap-3 lg:grid-cols-12">
+          <div className="lg:col-span-7">
+            <ConfluencePanel data={data} />
+          </div>
+          <div className="lg:col-span-5">
             <FlowEnginePanel data={data} />
           </div>
         </div>
 
-        {/* Strike ladder + execution terminal */}
-        <div className="grid gap-3 lg:grid-cols-12">
-          <div className="lg:col-span-6">
-            <StrikeLadder data={data} />
-          </div>
-          <div className="lg:col-span-6">
-            <ExecutionTerminal data={data} />
-          </div>
-        </div>
+        {/* REGIME STACK (single line) */}
+        <RegimeStrip data={data} />
 
         {/* Debug */}
         <DebugPanel
