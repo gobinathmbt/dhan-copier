@@ -14,7 +14,7 @@ import { BreadthCard } from "@/components/intel/dash/BreadthCard";
 import { HeavyweightsCard } from "@/components/intel/dash/HeavyweightsCard";
 import { IvCard } from "@/components/intel/dash/IvCard";
 import { TrapDetectorCard, MarketRegimeCard } from "@/components/intel/dash/TrapAndRegimeCard";
-import { OptionChainSnapshotCard } from "@/components/intel/dash/OptionChainSnapshotCard";
+import { SupportResistanceCard } from "@/components/intel/dash/SupportResistanceCard";
 import { TopStrikeCard } from "@/components/intel/dash/TopStrikeCard";
 import { RiskCard } from "@/components/intel/dash/RiskCard";
 import { AlertsTicker } from "@/components/intel/dash/AlertsTicker";
@@ -75,12 +75,12 @@ function IntelPage() {
           </div>
         </div>
 
-        {/* Row 4 — Option chain, Top strikes, Risk mgmt */}
+        {/* Row 4 — Support/Resistance + Top Strikes + Risk Management */}
         <div className="grid min-h-0 grid-cols-12 gap-2" style={{ flex: "1.05 1 0" }}>
-          <div className="col-span-5 min-h-0">
-            <OptionChainSnapshotCard data={data} />
-          </div>
           <div className="col-span-4 min-h-0">
+            <SupportResistanceCard data={data} />
+          </div>
+          <div className="col-span-5 min-h-0">
             <TopStrikeCard data={data} />
           </div>
           <div className="col-span-3 min-h-0">

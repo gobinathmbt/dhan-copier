@@ -13,9 +13,7 @@ export function TopStrikeCard({ data }: { data: IntelSnapshot | null }) {
   return (
     <Card title="Top Strike Selection">
       <div className="grid h-full grid-cols-2 gap-3 overflow-hidden">
-        {/* CALLS column */}
         <SideColumn label="CALLS (BUY CE)" tone="bull" rows={ceRows} />
-        {/* PUTS column */}
         <SideColumn label="PUTS (BUY PE)" tone="bear" rows={peRows} />
       </div>
     </Card>

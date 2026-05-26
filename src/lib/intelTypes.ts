@@ -392,6 +392,32 @@ export interface IntelSnapshot {
         reason: string;
       }>;
     };
+    supportResistance: {
+      supports: Array<{
+        strike: number;
+        oi: number;
+        oiChange: number;
+        distance: number;
+        oiCompact: { val: number; unit: string };
+        oiChangeCompact: { val: number; unit: string };
+      }>;
+      resistances: Array<{
+        strike: number;
+        oi: number;
+        oiChange: number;
+        distance: number;
+        oiCompact: { val: number; unit: string };
+        oiChangeCompact: { val: number; unit: string };
+      }>;
+      pressureScore: number;
+      verdict: "BULLISH" | "NEUTRAL" | "BEARISH";
+      bias: "support" | "balanced" | "resistance";
+      supportStrength: number;
+      resistanceStrength: number;
+      spotPrice: number;
+      atmStrike: number;
+      reasoning: string;
+    };
     riskManagement: {
       entryPrice: number;
       stopLoss: number;

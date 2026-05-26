@@ -814,6 +814,136 @@ function _topStrikeSelections(ladder, atmStrike, verdict, oiBlock) {
 }
 
 /**
+ * Support / Resistance Pressure Bar
+ * ---------------------------------
+ * Picks the 2 strongest PE-OI strikes BELOW the ATM (institutional
+ * support) and the 2 strongest CE-OI strikes ABOVE the ATM (institutional
+ * resistance). Computes an OI-pressure tilt 0..100 where:
+ *   - 0   = all weight on resistance side  (bearish)
+ *   - 50  = balanced
+ *   - 100 = all weight on support side     (bullish)
+ *
+ * The tilt blends raw OI level with the current OI change so a sudden OI
+ * shift on one side moves the arrow even if total OI is similar.
+ *
+ * Returns:
+ *   {
+ *     supports:   [{ strike, oi, oiChange, distance, strength }, ...x2]   // sorted closest-to-ATM first
+ *     resistances:[{ strike, oi, oiChange, distance, strength }, ...x2]
+ *     pressureScore: 0..100   // 50 = balanced
+ *     verdict:    'BULLISH' | 'NEUTRAL' | 'BEARISH'
+ *     bias:       'support'  | 'balanced' | 'resistance'
+ *     supportStrength: number   // composite, for display
+ *     resistanceStrength: number
+ *     reasoning: string
+ *   }
+ */
+function _supportResistance(strikes, atmStrike, spotPrice) {
+  if (!Array.isArray(strikes) || !atmStrike) {
+    return {
+      supports: [],
+      resistances: [],
+      pressureScore: 50,
+      verdict: 'NEUTRAL',
+      bias: 'balanced',
+      supportStrength: 0,
+      resistanceStrength: 0,
+      reasoning: 'no strikes',
+    };
+  }
+  const sorted = [...strikes].sort((a, b) => a.strike - b.strike);
+
+  // PE writers BELOW spot = support. Sort by PE OI strength desc.
+  const peCandidates = sorted
+    .filter((s) => s.strike < atmStrike)
+    .map((s) => ({
+      strike: s.strike,
+      oi: _safe(s.put?.oi ?? s.pe?.oi),
+      oiChange: _safe(s.put?.oiChange ?? s.pe?.oiChg ?? s.pe?.oiChange),
+      distance: atmStrike - s.strike,
+    }))
+    .filter((s) => s.oi > 0);
+  const supports = [...peCandidates]
+    .sort((a, b) => b.oi - a.oi)
+    .slice(0, 2)
+    .sort((a, b) => b.strike - a.strike); // closest-to-ATM first
+
+  // CE writers ABOVE spot = resistance.
+  const ceCandidates = sorted
+    .filter((s) => s.strike > atmStrike)
+    .map((s) => ({
+      strike: s.strike,
+      oi: _safe(s.call?.oi ?? s.ce?.oi),
+      oiChange: _safe(s.call?.oiChange ?? s.ce?.oiChg ?? s.ce?.oiChange),
+      distance: s.strike - atmStrike,
+    }))
+    .filter((s) => s.oi > 0);
+  const resistances = [...ceCandidates]
+    .sort((a, b) => b.oi - a.oi)
+    .slice(0, 2)
+    .sort((a, b) => a.strike - b.strike); // closest-to-ATM first
+
+  // Strength score (per side) — sum of OI weighted by inverse-distance,
+  // plus 0.5× of OI change in the side's favour. PE writing growing is
+  // bullish (support firming); CE writing growing is bearish.
+  const _strength = (rows, signFavour /* +1 for PE supports, -1 for CE resistances */) => {
+    let s = 0;
+    for (const r of rows) {
+      const distFactor = 1 / (1 + Math.abs(r.distance) / 50); // closer strikes weigh more
+      s += r.oi * distFactor;
+      // Growing OI on this side reinforces it → add 0.5× of positive ΔOI;
+      // shrinking OI on this side weakens it → subtract.
+      s += (r.oiChange * 0.5) * distFactor;
+    }
+    return Math.max(0, Math.round(s));
+  };
+
+  const supportStrength = _strength(supports, 1);
+  const resistanceStrength = _strength(resistances, -1);
+
+  // Convert into 0..100 pressure: support pulls toward 100, resistance toward 0.
+  const total = supportStrength + resistanceStrength;
+  const pressureScore = total > 0
+    ? Math.round((supportStrength / total) * 100)
+    : 50;
+
+  let verdict = 'NEUTRAL';
+  let bias = 'balanced';
+  if (pressureScore >= 65) { verdict = 'BULLISH'; bias = 'support'; }
+  else if (pressureScore >= 55) { verdict = 'BULLISH'; bias = 'support'; }
+  else if (pressureScore <= 35) { verdict = 'BEARISH'; bias = 'resistance'; }
+  else if (pressureScore <= 45) { verdict = 'BEARISH'; bias = 'resistance'; }
+
+  // Reasoning string highlighting the stronger wall and any sudden ΔOI surge.
+  const reasons = [];
+  if (supports[0]) {
+    const change = supports[0].oiChange;
+    reasons.push(`PE wall ${supports[0].strike} = ${_fmtOiCompact(supports[0].oi).val}${_fmtOiCompact(supports[0].oi).unit}`);
+    if (change > 0 && change > supports[0].oi * 0.05) reasons.push(`PE adding ${_fmtOiCompact(change).val}${_fmtOiCompact(change).unit}`);
+    if (change < 0 && Math.abs(change) > supports[0].oi * 0.05) reasons.push(`PE unwinding ${_fmtOiCompact(Math.abs(change)).val}${_fmtOiCompact(Math.abs(change)).unit}`);
+  }
+  if (resistances[0]) {
+    const change = resistances[0].oiChange;
+    reasons.push(`CE wall ${resistances[0].strike} = ${_fmtOiCompact(resistances[0].oi).val}${_fmtOiCompact(resistances[0].oi).unit}`);
+    if (change > 0 && change > resistances[0].oi * 0.05) reasons.push(`CE adding ${_fmtOiCompact(change).val}${_fmtOiCompact(change).unit}`);
+    if (change < 0 && Math.abs(change) > resistances[0].oi * 0.05) reasons.push(`CE unwinding ${_fmtOiCompact(Math.abs(change)).val}${_fmtOiCompact(Math.abs(change)).unit}`);
+  }
+
+  return {
+    supports: supports.map((s) => ({ ...s, oiCompact: _fmtOiCompact(s.oi), oiChangeCompact: _fmtOiCompact(s.oiChange) })),
+    resistances: resistances.map((s) => ({ ...s, oiCompact: _fmtOiCompact(s.oi), oiChangeCompact: _fmtOiCompact(s.oiChange) })),
+    pressureScore,
+    verdict,
+    bias,
+    supportStrength,
+    resistanceStrength,
+    spotPrice: _safe(spotPrice),
+    atmStrike,
+    reasoning: reasons.join(' | '),
+  };
+}
+
+/**
  * Risk Management widget — uses the selected pick to compute capital plan.
  */
 function _riskManagement(pick, settings) {
@@ -1940,6 +2070,7 @@ async function getSnapshot(symbolKey = "NIFTY_50") {
   const regimeClassification = _regimeClassification(marketRegime, volatility, payload.multi_timeframe);
   const optionChainSnapshot = _optionChainSnapshot(strikes, atmStrike);
   const topStrikeSelections = _topStrikeSelections(ladder, atmStrike, verdict, optionsBlock);
+  const supportResistance = _supportResistance(strikes, atmStrike, spotPrice);
   const riskManagement = _riskManagement(tradePlan?.pick, settings);
 
   // Build live IV trend series — sample the ATM IV from cached past
@@ -2231,6 +2362,7 @@ async function getSnapshot(symbolKey = "NIFTY_50") {
       regimeClassification,
       optionChainSnapshot,
       topStrikeSelections,
+      supportResistance,
       riskManagement,
       liveAlerts,
     },
