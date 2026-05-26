@@ -13,7 +13,7 @@ export function SupportResistanceCard({ data }: { data: IntelSnapshot | null }) 
   const sr = data.dashboard?.supportResistance;
   if (!sr) return <Card title="Support / Resistance">…</Card>;
 
-  const tilt = sr.pressureScore; // 0..100, higher = more support pressure (bullish)
+  const tilt = sr.pressureScore ?? 50; // 0..100, higher = more support pressure (bullish)
   // For the arrow, positive = right (bullish/support side green); we want
   // the arrow to drift toward where the market is being PUSHED. Support
   // pressure pushes UP/RIGHT into resistance — so a high score (100) means
@@ -29,12 +29,19 @@ export function SupportResistanceCard({ data }: { data: IntelSnapshot | null }) 
       ? "MARKET MOVING DOWN"
       : "BALANCED";
 
+  const spotPrice = Number.isFinite(sr.spotPrice) ? sr.spotPrice : null;
+  const supportStrength = Number.isFinite(sr.supportStrength) ? sr.supportStrength : 0;
+  const resistanceStrength = Number.isFinite(sr.resistanceStrength) ? sr.resistanceStrength : 0;
+  const atmStrike = sr.atmStrike ?? "—";
+  const supports = sr.supports ?? [];
+  const resistances = sr.resistances ?? [];
+
   return (
     <Card
       title="Support / Resistance Pressure"
       right={
         <span className="font-mono text-[10px] text-white/40">
-          ATM {sr.atmStrike}
+          ATM {atmStrike}
         </span>
       }
     >
@@ -127,11 +134,11 @@ export function SupportResistanceCard({ data }: { data: IntelSnapshot | null }) 
 
           {/* Strength numbers under the bar */}
           <div className="mt-1 flex items-center justify-between text-[9px] text-white/40">
-            <span>Strength {sr.supportStrength.toLocaleString()}</span>
+            <span>Strength {supportStrength.toLocaleString()}</span>
             <span className="text-white/55">
-              spot {sr.spotPrice.toFixed(2)}
+              spot {spotPrice != null ? spotPrice.toFixed(2) : "—"}
             </span>
-            <span>Strength {sr.resistanceStrength.toLocaleString()}</span>
+            <span>Strength {resistanceStrength.toLocaleString()}</span>
           </div>
         </div>
 
@@ -140,14 +147,14 @@ export function SupportResistanceCard({ data }: { data: IntelSnapshot | null }) 
           <WallList
             title="Top Supports (PE)"
             tone="bull"
-            rows={sr.supports}
-            current={sr.spotPrice}
+            rows={supports}
+            current={spotPrice ?? 0}
           />
           <WallList
             title="Top Resistances (CE)"
             tone="bear"
-            rows={sr.resistances}
-            current={sr.spotPrice}
+            rows={resistances}
+            current={spotPrice ?? 0}
           />
         </div>
       </div>

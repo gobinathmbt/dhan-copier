@@ -971,6 +971,8 @@ function _supportResistance(strikes, atmStrike, spotPrice) {
       bias: 'balanced',
       supportStrength: 0,
       resistanceStrength: 0,
+      spotPrice: _safe(spotPrice),
+      atmStrike: _safe(atmStrike),
       reasoning: 'no strikes',
     };
   }
