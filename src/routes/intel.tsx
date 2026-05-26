@@ -41,51 +41,36 @@ function IntelPage() {
         <StatusStrip data={data} />
 
         {/* Row 2 — 4 quad cards */}
-        <div className="grid min-h-0 grid-cols-12 gap-2" style={{ flex: "1.15 1 0" }}>
-          <div className="col-span-3 min-h-0">
-            <SpotFutCard data={data} />
-          </div>
-          <div className="col-span-3 min-h-0">
-            <OiAnalysisCard data={data} />
-          </div>
-          <div className="col-span-3 min-h-0">
-            <DeltaVolumeCard data={data} />
-          </div>
-          <div className="col-span-3 min-h-0">
-            <FrvpCard data={data} />
-          </div>
+        <div
+          className="grid min-h-0 grid-cols-12 gap-2"
+          style={{ flex: "0 0 240px", height: 240 }}
+        >
+          <div className="col-span-3 min-h-0 overflow-hidden"><SpotFutCard data={data} /></div>
+          <div className="col-span-3 min-h-0 overflow-hidden"><OiAnalysisCard data={data} /></div>
+          <div className="col-span-3 min-h-0 overflow-hidden"><DeltaVolumeCard data={data} /></div>
+          <div className="col-span-3 min-h-0 overflow-hidden"><FrvpCard data={data} /></div>
         </div>
 
-        {/* Row 3 — Breadth, Heavyweights, IV, Trap+Regime */}
-        <div className="grid min-h-0 grid-cols-12 gap-2" style={{ flex: "1 1 0" }}>
-          <div className="col-span-2 min-h-0">
-            <BreadthCard data={data} />
-          </div>
-          <div className="col-span-3 min-h-0">
-            <HeavyweightsCard data={data} />
-          </div>
-          <div className="col-span-3 min-h-0">
-            <IvCard data={data} />
-          </div>
-          <div className="col-span-2 min-h-0">
-            <TrapDetectorCard data={data} />
-          </div>
-          <div className="col-span-2 min-h-0">
-            <MarketRegimeCard data={data} />
-          </div>
+        {/* Row 3 — Breadth, Heavyweights pie, IV, Trap, Regime */}
+        <div
+          className="grid min-h-0 grid-cols-12 gap-2"
+          style={{ flex: "0 0 200px", height: 200 }}
+        >
+          <div className="col-span-2 min-h-0 overflow-hidden"><BreadthCard data={data} /></div>
+          <div className="col-span-3 min-h-0 overflow-hidden"><HeavyweightsCard data={data} /></div>
+          <div className="col-span-3 min-h-0 overflow-hidden"><IvCard data={data} /></div>
+          <div className="col-span-2 min-h-0 overflow-hidden"><TrapDetectorCard data={data} /></div>
+          <div className="col-span-2 min-h-0 overflow-hidden"><MarketRegimeCard data={data} /></div>
         </div>
 
         {/* Row 4 — Support/Resistance + Top Strikes + Risk Management */}
-        <div className="grid min-h-0 grid-cols-12 gap-2" style={{ flex: "1.05 1 0" }}>
-          <div className="col-span-4 min-h-0">
-            <SupportResistanceCard data={data} />
-          </div>
-          <div className="col-span-5 min-h-0">
-            <TopStrikeCard data={data} />
-          </div>
-          <div className="col-span-3 min-h-0">
-            <RiskCard data={data} />
-          </div>
+        <div
+          className="grid min-h-0 grid-cols-12 gap-2"
+          style={{ flex: "1 1 0" }}
+        >
+          <div className="col-span-4 min-h-0 overflow-hidden"><SupportResistanceCard data={data} /></div>
+          <div className="col-span-5 min-h-0 overflow-hidden"><TopStrikeCard data={data} /></div>
+          <div className="col-span-3 min-h-0 overflow-hidden"><RiskCard data={data} /></div>
         </div>
       </main>
       <AlertsTicker data={data} />

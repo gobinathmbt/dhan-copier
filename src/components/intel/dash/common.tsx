@@ -81,7 +81,7 @@ export function Card({
           {right}
         </div>
       ) : null}
-      <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", pad && "p-2")}>{children}</div>
+      <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", pad && "p-2.5")}>{children}</div>
     </div>
   );
 }

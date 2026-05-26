@@ -259,6 +259,7 @@ export interface IntelSnapshot {
   } | null;
 
   heavyweights?: {
+    symbol?: string;
     rows: Array<{
       symbol: string;
       name: string;
@@ -268,6 +269,10 @@ export interface IntelSnapshot {
       changePct?: number;
     }>;
     weightedAvgChangePct: number;
+    advancing?: number;
+    declining?: number;
+    unchanged?: number;
+    total?: number;
     leaders: Array<{ name: string; changePct: number }>;
     laggards: Array<{ name: string; changePct: number }>;
   } | null;
@@ -328,8 +333,14 @@ export interface IntelSnapshot {
       advancing: number;
       declining: number;
       unchanged: number;
+      total?: number;
+      sampled?: number;
       adRatio: number;
       advancePct: number;
+      declinePct?: number;
+      leaders?: Array<{ symbol: string; changePct: number; price?: number }>;
+      laggards?: Array<{ symbol: string; changePct: number; price?: number }>;
+      source?: "full-index" | "sampled";
     };
     heavyweightsImpact: Array<{
       symbol: string;

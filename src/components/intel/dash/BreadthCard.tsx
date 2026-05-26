@@ -1,67 +1,74 @@
 import type { IntelSnapshot } from "@/lib/intelTypes";
 import { Card } from "./common";
+import { cn } from "@/lib/utils";
 
 export function BreadthCard({ data }: { data: IntelSnapshot | null }) {
   if (!data) return <Card title="Market Breadth">…</Card>;
   const b = data.dashboard?.breadth;
   if (!b) return <Card title="Market Breadth">…</Card>;
   const advPct = b.advancePct;
+  const total = b.total ?? (b.advancing + b.declining + b.unchanged);
+  const sampled = b.sampled ?? total;
+  const symbolLabel = data.symbol === "SENSEX" ? "SENSEX 30" : "NIFTY 50";
 
-  // Donut: advance vs decline ring
-  const radius = 32;
-  const cx = 40;
-  const cy = 40;
+  // Donut: advance ring vs decline ring on the same circle
+  const radius = 26;
+  const cx = 32;
+  const cy = 32;
   const circumference = 2 * Math.PI * radius;
   const advLen = (advPct / 100) * circumference;
 
   return (
-    <Card title="Market Breadth">
-      <div className="flex h-full items-center gap-3">
+    <Card
+      title="Market Breadth"
+      right={
+        <span className="font-mono text-[10px] text-white/40">
+          {symbolLabel} · {sampled}/{total}
+        </span>
+      }
+    >
+      <div className="flex h-full items-center gap-2 overflow-hidden">
         {/* Donut */}
-        <div className="flex flex-col items-center">
-          <svg width="80" height="80" viewBox="0 0 80 80">
-            {/* Background ring */}
+        <div className="shrink-0">
+          <svg width="64" height="64" viewBox="0 0 64 64">
             <circle
               cx={cx}
               cy={cy}
               r={radius}
               fill="none"
               stroke="rgba(239,68,68,0.25)"
-              strokeWidth="8"
+              strokeWidth="6"
             />
-            {/* Advance arc */}
             <circle
               cx={cx}
               cy={cy}
               r={radius}
               fill="none"
               stroke="#22c55e"
-              strokeWidth="8"
+              strokeWidth="6"
               strokeDasharray={`${advLen} ${circumference}`}
               transform={`rotate(-90 ${cx} ${cy})`}
-              style={{ filter: "drop-shadow(0 0 4px #22c55e)" }}
+              style={{ filter: "drop-shadow(0 0 3px #22c55e)" }}
             />
-            <text x={cx} y={cy - 4} textAnchor="middle" fill="#22c55e" style={{ font: "bold 16px monospace" }}>
+            <text x={cx} y={cy - 1} textAnchor="middle" fill="#22c55e" style={{ font: "bold 13px monospace" }}>
               {advPct}%
             </text>
-            <text x={cx} y={cy + 9} textAnchor="middle" fill="rgba(255,255,255,0.4)" style={{ font: "8px monospace" }}>
-              ADVANCE
+            <text x={cx} y={cy + 9} textAnchor="middle" fill="rgba(255,255,255,0.4)" style={{ font: "7px monospace" }}>
+              ADV
             </text>
           </svg>
         </div>
 
-        {/* Stats */}
-        <div className="flex-1 space-y-1.5 text-[11px]">
-          <Row label="Symbol" value={b.advancing.toLocaleString()} tone="text-emerald-400" sub="Advancing" />
-          <Row label="" value={b.declining.toLocaleString()} tone="text-rose-400" sub="Declining" />
-          <Row label="" value={b.unchanged.toLocaleString()} tone="text-white/65" sub="Unchanged" />
-          <div className="border-t border-white/[0.04] pt-1 text-[11px]">
-            <div className="flex items-center justify-between">
-              <span className="text-white/45">A/D Ratio</span>
-              <span className={`font-mono text-sm font-bold ${b.adRatio >= 1 ? "text-emerald-400" : "text-rose-400"}`}>
-                {b.adRatio}
-              </span>
-            </div>
+        {/* Counts column */}
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5 text-[11px]">
+          <Row label="Advancing" value={b.advancing} tone="text-emerald-400" />
+          <Row label="Declining" value={b.declining} tone="text-rose-400" />
+          <Row label="Unchanged" value={b.unchanged} tone="text-white/60" />
+          <div className="mt-0.5 flex items-center justify-between border-t border-white/[0.06] pt-1">
+            <span className="text-[10px] text-white/45">A/D Ratio</span>
+            <span className={cn("font-mono text-sm font-bold", b.adRatio >= 1 ? "text-emerald-400" : "text-rose-400")}>
+              {b.adRatio}
+            </span>
           </div>
         </div>
       </div>
@@ -69,20 +76,10 @@ export function BreadthCard({ data }: { data: IntelSnapshot | null }) {
   );
 }
 
-function Row({
-  label,
-  value,
-  tone,
-  sub,
-}: {
-  label: string;
-  value: string;
-  tone: string;
-  sub?: string;
-}) {
+function Row({ label, value, tone }: { label: string; value: number; tone: string }) {
   return (
     <div className="flex items-baseline justify-between">
-      <span className="text-[10px] text-white/45">{sub || label}</span>
+      <span className="text-[10px] text-white/45">{label}</span>
       <span className={`font-mono text-sm font-bold ${tone}`}>{value}</span>
     </div>
   );

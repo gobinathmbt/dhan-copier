@@ -144,27 +144,94 @@ async function _getMacroContext() {
   return data;
 }
 
-// ── INDIAN-MARKET-WEIGHT HEAVYWEIGHTS (NIFTY 50 top contributors) ────────
+// ── INDIAN-MARKET-WEIGHT HEAVYWEIGHTS ─────────────────────────────────────
 // Pulls Yahoo last-trade for the top weight stocks so the UI can show
-// who's actually moving the index. Symbols use NSE Yahoo suffix (.NS).
-const NIFTY_HEAVYWEIGHTS = [
-  { symbol: 'HDFCBANK.NS', name: 'HDFC Bank', weight: 13.3 },
-  { symbol: 'RELIANCE.NS', name: 'Reliance', weight: 9.5 },
-  { symbol: 'ICICIBANK.NS', name: 'ICICI Bank', weight: 8.5 },
-  { symbol: 'INFY.NS', name: 'Infosys', weight: 5.8 },
-  { symbol: 'BHARTIARTL.NS', name: 'Bharti Airtel', weight: 4.7 },
-  { symbol: 'TCS.NS', name: 'TCS', weight: 4.4 },
-  { symbol: 'LT.NS', name: 'L&T', weight: 3.9 },
-  { symbol: 'ITC.NS', name: 'ITC', weight: 3.5 },
+// who's actually moving the index. Symbols use NSE Yahoo suffix (.NS) for
+// NIFTY 50 stocks and BSE Yahoo suffix (.BO) for SENSEX stocks. SENSEX is
+// 30 stocks with very similar top weights to NIFTY but a different mix
+// (no L&T in SENSEX top, but Larsen weight is different on BSE; SENSEX
+// includes only 30 vs NIFTY 50, so weights are slightly higher).
+const HEAVYWEIGHTS_BY_SYMBOL = {
+  NIFTY_50: [
+    { symbol: 'HDFCBANK.NS', name: 'HDFC Bank', weight: 13.3 },
+    { symbol: 'RELIANCE.NS', name: 'Reliance', weight: 9.5 },
+    { symbol: 'ICICIBANK.NS', name: 'ICICI Bank', weight: 8.5 },
+    { symbol: 'INFY.NS', name: 'Infosys', weight: 5.8 },
+    { symbol: 'BHARTIARTL.NS', name: 'Bharti Airtel', weight: 4.7 },
+    { symbol: 'TCS.NS', name: 'TCS', weight: 4.4 },
+    { symbol: 'LT.NS', name: 'L&T', weight: 3.9 },
+    { symbol: 'ITC.NS', name: 'ITC', weight: 3.5 },
+  ],
+  SENSEX: [
+    { symbol: 'HDFCBANK.BO', name: 'HDFC Bank', weight: 14.5 },
+    { symbol: 'RELIANCE.BO', name: 'Reliance', weight: 10.4 },
+    { symbol: 'ICICIBANK.BO', name: 'ICICI Bank', weight: 9.3 },
+    { symbol: 'INFY.BO', name: 'Infosys', weight: 6.4 },
+    { symbol: 'BHARTIARTL.BO', name: 'Bharti Airtel', weight: 5.2 },
+    { symbol: 'TCS.BO', name: 'TCS', weight: 4.8 },
+    { symbol: 'LT.BO', name: 'L&T', weight: 4.3 },
+    { symbol: 'AXISBANK.BO', name: 'Axis Bank', weight: 3.6 },
+  ],
+  BANKNIFTY: [
+    { symbol: 'HDFCBANK.NS', name: 'HDFC Bank', weight: 28 },
+    { symbol: 'ICICIBANK.NS', name: 'ICICI Bank', weight: 24 },
+    { symbol: 'AXISBANK.NS', name: 'Axis Bank', weight: 9 },
+    { symbol: 'KOTAKBANK.NS', name: 'Kotak Bank', weight: 8 },
+    { symbol: 'SBIN.NS', name: 'SBI', weight: 8 },
+    { symbol: 'INDUSINDBK.NS', name: 'IndusInd Bank', weight: 5 },
+  ],
+};
+
+// ── FULL CONSTITUENT LISTS ────────────────────────────────────────────────
+// Used for true market breadth (advancing / declining / unchanged across
+// every stock in the index). Yahoo tickers — NSE = .NS, BSE = .BO.
+// These are the official index constituents (rebalanced quarterly; if the
+// index changes a stock you can update here without touching code).
+const NIFTY_50_CONSTITUENTS = [
+  'ADANIENT.NS','ADANIPORTS.NS','APOLLOHOSP.NS','ASIANPAINT.NS','AXISBANK.NS',
+  'BAJAJ-AUTO.NS','BAJFINANCE.NS','BAJAJFINSV.NS','BEL.NS','BHARTIARTL.NS',
+  'CIPLA.NS','COALINDIA.NS','DRREDDY.NS','EICHERMOT.NS','GRASIM.NS',
+  'HCLTECH.NS','HDFCBANK.NS','HDFCLIFE.NS','HEROMOTOCO.NS','HINDALCO.NS',
+  'HINDUNILVR.NS','ICICIBANK.NS','INDUSINDBK.NS','INFY.NS','ITC.NS',
+  'JIOFIN.NS','JSWSTEEL.NS','KOTAKBANK.NS','LT.NS','M&M.NS',
+  'MARUTI.NS','NESTLEIND.NS','NTPC.NS','ONGC.NS','POWERGRID.NS',
+  'RELIANCE.NS','SBILIFE.NS','SBIN.NS','SHRIRAMFIN.NS','SUNPHARMA.NS',
+  'TATACONSUM.NS','TATAMOTORS.NS','TATASTEEL.NS','TCS.NS','TECHM.NS',
+  'TITAN.NS','TRENT.NS','ULTRACEMCO.NS','WIPRO.NS','BRITANNIA.NS',
 ];
 
-const _heavyweightCache = { at: 0, data: null };
-async function _getHeavyweights() {
-  if (Date.now() - _heavyweightCache.at < MACRO_CACHE_MS && _heavyweightCache.data) {
-    return _heavyweightCache.data;
+const SENSEX_30_CONSTITUENTS = [
+  'ADANIPORTS.BO','ASIANPAINT.BO','AXISBANK.BO','BAJFINANCE.BO','BHARTIARTL.BO',
+  'HCLTECH.BO','HDFCBANK.BO','HINDUNILVR.BO','ICICIBANK.BO','INFY.BO',
+  'ITC.BO','KOTAKBANK.BO','LT.BO','M&M.BO','MARUTI.BO',
+  'NESTLEIND.BO','NTPC.BO','POWERGRID.BO','RELIANCE.BO','SBIN.BO',
+  'SUNPHARMA.BO','TATAMOTORS.BO','TATASTEEL.BO','TCS.BO','TECHM.BO',
+  'TITAN.BO','ULTRACEMCO.BO','BAJAJFINSV.BO','TRENT.BO','ZOMATO.BO',
+];
+
+const CONSTITUENTS_BY_SYMBOL = {
+  NIFTY_50: NIFTY_50_CONSTITUENTS,
+  SENSEX: SENSEX_30_CONSTITUENTS,
+  BANKNIFTY: [
+    'AXISBANK.NS','BANDHANBNK.NS','BANKBARODA.NS','FEDERALBNK.NS','HDFCBANK.NS',
+    'ICICIBANK.NS','IDFCFIRSTB.NS','INDUSINDBK.NS','KOTAKBANK.NS','PNB.NS',
+    'SBIN.NS','AUBANK.NS',
+  ],
+};
+
+// Per-symbol cache so a SENSEX request doesn't return NIFTY heavyweights.
+const _heavyweightCache = new Map(); // key = symbolKey → { at, data }
+const _breadthCache = new Map();     // key = symbolKey → { at, data }
+
+async function _getHeavyweights(symbolKey = 'NIFTY_50') {
+  const KEY = String(symbolKey).toUpperCase();
+  const list = HEAVYWEIGHTS_BY_SYMBOL[KEY] || HEAVYWEIGHTS_BY_SYMBOL.NIFTY_50;
+  const cached = _heavyweightCache.get(KEY);
+  if (cached && Date.now() - cached.at < MACRO_CACHE_MS) {
+    return cached.data;
   }
   const rows = await Promise.all(
-    NIFTY_HEAVYWEIGHTS.map(async (s) => {
+    list.map(async (s) => {
       const q = await _yahooQuote(s.symbol);
       return { ...s, ...(q || {}) };
     })
@@ -175,14 +242,70 @@ async function _getHeavyweights() {
     ? valid.reduce((acc, r) => acc + r.changePct * r.weight, 0) /
       valid.reduce((acc, r) => acc + r.weight, 0)
     : 0;
+  // Plus / minus distribution for the breadth pie
+  const advancing = valid.filter((r) => r.changePct > 0.05).length;
+  const declining = valid.filter((r) => r.changePct < -0.05).length;
+  const unchanged = valid.length - advancing - declining;
   const data = {
+    symbol: KEY,
     rows,
     weightedAvgChangePct: Number(weightedAvg.toFixed(2)),
+    advancing,
+    declining,
+    unchanged,
+    total: valid.length,
     leaders: [...valid].sort((a, b) => b.changePct - a.changePct).slice(0, 3),
     laggards: [...valid].sort((a, b) => a.changePct - b.changePct).slice(0, 3),
   };
-  _heavyweightCache.at = Date.now();
-  _heavyweightCache.data = data;
+  _heavyweightCache.set(KEY, { at: Date.now(), data });
+  return data;
+}
+
+/**
+ * Full-index breadth: fetches every constituent and counts advancing /
+ * declining / unchanged. NIFTY 50 → 50 stocks, SENSEX → 30 stocks.
+ * Cached for 60 s to avoid hammering Yahoo (50 quotes per refresh).
+ */
+async function _getFullBreadth(symbolKey = 'NIFTY_50') {
+  const KEY = String(symbolKey).toUpperCase();
+  const list = CONSTITUENTS_BY_SYMBOL[KEY] || CONSTITUENTS_BY_SYMBOL.NIFTY_50;
+  const cached = _breadthCache.get(KEY);
+  if (cached && Date.now() - cached.at < MACRO_CACHE_MS) {
+    return cached.data;
+  }
+  // Parallel fetch with light concurrency cap to avoid Yahoo throttling.
+  const CONCURRENCY = 12;
+  const results = [];
+  for (let i = 0; i < list.length; i += CONCURRENCY) {
+    const chunk = list.slice(i, i + CONCURRENCY);
+    const part = await Promise.all(chunk.map((sym) => _yahooQuote(sym).then((q) => ({ symbol: sym, ...(q || {}) }))));
+    results.push(...part);
+  }
+  const valid = results.filter((r) => Number.isFinite(r.changePct));
+  const advancing = valid.filter((r) => r.changePct > 0.05).length;
+  const declining = valid.filter((r) => r.changePct < -0.05).length;
+  const unchanged = valid.length - advancing - declining;
+  const total = list.length;
+  const adRatio = declining ? Number((advancing / declining).toFixed(2)) : (advancing > 0 ? 999 : 0);
+  // Leaders / laggards across the FULL index
+  const leaders = [...valid].sort((a, b) => b.changePct - a.changePct).slice(0, 5)
+    .map((r) => ({ symbol: r.symbol.replace(/\.(NS|BO)$/, ''), changePct: r.changePct, price: r.price }));
+  const laggards = [...valid].sort((a, b) => a.changePct - b.changePct).slice(0, 5)
+    .map((r) => ({ symbol: r.symbol.replace(/\.(NS|BO)$/, ''), changePct: r.changePct, price: r.price }));
+  const data = {
+    symbol: KEY,
+    advancing,
+    declining,
+    unchanged,
+    total,
+    sampled: valid.length,            // how many actually returned
+    advancePct: Number(((advancing / total) * 100).toFixed(0)),
+    declinePct: Number(((declining / total) * 100).toFixed(0)),
+    adRatio,
+    leaders,
+    laggards,
+  };
+  _breadthCache.set(KEY, { at: Date.now(), data });
   return data;
 }
 
@@ -1979,10 +2102,11 @@ async function getSnapshot(symbolKey = "NIFTY_50") {
     marketOpen,
   });
 
-  // ── MACRO CONTEXT (VIX / GIFT NIFTY / FII-DII / US futures / crude / heavyweights) ──
-  const [macro, heavy] = await Promise.all([
+  // ── MACRO CONTEXT (VIX / GIFT NIFTY / FII-DII / US futures / crude / heavyweights / full breadth) ──
+  const [macro, heavy, fullBreadth] = await Promise.all([
     _getMacroContext().catch(() => null),
-    _getHeavyweights().catch(() => null),
+    _getHeavyweights(SYMBOL).catch(() => null),
+    _getFullBreadth(SYMBOL).catch(() => null),
   ]);
 
   // ── CPR + Anchored VWAPs ────────────────────────────────────────────────
@@ -2064,7 +2188,24 @@ async function getSnapshot(symbolKey = "NIFTY_50") {
 
   const heavyweightsImpact = _heavyweightImpact(heavy, spotPrice);
   const heavyweightsTotalImpact = _heavyweightTotalImpact(heavyweightsImpact);
-  const breadth = _breadth(heavyweightsImpact.length ? heavyweightsImpact : heavy?.rows);
+  // Prefer the REAL full-index breadth (50 NIFTY stocks / 30 SENSEX stocks
+  // pulled live from Yahoo). Fall back to the synthesized breadth when the
+  // full fetch failed (rate-limit / network).
+  const breadth = fullBreadth
+    ? {
+        advancing:   fullBreadth.advancing,
+        declining:   fullBreadth.declining,
+        unchanged:   fullBreadth.unchanged,
+        total:       fullBreadth.total,
+        sampled:     fullBreadth.sampled,
+        adRatio:     fullBreadth.adRatio,
+        advancePct:  fullBreadth.advancePct,
+        declinePct:  fullBreadth.declinePct,
+        leaders:     fullBreadth.leaders,
+        laggards:    fullBreadth.laggards,
+        source:      'full-index',
+      }
+    : { ..._breadth(heavyweightsImpact.length ? heavyweightsImpact : heavy?.rows), source: 'sampled' };
   const ivRank = _ivRank(optionsBlock?.atm_iv, macro?.vix?.price);
   const trapDetectorRows = _trapDetectorRows(traps);
   const regimeClassification = _regimeClassification(marketRegime, volatility, payload.multi_timeframe);
