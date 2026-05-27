@@ -1,9 +1,9 @@
 import type { IntelV2Snapshot } from "@/lib/intelV2Types";
-import { V2Card, V2Pill, v2Fmt, v2FmtSigned, v2FmtSignedCompact, V2_TONE } from "./common";
+import { V2Card, V2Pill, v2Fmt, v2FmtSigned, v2FmtSignedCompact, V2_TONE, V2Hint } from "./common";
 
 export function Row3ConfirmationLayer({ data }: { data: IntelV2Snapshot | null }) {
   return (
-    <div className="grid h-[260px] grid-cols-12 gap-2">
+    <div className="grid h-[360px] grid-cols-12 gap-2">
       <div className="col-span-2 min-h-0"><DeltaVolume data={data} /></div>
       <div className="col-span-2 min-h-0"><MarketBreadth data={data} /></div>
       <div className="col-span-3 min-h-0"><Heavyweights data={data} /></div>
@@ -18,6 +18,7 @@ function DeltaVolume({ data }: { data: IntelV2Snapshot | null }) {
   const d = data?.flow?.delta;
   const aggrTone = d?.bias === "bullish" ? "bull" : d?.bias === "bearish" ? "bear" : "neutral";
   const aggrLabel = d?.bias === "bullish" ? "BUYING" : d?.bias === "bearish" ? "SELLING" : "BALANCED";
+  const hint = data?.dashboard?.hints?.delta;
   return (
     <V2Card title="3.1 Delta + Volume">
       <div className="flex flex-col gap-1.5 text-[12px]">
@@ -51,6 +52,7 @@ function DeltaVolume({ data }: { data: IntelV2Snapshot | null }) {
           {Math.round(((d?.totalBuy ?? 0) / Math.max(1, (d?.totalBuy ?? 0) + (d?.totalSell ?? 0))) * 100)}%
         </span>
       </div>
+      <V2Hint label="Interpretation" text={hint || ""} tone={aggrTone as "bull" | "bear" | "neutral"} />
     </V2Card>
   );
 }
@@ -94,6 +96,7 @@ function MarketBreadth({ data }: { data: IntelV2Snapshot | null }) {
           <span className="text-[10px] text-white/55">Breadth Strength</span>
         </div>
       </div>
+      <V2Hint label="Breadth Strength" text={b?.interpretation || data?.dashboard?.hints?.breadth || ""} tone={tone as "bull" | "bear" | "warn"} />
     </V2Card>
   );
 }
@@ -126,9 +129,7 @@ function Donut({ percent, tone }: { percent: number; tone: "bull" | "bear" | "wa
 // 3.3 Heavyweights Alignment
 function Heavyweights({ data }: { data: IntelV2Snapshot | null }) {
   const rows = (data?.dashboard?.heavyweightsImpact || []).slice(0, 6);
-  const total = data?.dashboard?.heavyweightsTotalImpact ?? 0;
-  const aligned = rows.filter(r => Math.sign(r.changePct) === Math.sign(total)).length;
-  const score = `${aligned}/${rows.length || 0}`;
+  const align = data?.dashboard?.heavyweightsAlignment;
   return (
     <V2Card title="3.3 Heavyweights Alignment">
       <div className="grid grid-cols-4 px-1 pb-0.5 text-[10px] font-bold uppercase tracking-wider text-white/45">
@@ -161,8 +162,11 @@ function Heavyweights({ data }: { data: IntelV2Snapshot | null }) {
       </div>
       <div className="mt-1.5 flex items-center justify-between rounded-sm bg-white/[0.03] px-2 py-1.5">
         <span className="text-[10px] uppercase tracking-wider text-white/55">Alignment Score</span>
-        <span className="font-mono text-[12px] font-bold text-emerald-400">{score} • Moderate</span>
+        <span className="font-mono text-[12px] font-bold text-emerald-400">
+          {align?.score || `0/0`} • {align?.label || "Mixed"}
+        </span>
       </div>
+      <V2Hint label="Heavyweights" text={data?.dashboard?.hints?.heavy || ""} tone="bull" />
     </V2Card>
   );
 }
@@ -209,6 +213,7 @@ function IvVix({ data }: { data: IntelV2Snapshot | null }) {
           />
         </div>
       </div>
+      <V2Hint label="IV Trend" text={iv?.interpretation || data?.dashboard?.hints?.ivVix || ""} tone="info" />
     </V2Card>
   );
 }
@@ -244,6 +249,7 @@ function FiiDii({ data }: { data: IntelV2Snapshot | null }) {
       <div className="mt-1.5 text-[11px] text-white/45">
         Source: Sensibull • {fd?.date || "—"}
       </div>
+      <V2Hint label="Flow" text={tone === "bull" ? "Institutions net buyers — supportive flow." : tone === "bear" ? "Institutions net sellers — defensive bias." : "Mixed institutional flow."} tone={tone as "bull" | "bear" | "neutral"} />
     </V2Card>
   );
 }

@@ -285,16 +285,78 @@ export interface IntelV2Snapshot {
       spot: Array<{ t: number; v: number }>;
       futures: Array<{ t: number; v: number }>;
     };
-    buildUp: { longBuildUp: boolean; shortCovering: boolean; longUnwinding: boolean; shortBuildUp: boolean };
+    buildUp: {
+      longBuildUp: boolean;
+      shortCovering: boolean;
+      longUnwinding: boolean;
+      shortBuildUp: boolean;
+      longBuildUpStrike:   { strike: number; side: "PE"; delta: number } | null;
+      shortBuildUpStrike:  { strike: number; side: "CE"; delta: number } | null;
+      longUnwindingStrike: { strike: number; side: "PE"; delta: number } | null;
+      shortCoveringStrike: { strike: number; side: "CE"; delta: number } | null;
+      strengthLabel: "STRONG" | "MODERATE" | "WEAK";
+      velocityLabel: "HIGH" | "MODERATE" | "LOW";
+      shiftBias: string;
+      interpretation: string;
+    };
+    buyerSellerFlow: {
+      ce: { net: number; label: string; buyersPct: number; sellersPct: number; buyersAbs: number };
+      pe: { net: number; label: string; buyersPct: number; sellersPct: number; buyersAbs: number };
+    };
+    auctionIntensity: {
+      score: number;
+      label: string;
+      tone: string;
+      hint: string;
+    };
+    vwapAvwapIntraday: {
+      vwap: number | null;
+      avwapDay: number | null;
+      priceVsVwap: string;
+      bias: string;
+    };
+    frvpAuction: null | {
+      poc: number; vah: number; val: number;
+      sessionHigh: number; sessionLow: number;
+      ibHigh: number | null; ibLow: number | null;
+      insideValueRange: string;
+      valueAreaPct: number;
+      totalVolume: number;
+      volumeIB: number;
+      volumeOOR: number;
+      pocType: string;
+      auctionBias: string;
+      initiative: string;
+      acceptedAboveVAH: string;
+      rejectedBelowVAL: string;
+      bins: Array<{ price: number; volume: number }>;
+      summary: { label: string; tone: string; sub: string; score: number };
+    };
+    frvpInstitutional: {
+      vah: number | null;
+      poc: number | null;
+      val: number | null;
+      price: number;
+      insideValue: "YES" | "NO";
+      outsideValue: "YES" | "NO";
+      markerPct: number;
+      buyers:  { entering: number; leaving: number };
+      sellers: { entering: number; leaving: number };
+      participationStrike: number | null;
+      participationLevel: "High" | "Medium" | "Low";
+      interpretation: string;
+    };
     futuresInfo: {
       oi: number; oiChange: number; volume: number;
       ltp: number; premium: number; basis: number; basisTrend: string;
+      interpretation?: string;
     };
     oiHistogram: OiHistogramRow[];
     cvdSeries: Array<{ t: number; cvd: number; lastLtp: number | null }>;
     delta: {
       totalBuyVol: number; totalSellVol: number;
       netDelta: number; deltaPct: number; bidAskImbalance: number;
+      interpretation?: string;
     };
     frvpHistogram: Array<{ price: number; volume: number }>;
     priceAbovePoc: number | null;
@@ -305,12 +367,14 @@ export interface IntelV2Snapshot {
       leaders?: Array<{ symbol: string; changePct: number; price?: number }>;
       laggards?: Array<{ symbol: string; changePct: number; price?: number }>;
       source?: string;
+      interpretation?: string;
     };
     heavyweightsImpact: Array<{
       symbol: string; name: string; last: number;
       changePct: number; weight: number; impactPts: number;
     }>;
     heavyweightsTotalImpact: number;
+    heavyweightsAlignment?: { aligned: number; total: number; score: string; label: string };
     ivAnalytics: {
       vix: number | null;
       vixChangePct: number | null;
@@ -318,6 +382,7 @@ export interface IntelV2Snapshot {
       atmIvChangePct: number | null;
       ivRank: { score: number; label: string; tone: string };
       trend: Array<{ t: number; iv: number }>;
+      interpretation?: string;
     };
     trapDetector: TrapRow[];
     regimeClassification: {
@@ -359,6 +424,7 @@ export interface IntelV2Snapshot {
       value: string; tone: "bull" | "bear" | "warn" | "neutral";
     }>;
     spark1m: Array<{ t: number; o: number; h: number; l: number; c: number; v: number }>;
+    hints?: Record<string, string>;
   };
 
   debug: {

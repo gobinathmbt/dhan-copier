@@ -1,9 +1,9 @@
 import type { IntelV2Snapshot } from "@/lib/intelV2Types";
-import { V2Card, V2Pill, v2Fmt, V2_TONE } from "./common";
+import { V2Card, V2Pill, v2Fmt, V2_TONE, V2Hint } from "./common";
 
 export function Row4StructureContext({ data }: { data: IntelV2Snapshot | null }) {
   return (
-    <div className="grid h-[210px] grid-cols-12 gap-2">
+    <div className="grid h-[300px] grid-cols-12 gap-2">
       <div className="col-span-2 min-h-0"><Vwap data={data} /></div>
       <div className="col-span-2 min-h-0"><EmaStack data={data} /></div>
       <div className="col-span-2 min-h-0"><CprDaily data={data} /></div>
@@ -30,6 +30,7 @@ function Vwap({ data }: { data: IntelV2Snapshot | null }) {
           <V2Pill label={aboveV ? "YES" : "NO"} tone={aboveV ? "bull" : "bear"} size="sm" />
         </div>
       </div>
+      <V2Hint label="Status" text={data?.dashboard?.hints?.vwap || ""} tone={aboveV ? "bull" : "bear"} />
     </V2Card>
   );
 }
@@ -53,6 +54,7 @@ function EmaStack({ data }: { data: IntelV2Snapshot | null }) {
           <V2Pill label={trend} tone={tone as "bull" | "bear" | "warn"} size="sm" />
         </div>
       </div>
+      <V2Hint label="Trend" text={data?.dashboard?.hints?.ema || ""} tone={tone as "bull" | "bear" | "warn"} />
     </V2Card>
   );
 }
@@ -77,6 +79,7 @@ function CprDaily({ data }: { data: IntelV2Snapshot | null }) {
           />
         </div>
       </div>
+      <V2Hint label="CPR" text={data?.dashboard?.hints?.cpr || ""} tone={aboveTC ? "bull" : belowBC ? "bear" : "warn"} />
     </V2Card>
   );
 }
@@ -97,6 +100,7 @@ function MaxPain({ data }: { data: IntelV2Snapshot | null }) {
           <V2Pill label="NEUTRAL" tone="warn" size="sm" />
         </div>
       </div>
+      <V2Hint label="Range Bias" text={data?.dashboard?.hints?.maxPain || ""} tone="warn" />
     </V2Card>
   );
 }
@@ -121,6 +125,7 @@ function PcrHidden({ data }: { data: IntelV2Snapshot | null }) {
           />
         </div>
       </div>
+      <V2Hint label="Sentiment" text={data?.dashboard?.hints?.pcr || ""} tone={tone as "bull" | "bear" | "warn"} />
     </V2Card>
   );
 }
@@ -153,6 +158,7 @@ function GiftNifty({ data }: { data: IntelV2Snapshot | null }) {
           />
         </div>
       </div>
+      <V2Hint label="Cues" text={data?.dashboard?.hints?.gift || ""} tone={positive ? "bull" : "bear"} />
     </V2Card>
   );
 }

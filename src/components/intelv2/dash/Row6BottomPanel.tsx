@@ -10,7 +10,7 @@ import { TopStrikeCardV2 } from "./TopStrikeCard";
  */
 export function Row6BottomPanel({ data }: { data: IntelV2Snapshot | null }) {
   return (
-    <div className="grid min-h-0 flex-1 grid-rows-[260px_minmax(220px,1fr)] gap-2">
+    <div className="grid min-h-0 flex-1 grid-rows-[400px_minmax(320px,1fr)] gap-2">
       {/* Tier A — SR + Top Strike */}
       <div className="grid min-h-0 grid-cols-12 gap-2">
         <div className="col-span-5 min-h-0"><SupportResistanceCardV2 data={data} /></div>

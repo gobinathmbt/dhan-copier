@@ -527,18 +527,30 @@ async function fetchInstitutionalFlowData() {
       logger.warn('[marketInternals] FII/DII data unavailable from Sensibull');
       return null;
     }
-    
-    // Get today's data (most recent date)
-    // API returns data in format: { "2026-04-27": {...}, "2026-04-28": {...} }
-    const dates = Object.keys(response.data).sort().reverse();
-    
+
+    // Sensibull payload schema (current):
+    //   { year_month: '2026-May', key_list: [...], data: { 'YYYY-MM-DD': { cash, future, option, ... } } }
+    // Older / alt schema (kept for backwards compat):
+    //   { 'YYYY-MM-DD': { ... } }
+    const buckets = (response.data && typeof response.data === 'object' && response.data.data && typeof response.data.data === 'object')
+      ? response.data.data
+      : response.data;
+
+    // Filter to only valid YYYY-MM-DD keys (defensive — protects against
+    // wrapper keys like 'year_month' / 'key_list' leaking through).
+    const dates = Object.keys(buckets || {})
+      .filter(k => /^\d{4}-\d{2}-\d{2}$/.test(k))
+      .sort()
+      .reverse();
+
     if (dates.length === 0) {
-      logger.warn('[marketInternals] No FII/DII dates available');
+      logger.warn({ topKeys: Object.keys(response.data || {}).slice(0, 6) },
+        '[marketInternals] No FII/DII dates available (schema unrecognised)');
       return null;
     }
-    
+
     const todayDate = dates[0]; // Most recent date
-    const todayData = response.data[todayDate];
+    const todayData = buckets[todayDate];
     
     if (!todayData) {
       logger.warn('[marketInternals] No FII/DII data for today');

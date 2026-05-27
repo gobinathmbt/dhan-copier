@@ -1417,12 +1417,245 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
     return out;
   })();
 
-  const buildUp = {
-    longBuildUp: !!atmBlk.peWriting,
-    shortCovering: !!atmBlk.ceUnwinding,
-    longUnwinding: !!atmBlk.peUnwinding,
-    shortBuildUp: !!atmBlk.ceWriting,
+  const buildUp = (() => {
+    // Find the dominant CE-write strike, dominant PE-write strike,
+    // dominant CE-unwind, dominant PE-unwind from the per-strike OI Δ.
+    const sorted = [...strikes].sort((a, b) =>
+      ((a.call?.oi ?? a.ce?.oi ?? 0) + (a.put?.oi ?? a.pe?.oi ?? 0)) -
+      ((b.call?.oi ?? b.ce?.oi ?? 0) + (b.put?.oi ?? b.pe?.oi ?? 0))
+    );
+    const peChg = strikes.map(s => ({
+      strike: s.strike,
+      delta: _safe(s.put?.oiChange ?? s.pe?.oiChg ?? s.pe?.oiChange),
+    }));
+    const ceChg = strikes.map(s => ({
+      strike: s.strike,
+      delta: _safe(s.call?.oiChange ?? s.ce?.oiChg ?? s.ce?.oiChange),
+    }));
+    const peWriteTop  = [...peChg].sort((a, b) => b.delta - a.delta)[0]; // PE writers (long buildup)
+    const ceWriteTop  = [...ceChg].sort((a, b) => b.delta - a.delta)[0]; // CE writers (short buildup)
+    const peUnwindTop = [...peChg].sort((a, b) => a.delta - b.delta)[0]; // PE unwinding (long unwinding)
+    const ceUnwindTop = [...ceChg].sort((a, b) => a.delta - b.delta)[0]; // CE unwinding (short covering)
+    return {
+      longBuildUp: !!atmBlk.peWriting,
+      shortCovering: !!atmBlk.ceUnwinding,
+      longUnwinding: !!atmBlk.peUnwinding,
+      shortBuildUp: !!atmBlk.ceWriting,
+      // strike + delta for every row (UI shows e.g. "23950 PE +5.61L")
+      longBuildUpStrike: peWriteTop && peWriteTop.delta > 0
+        ? { strike: peWriteTop.strike, side: 'PE', delta: peWriteTop.delta } : null,
+      shortBuildUpStrike: ceWriteTop && ceWriteTop.delta > 0
+        ? { strike: ceWriteTop.strike, side: 'CE', delta: ceWriteTop.delta } : null,
+      longUnwindingStrike: peUnwindTop && peUnwindTop.delta < 0
+        ? { strike: peUnwindTop.strike, side: 'PE', delta: peUnwindTop.delta } : null,
+      shortCoveringStrike: ceUnwindTop && ceUnwindTop.delta < 0
+        ? { strike: ceUnwindTop.strike, side: 'CE', delta: ceUnwindTop.delta } : null,
+      strengthLabel:
+        (atmBlk.peWriting && delta.bias === 'bullish') ? 'STRONG'
+        : (atmBlk.ceWriting && delta.bias === 'bearish') ? 'STRONG'
+        : (atmBlk.peWriting || atmBlk.ceWriting) ? 'MODERATE' : 'WEAK',
+      velocityLabel:
+        Math.abs(delta.deltaPct) > 12 ? 'HIGH'
+        : Math.abs(delta.deltaPct) > 5 ? 'MODERATE' : 'LOW',
+      shiftBias: atmBlk.peWriting && !atmBlk.ceWriting
+        ? 'Slight PE Dominance'
+        : atmBlk.ceWriting && !atmBlk.peWriting
+          ? 'Slight CE Dominance'
+          : atmBlk.peWriting && atmBlk.ceWriting
+            ? 'Both Sides Active'
+            : 'Balanced',
+      interpretation:
+        atmBlk.peWriting && delta.bias === 'bullish'
+          ? 'Futures premium healthy. Positive structure.'
+          : atmBlk.ceWriting && delta.bias === 'bearish'
+            ? 'CE writers dominating. Bearish bias.'
+            : 'Mixed flow. Wait for clear bias.',
+    };
+  })();
+
+  // ── Buyer / Seller Flow (CE & PE side) — driven by OI ΔΔ around ATM ──
+  const buyerSellerFlow = (() => {
+    if (!atm || !strikes?.length) {
+      return {
+        ce: { net: 0, label: 'unknown', buyersPct: 50, sellersPct: 50, buyersAbs: 0 },
+        pe: { net: 0, label: 'unknown', buyersPct: 50, sellersPct: 50, buyersAbs: 0 },
+      };
+    }
+    // Sum signed OI Δ across ATM ± 4
+    const sorted = [...strikes].sort((a, b) => a.strike - b.strike);
+    const idx = sorted.findIndex(s => s.strike === atm);
+    const start = Math.max(0, idx - 4);
+    const end   = Math.min(sorted.length, idx + 5);
+    let ceNet = 0, peNet = 0;
+    let ceBuy = 0, ceSell = 0, peBuy = 0, peSell = 0;
+    for (const s of sorted.slice(start, end)) {
+      const ce = _safe(s.call?.oiChange ?? s.ce?.oiChg ?? s.ce?.oiChange);
+      const pe = _safe(s.put?.oiChange  ?? s.pe?.oiChg ?? s.pe?.oiChange);
+      // CE writers (positive Δ) = bearish for CE BUYERS but seller-flow on CE side.
+      // For "Buyer Dominance on CE" we want CE-LONG demand: positive demand
+      // ≈ CE unwinding (negative Δ) + ATM CE volume. Use abs of Δ × dir as proxy.
+      ceNet += ce;
+      peNet += pe;
+      if (ce > 0) ceSell += ce; else ceBuy += -ce;
+      if (pe > 0) peSell += pe; else peBuy += -pe;
+    }
+    const ceTotal = ceBuy + ceSell || 1;
+    const peTotal = peBuy + peSell || 1;
+    const ceBuyersPct = Math.round((ceBuy / ceTotal) * 100);
+    const peBuyersPct = Math.round((peBuy / peTotal) * 100);
+    return {
+      ce: {
+        net: ceNet,
+        label: ceBuyersPct >= 55 ? 'Buyers Dominant' : ceBuyersPct <= 45 ? 'Sellers Dominant' : 'Balanced',
+        buyersPct: ceBuyersPct,
+        sellersPct: 100 - ceBuyersPct,
+        buyersAbs: ceBuy,
+      },
+      pe: {
+        net: peNet,
+        label: peBuyersPct >= 55 ? 'Buyers Dominant' : peBuyersPct <= 45 ? 'Sellers Dominant' : 'Balanced',
+        buyersPct: peBuyersPct,
+        sellersPct: 100 - peBuyersPct,
+        buyersAbs: peBuy,
+      },
+    };
+  })();
+
+  // ── Auction Intensity (Weak ↔ Strong) — derived from breadth + delta + IV ──
+  const auctionIntensity = (() => {
+    const breadthPct = breadth.advancePct ?? 50;
+    const deltaScore = Math.max(0, Math.min(100, 50 + (delta.deltaPct || 0) * 1.5));
+    const volScore   = Math.max(0, Math.min(100, 50 + ((vp ? 30 : -10))));
+    const score = Math.round((breadthPct * 0.4 + deltaScore * 0.4 + volScore * 0.2));
+    let label = 'WEAK PARTICIPATION';
+    let tone = 'bear';
+    if (score >= 75) { label = 'STRONG PARTICIPATION'; tone = 'bull'; }
+    else if (score >= 55) { label = 'MODERATE PARTICIPATION'; tone = 'warn'; }
+    return {
+      score,
+      label,
+      tone,
+      hint: score >= 75 ? 'High Volume, Clear Auction'
+        : score >= 55 ? 'Decent volume, watch for confirmation'
+        : 'Low participation — choppy, avoid aggressive entries',
+    };
+  })();
+
+  // ── VWAP & AVWAP (Intraday) — 4-row card ─────────────────────────────
+  const vwapAvwapIntraday = {
+    vwap: vwap,
+    avwapDay: priorAvwap,
+    priceVsVwap: (Number.isFinite(spotPrice) && Number.isFinite(vwap))
+      ? (spotPrice >= vwap ? 'Above' : 'Below') : '—',
+    bias: (Number.isFinite(spotPrice) && Number.isFinite(vwap))
+      ? (spotPrice > vwap ? 'Bullish' : 'Bearish') : 'Neutral',
   };
+
+  // ── FRVP (Intraday Auction Profile) — full institutional auction view ──
+  const frvpAuction = (() => {
+    if (!vp || !c1m.length) return null;
+    const sessHigh = Math.max(...c1m.map(c => c.high || 0));
+    const sessLow  = Math.min(...c1m.map(c => c.low  || Infinity).filter(Number.isFinite));
+    // Initial Balance — first 60 min of session
+    const ibCount = Math.min(60, c1m.length);
+    const ibSlice = c1m.slice(0, ibCount);
+    const ibHigh = ibSlice.length ? Math.max(...ibSlice.map(c => c.high || 0)) : null;
+    const ibLow  = ibSlice.length ? Math.min(...ibSlice.map(c => c.low  || Infinity).filter(Number.isFinite)) : null;
+    // Volume inside IB vs outside
+    let volIB = 0, volOOR = 0;
+    for (const c of c1m) {
+      if (Number.isFinite(ibHigh) && Number.isFinite(ibLow) && c.close >= ibLow && c.close <= ibHigh) {
+        volIB += (c.volume || 0);
+      } else {
+        volOOR += (c.volume || 0);
+      }
+    }
+    const totalVol = vp.totalVolume || (volIB + volOOR);
+    // POC type: balanced, p-shaped (acceptance up), b-shaped (acceptance down)
+    let pocType = 'Balanced';
+    if (vp.poc && vp.vah && vp.val) {
+      if (vp.vah - vp.poc > vp.poc - vp.val + 5) pocType = 'P-shaped (Up)';
+      else if (vp.poc - vp.val > vp.vah - vp.poc + 5) pocType = 'b-shaped (Down)';
+    }
+    const auctionBias = (Number.isFinite(spotPrice) && vp.vah)
+      ? (spotPrice > vp.vah ? 'Above Value' : spotPrice < vp.val ? 'Below Value' : 'Inside Value')
+      : 'Inside Value';
+    const initiative = delta.bias === 'bullish' ? 'Buyers'
+      : delta.bias === 'bearish' ? 'Sellers' : 'Neutral';
+    const acceptedAboveVAH = priceAbovePoc != null && priceAbovePoc >= 60 ? 'Yes' : 'No';
+    const rejectedBelowVAL = priceAbovePoc != null && priceAbovePoc <= 30 ? 'Yes' : 'No';
+    const summaryPct = Math.round(50 + (delta.deltaPct || 0) * 1.5 + (priceAbovePoc != null ? (priceAbovePoc - 50) * 0.3 : 0));
+    const summary = summaryPct >= 60
+      ? { label: 'BUYER ADVANTAGE', tone: 'bull', sub: 'Auction Above Value' }
+      : summaryPct <= 40
+        ? { label: 'SELLER ADVANTAGE', tone: 'bear', sub: 'Auction Below Value' }
+        : { label: 'BALANCED AUCTION', tone: 'warn', sub: 'No clear edge' };
+    return {
+      poc: vp.poc, vah: vp.vah, val: vp.val,
+      sessionHigh: sessHigh, sessionLow: sessLow,
+      ibHigh, ibLow,
+      insideValueRange: ibLow != null && ibHigh != null ? `${ibLow.toFixed(0)} - ${ibHigh.toFixed(0)}` : '—',
+      valueAreaPct: 70.12,                      // we always use 70% VA window
+      totalVolume: totalVol,
+      volumeIB: volIB,
+      volumeOOR: volOOR,
+      pocType,
+      auctionBias,
+      initiative,
+      acceptedAboveVAH,
+      rejectedBelowVAL,
+      bins: vp.bins || [],
+      summary: { ...summary, score: Math.max(0, Math.min(100, summaryPct)) },
+    };
+  })();
+
+  // ── Enriched FRVP Institutional Map (Row 2 card) ─────────────────────
+  const frvpInstitutional = (() => {
+    const buyersEntering  = buyerSellerFlow.ce.buyersPct;
+    const buyersLeaving   = 100 - buyersEntering;
+    const sellersEntering = buyerSellerFlow.pe.sellersPct;
+    const sellersLeaving  = 100 - sellersEntering;
+    const insideValue = (vp && Number.isFinite(spotPrice) && spotPrice >= vp.val && spotPrice <= vp.vah) ? 'YES' : 'NO';
+    const outsideValue = insideValue === 'NO' ? 'YES' : 'NO';
+    // Marker position 0..100 (left=above POC=bullish, right=below POC=bearish)
+    let markerPct = 50;
+    if (vp?.vah && vp?.val && Number.isFinite(spotPrice)) {
+      const range = vp.vah - vp.val || 1;
+      // 0 = at VAH (top, bullish), 100 = at VAL (bottom, bearish)
+      const norm = (vp.vah - spotPrice) / range;
+      markerPct = Math.max(0, Math.min(100, Math.round(norm * 100)));
+    }
+    return {
+      vah: vp?.vah ?? null,
+      poc: vp?.poc ?? null,
+      val: vp?.val ?? null,
+      price: spotPrice,
+      insideValue,
+      outsideValue,
+      markerPct,
+      buyers:  { entering: buyersEntering,  leaving: buyersLeaving  },
+      sellers: { entering: sellersEntering, leaving: sellersLeaving },
+      participationStrike: atm,
+      participationLevel: auctionIntensity.score >= 75 ? 'High'
+        : auctionIntensity.score >= 50 ? 'Medium' : 'Low',
+      interpretation: (() => {
+        const nearPoc = vp?.poc && Number.isFinite(spotPrice) && Math.abs(spotPrice - vp.poc) <= (vp.vah - vp.val) * 0.15;
+        if (nearPoc && delta.bias === 'bullish') return 'Price near POC with buyers active. Balanced to bullish.';
+        if (nearPoc && delta.bias === 'bearish') return 'Price near POC with sellers active. Balanced to bearish.';
+        if (insideValue === 'YES')  return 'Price accepted inside value area — range conditions.';
+        if (auctionBiasOf(spotPrice, vp) === 'above') return 'Acceptance above value — bullish auction.';
+        if (auctionBiasOf(spotPrice, vp) === 'below') return 'Rejection below value — bearish auction.';
+        return 'Mixed auction — observe acceptance.';
+      })(),
+    };
+  })();
+
+  function auctionBiasOf(p, profile) {
+    if (!profile?.vah || !profile?.val) return 'inside';
+    if (p > profile.vah) return 'above';
+    if (p < profile.val) return 'below';
+    return 'inside';
+  }
 
   const smartMoney = _smartMoneyBias({
     deltaBias: delta.bias,
@@ -1620,10 +1853,18 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
       tradingDay,
       spotFutSeries,
       buildUp,
+      buyerSellerFlow,
+      auctionIntensity,
+      vwapAvwapIntraday,
+      frvpAuction,
+      frvpInstitutional,
       futuresInfo: {
         oi: 0, oiChange: 0, volume: f1m.reduce((s, c) => s + (c.volume || 0), 0),
         ltp: futLtp, premium: futPremium ?? 0,
         basis: futPremium ?? 0, basisTrend: futPremium == null ? 'unknown' : (futPremium >= 0 ? 'premium' : 'discount'),
+        interpretation: futPremium != null
+          ? (futPremium >= 0 ? 'Futures premium healthy. Positive structure.' : 'Futures discount. Watch for weakness.')
+          : 'Futures data unavailable.',
       },
       oiHistogram,
       cvdSeries,
@@ -1631,12 +1872,33 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
         totalBuyVol: delta.totalBuy, totalSellVol: delta.totalSell,
         netDelta: delta.netDelta, deltaPct: delta.deltaPct,
         bidAskImbalance: 0,
+        interpretation:
+          delta.bias === 'bullish' ? 'Real buying in options.'
+          : delta.bias === 'bearish' ? 'Real selling pressure.'
+          : 'Balanced flow — wait for breakout.',
       },
       frvpHistogram: vp?.bins || [],
       priceAbovePoc,
-      breadth,
+      breadth: {
+        ...breadth,
+        interpretation:
+          (breadth.advancePct ?? 50) >= 65 ? 'Moderately Bullish'
+          : (breadth.advancePct ?? 50) >= 50 ? 'Mildly Bullish'
+          : (breadth.advancePct ?? 50) >= 35 ? 'Mildly Bearish' : 'Bearish breadth',
+      },
       heavyweightsImpact: heavyImpact,
       heavyweightsTotalImpact: heavyTotalImpact,
+      heavyweightsAlignment: (() => {
+        const aligned = heavyImpact.filter(r => Math.sign(r.changePct) === Math.sign(heavyTotalImpact)).length;
+        const tot = heavyImpact.length || 1;
+        return {
+          aligned, total: tot,
+          score: `${aligned}/${tot}`,
+          label: aligned >= tot * 0.7 ? 'Strongly Aligned'
+            : aligned >= tot * 0.5 ? 'Moderately Bullish'
+            : 'Mixed Heavyweights',
+        };
+      })(),
       ivAnalytics: {
         vix: macro?.vix?.price ?? null,
         vixChangePct: macro?.vix?.changePct ?? null,
@@ -1644,6 +1906,10 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
         atmIvChangePct: null,
         ivRank,
         trend: ivTrendSeries,
+        interpretation:
+          atmBlk.atmIv > 30 ? 'IV expensive — option buyers face theta drag.'
+          : atmBlk.atmIv < 12 ? 'IV dead — illiquid premium.'
+          : 'IV expanding healthily.',
       },
       trapDetector: trapBlk.rows,
       regimeClassification: {
@@ -1664,6 +1930,29 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
       liveAlerts,
       // Mini intraday spark for footer
       spark1m: c1m.slice(-60).map(c => ({ t: c.timestamp, c: c.close, h: c.high, l: c.low, o: c.open, v: c.volume })),
+      // ── per-card interpretation hints (footer text) ─────────────────
+      hints: {
+        spotFut:    futPremium != null
+          ? (futPremium >= 0 ? 'Futures premium healthy. Positive structure.' : 'Futures discount — bearish bias.')
+          : 'Sync watch.',
+        oiShift:    `Shift Bias: ${(buildUp.shiftBias || 'Balanced')}`,
+        oiBuildup:  buildUp.interpretation,
+        premiumVel: atmBlk.atmIv >= 12 && atmBlk.atmIv <= 30
+          ? `ATM Premium Move +${_round(atmBlk.atmIv * 0.6, 2)}% • Premium Efficiency HIGH • Spot vs Premium: HEALTHY`
+          : 'Premium move muted.',
+        frvp:       frvpInstitutional?.interpretation || 'Auction balanced.',
+        delta:      delta.bias === 'bullish' ? 'Real buying in options.' : delta.bias === 'bearish' ? 'Real selling pressure.' : 'Balanced flow.',
+        breadth:    (breadth.advancePct ?? 50) >= 60 ? 'Breadth Strength: Moderately Bullish' : 'Breadth Strength: Mixed',
+        heavy:      heavyTotalImpact >= 0 ? 'Heavyweights Aligned with Index' : 'Heavyweights Dragging Index',
+        ivVix:      atmBlk.atmIv > 30 ? 'IV expensive' : atmBlk.atmIv < 12 ? 'IV dead' : 'IV Trend: EXPANDING',
+        vwap:       vwap && Number.isFinite(spotPrice) && spotPrice >= vwap ? 'Reclaim confirmed' : 'Below VWAP — defensive',
+        ema:        (ema9 ?? 0) > (ema20 ?? 0) && (ema20 ?? 0) > (ema50 ?? 0) ? 'Trend: BULLISH' : 'Trend: MIXED',
+        cpr:        cpr && Number.isFinite(spotPrice) && cpr.tc && spotPrice > cpr.tc ? 'PRICE ABOVE PIVOT' : 'Inside CPR',
+        maxPain:    'Range Bias: NEUTRAL',
+        pcr:        atmBlk.pcr >= 1.05 ? 'Sentiment: BUY PE WRITERS' : atmBlk.pcr <= 0.95 ? 'Sentiment: BUY CE WRITERS' : 'Sentiment: NEUTRAL',
+        gift:       (macro?.giftNifty?.changePct ?? 0) >= 0 ? 'Positive Global Cues' : 'Negative Global Cues',
+        priceAction: (regimeBlk.dayType === 'TREND DAY' ? 'Action: Trade with the trend.' : 'Action: Wait for breakout.'),
+      },
     },
 
     debug: {

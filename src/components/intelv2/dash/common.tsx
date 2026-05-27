@@ -153,3 +153,31 @@ export function V2Stat({
     </div>
   );
 }
+
+// ── Card hint footer (the "Interpretation: ..." bar each card carries) ──
+export function V2Hint({
+  label = "Interpretation",
+  text,
+  tone = "info",
+}: {
+  label?: string;
+  text: ReactNode;
+  tone?: V2ToneKey;
+}) {
+  if (!text) return null;
+  const t = V2_TONE[tone];
+  return (
+    <div
+      className="mt-auto flex items-start gap-1.5 rounded-sm border border-white/[0.05] px-2.5 py-1.5"
+      style={{ background: t.soft }}
+    >
+      <span
+        className="shrink-0 text-[9px] font-bold uppercase tracking-[0.14em]"
+        style={{ color: t.color }}
+      >
+        {label}:
+      </span>
+      <span className="text-[11px] leading-tight text-white/85">{text}</span>
+    </div>
+  );
+}

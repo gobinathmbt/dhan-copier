@@ -21,7 +21,7 @@ export function Row5NoTradeEngine({ data }: { data: IntelV2Snapshot | null }) {
   const result = nt?.result || "—";
 
   return (
-    <div className="grid h-[140px] grid-cols-12 gap-2">
+    <div className="grid h-[200px] grid-cols-12 gap-2">
       <V2Card className="col-span-9" title="5 — Auto No-Trade Conditions">
         <div className="grid grid-cols-8 gap-1.5 px-1">
           {(nt?.conditions || []).map((c) => {

@@ -36,7 +36,7 @@ export function Row1MasterDecision({ data }: { data: IntelV2Snapshot | null }) {
   const sw = data?.dashboard?.statusWidgets;
 
   return (
-    <div className="grid h-[150px] grid-cols-8 gap-2">
+    <div className="grid h-[200px] grid-cols-8 gap-2">
       {ORDER.map((k) => {
         const w = sw?.[k] as { label?: string; tone?: string; sub?: string; score?: number; key?: string } | undefined;
         const Icon = ICONS[k] || TrendingUp;
