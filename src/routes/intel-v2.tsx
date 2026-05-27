@@ -28,10 +28,10 @@ function IntelV2Page() {
   const [date, setDate]     = useState<string | null>(null);
   const [availableDates, setAvailableDates] = useState<string[]>([]);
 
-  const { data } = useIntelV2Snapshot({
+  const { data, loading, refetch, lastFetchAt } = useIntelV2Snapshot({
     symbol,
     date,
-    intervalMs: 2000,
+    intervalMs: 3000,
   });
 
   useEffect(() => {
@@ -52,6 +52,9 @@ function IntelV2Page() {
         date={date}
         onDate={setDate}
         availableDates={availableDates}
+        loading={loading}
+        lastFetchAt={lastFetchAt}
+        onRefresh={refetch}
       />
 
       <main className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto p-2.5">

@@ -34,7 +34,11 @@ const YAHOO_API = 'https://query1.finance.yahoo.com/v8/finance/chart';
 
 // ── Caches ────────────────────────────────────────────────────────────────
 const _snapshotCache = new Map();   // key: symbol|date → { at, payload }
-const SNAPSHOT_CACHE_MS = 1500;
+// Live mode polls every 3s from the UI; cache slightly under that so each
+// poll picks up fresh data without hammering the API. Historical mode
+// re-uses the cached payload across rapid re-renders.
+const SNAPSHOT_CACHE_MS_LIVE = 800;
+const SNAPSHOT_CACHE_MS_HIST = 60_000;
 
 const _macroCache = { at: 0, data: null };
 const MACRO_CACHE_MS = 60_000;
@@ -243,7 +247,7 @@ function _readCandlesFile(date, symbolKey, kind /* 'candles'|'futures' */, tf /*
   const file = path.join(_folderFor(date, symbolKey), `${kind}-${tf}.jsonl`);
   const rows = _readJsonl(file);
   // Normalize to { timestamp, open, high, low, close, volume }
-  return rows.map(r => ({
+  const all = rows.map(r => ({
     timestamp: Number(r.t || r.time || r.timestamp || 0),
     open:  _safe(r.o ?? r.open),
     high:  _safe(r.h ?? r.high),
@@ -251,7 +255,53 @@ function _readCandlesFile(date, symbolKey, kind /* 'candles'|'futures' */, tf /*
     close: _safe(r.c ?? r.close),
     volume: _safe(r.v ?? r.volume),
   })).filter(c => Number.isFinite(c.timestamp) && c.timestamp > 0);
+  // Spot-side files use the index range; futures roughly track spot, so
+  // same expected range applies (futures premium is sub-1% of price).
+  const expected = _EXPECTED_RANGE[symbolKey] || null;
+  return _sanitiseCandles(all, expected);
 }
+
+/**
+ * Drop candles that are clearly from a different symbol (e.g. multi-symbol
+ * session switches that leaked NIFTY ticks into the SENSEX folder).
+ *
+ * Validation strategy:
+ *   1. Compute the median close of the file.
+ *   2. If `expectedRange` is provided, ensure the median falls inside it. If
+ *      not, the entire file is from the wrong symbol → reject everything.
+ *   3. Drop individual outliers within ±30% of the (validated) median.
+ */
+function _sanitiseCandles(rows, expectedRange = null) {
+  if (!Array.isArray(rows) || rows.length < 5) return rows;
+  const closes = rows.map(c => c.close).filter(Number.isFinite).sort((a, b) => a - b);
+  if (!closes.length) return rows;
+  const median = closes[Math.floor(closes.length / 2)];
+  if (!median) return rows;
+
+  // If we know roughly what range the symbol trades in, refuse data that
+  // sits entirely outside that range — that's another symbol's data
+  // mislabelled into this symbol's folder.
+  if (expectedRange && (median < expectedRange[0] || median > expectedRange[1])) {
+    // Try filtering to the expected range — maybe SOME rows are correct.
+    const inRange = rows.filter(c =>
+      Number.isFinite(c.close) && c.close >= expectedRange[0] && c.close <= expectedRange[1]
+    );
+    return inRange.length >= 5 ? inRange : [];
+  }
+
+  const valid = rows.filter(c =>
+    Number.isFinite(c.close) && Math.abs(c.close - median) / median < 0.3
+  );
+  return valid.length >= Math.max(5, rows.length * 0.5) ? valid : rows;
+}
+
+// Expected price range per symbol — used by _sanitiseCandles to reject
+// folder corruption (e.g. NIFTY data mislabelled into a SENSEX folder).
+const _EXPECTED_RANGE = {
+  NIFTY_50:  [10000, 40000],
+  SENSEX:    [40000, 120000],
+  BANKNIFTY: [30000, 80000],
+};
 function _readLatestOptionChain(date, symbolKey) {
   const file = path.join(_folderFor(date, symbolKey), 'option-chain.jsonl');
   const rows = _readJsonl(file);
@@ -527,11 +577,22 @@ async function _loadOptionChain(authKey, sym, date, isToday) {
         buildup: s.pe?.buildup || null,
       },
     }));
+    const expDate = folderRow.expiry || null;
+    let dte = null;
+    if (expDate) {
+      const [ey, em, ed] = expDate.split('-').map(Number);
+      const exp = Date.UTC(ey, em - 1, ed);
+      const [ry, rm, rd] = date.split('-').map(Number);
+      const ref = Date.UTC(ry, rm - 1, rd);
+      dte = Math.max(0, Math.round((exp - ref) / (24 * 3600 * 1000)));
+    }
     return {
       source: 'live-feed-folder',
       atm: Number(folderRow.atm),
       spot: Number(folderRow.spot),
-      expiry: folderRow.expiry,
+      expiry: expDate,
+      expiryDate: expDate,
+      daysToExpiry: dte,
       strikes,
     };
   }
@@ -571,7 +632,7 @@ async function _loadOptionChain(authKey, sym, date, isToday) {
  */
 async function _loadPriorDayOHLC(authKey, sym, date) {
   const prevDate = _previousTradingDay(date);
-  // prefer folder
+  // prefer folder (already sanitised in _readCandlesFile)
   const c5 = _readCandlesFile(prevDate, sym.key, 'candles', '5m');
   if (c5.length) {
     const high  = Math.max(...c5.map(c => c.high));
@@ -890,24 +951,36 @@ function _pickBestStrike(side, ladder, atm) {
 }
 
 function _tradePlan(verdict, ladder, atm, marketOpen) {
-  const pickSide = verdict.side === 'CE' || verdict.side === 'PE' ? verdict.side : null;
-  if (!pickSide) {
-    return { action: 'NO_TRADE', reason: 'verdict neutral — wait for clear bias', pick: null };
-  }
+  const pickSide = verdict.side === 'CE' || verdict.side === 'PE'
+    ? verdict.side
+    // Even when verdict is NEUTRAL, surface the strongest CE candidate if
+    // cePct >= pePct (for display); the action is still NO_TRADE.
+    : (verdict.cePct >= verdict.pePct ? 'CE' : 'PE');
+
   const pick = _pickBestStrike(pickSide, ladder, atm);
   if (!pick) {
     return { action: 'NO_TRADE', reason: 'no liquid strike found in ATM ±4', pick: null };
   }
+
   const ltp = pick.leg.ltp;
   const sl = _round(ltp * 0.85, 2);
   const target = _round(ltp * 1.225, 2);
   const slPts = _round(ltp - sl, 2);
   const targetPts = _round(target - ltp, 2);
+
+  const action = !marketOpen
+    ? 'NO_TRADE'
+    : verdict.side === 'CE' || verdict.side === 'PE'
+      ? `BUY_${pickSide}`
+      : 'WAIT';
+  const reason = !marketOpen
+    ? `closed — last session view (${verdict.verdict})`
+    : verdict.side === 'NEUTRAL'
+      ? `verdict neutral — preview ${pickSide} ${pick.row.strike}`
+      : `${verdict.verdict} — ${pickSide} ${pick.row.strike}`;
+
   return {
-    action: marketOpen ? `BUY_${pickSide}` : 'NO_TRADE',
-    reason: marketOpen
-      ? `${verdict.verdict} — ${pickSide} ${pick.row.strike}`
-      : `closed — last session view (${verdict.verdict})`,
+    action, reason,
     pick: {
       side: pickSide,
       strike: pick.row.strike,
@@ -1254,7 +1327,9 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
 
   const cacheKey = `${SYMBOL}|${DATE}`;
   const cached = _snapshotCache.get(cacheKey);
-  if (cached && Date.now() - cached.at < SNAPSHOT_CACHE_MS) return cached.payload;
+  const isTodayCheck = DATE === today;
+  const cacheTtl = isTodayCheck ? SNAPSHOT_CACHE_MS_LIVE : SNAPSHOT_CACHE_MS_HIST;
+  if (cached && Date.now() - cached.at < cacheTtl) return cached.payload;
 
   const isToday = DATE === today;
   // marketHours.isMarketOpen() returns { open: bool, ... }
@@ -1296,16 +1371,40 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
   const atrVal = _atr(c5m, 14);
   const rsi14  = _rsi(closes, 14);
 
-  const dayHigh = c1m.length ? Math.max(...c1m.map(c => c.high)) : 0;
-  const dayLow  = c1m.length ? Math.min(...c1m.map(c => c.low).filter(Number.isFinite))  : 0;
+  let dayHigh = c1m.length ? Math.max(...c1m.map(c => c.high)) : 0;
+  let dayLow  = c1m.length ? Math.min(...c1m.map(c => c.low).filter(Number.isFinite))  : 0;
 
   // ── Prior-day OHLC + CPR ─────────────────────────────────────────────
   const priorDay = await _loadPriorDayOHLC(authKey, sym, usedDate);
   const cpr = _cprFromOHLC(priorDay);
 
   // ── Spot ─────────────────────────────────────────────────────────────
-  const spotPrice = _safe(last.close);
+  // Prefer the live WebSocket tick when market is open — the last 1m candle
+  // close lags up to 60s behind the live price. The recorder writes the
+  // 1m candle only when the bar finishes, so during the open bar the chart
+  // and dashboard would display a stale price unless we read the tick.
+  let spotPrice = _safe(last.close);
+  let liveTickAge = null;
+  if (marketOpen) {
+    try {
+      const { instance: liveFeedProd } = require('./dhanLiveFeedProd.service');
+      const tick = liveFeedProd.getTick(sym.indexSegment, sym.indexSecurityId);
+      if (tick && Number.isFinite(tick.ltp) && tick.ltp > 0) {
+        liveTickAge = Date.now() - (tick.updatedAt || Date.now());
+        // Only use the tick if it's fresher than 5 seconds. Otherwise the WS
+        // is stale (reconnecting) and the candle close is the safer bet.
+        if (liveTickAge <= 5000) {
+          spotPrice = _safe(tick.ltp);
+        }
+      }
+    } catch (_) {}
+  }
   const priorClose = _safe(priorDay?.close, c1m[c1m.length - 2]?.close);
+  // Update day-high / day-low if the live tick has broken the candle range.
+  if (Number.isFinite(spotPrice) && spotPrice > 0) {
+    if (dayHigh && spotPrice > dayHigh) dayHigh = spotPrice;
+    if (dayLow && spotPrice < dayLow)   dayLow  = spotPrice;
+  }
   const spotChange = priorClose ? _round(spotPrice - priorClose, 2) : 0;
   const spotChangePct = priorClose ? _round((spotPrice - priorClose) / priorClose * 100, 2) : 0;
 
@@ -1327,13 +1426,43 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
 
   // ── Futures premium ──────────────────────────────────────────────────
   const futLast = f1m[f1m.length - 1];
-  const futLtp = _safe(futLast?.close);
-  const futPremium = (futLtp && spotPrice) ? _round(futLtp - spotPrice, 2) : null;
+  let futLtp = _safe(futLast?.close);
 
-  // ── Macro context (only when today/live) ─────────────────────────────
-  const wantMacro = isToday;
+  // For NIFTY, prefer the live near-month futures tick over the last 1m
+  // candle close (same staleness fix as spot).
+  if (marketOpen && sym.futuresUnderlying === 'NIFTY') {
+    try {
+      const niftyFut = require('./niftyFuturesProd.service');
+      if (typeof niftyFut.getLiveTick === 'function') {
+        const ft = await niftyFut.getLiveTick().catch(() => null);
+        if (ft && Number.isFinite(ft.ltp) && ft.ltp > 0) {
+          const age = Date.now() - (ft.updatedAt || Date.now());
+          if (age <= 5000) futLtp = _safe(ft.ltp);
+        }
+      }
+    } catch (_) {}
+  }
+
+  let futPremium = (futLtp && spotPrice) ? _round(futLtp - spotPrice, 2) : null;
+
+  // SENSEX (and any other symbol without a working futures candle source)
+  // → derive an implied premium from put-call parity at the ATM:
+  //   Forward = Strike + Call_LTP − Put_LTP   (rough; ignores PV(div))
+  //   Premium = Forward − Spot
+  if (futPremium == null && atmBlk?.atmCall && atmBlk?.atmPut && Number.isFinite(atmBlk?.atmRow?.strike)) {
+    const ce = _safe(atmBlk.atmCall.ltp);
+    const pe = _safe(atmBlk.atmPut.ltp);
+    const k  = _safe(atmBlk.atmRow.strike);
+    if (ce > 0 && pe > 0 && k > 0 && Number.isFinite(spotPrice)) {
+      const forward = k + ce - pe;
+      futPremium = _round(forward - spotPrice, 2);
+    }
+  }
+
+  // ── Macro context — always fetched (60s cache); historical view still
+  //    shows live VIX/GIFT/FII/DII for context.
   const [macro, heavy, fullBreadth] = await Promise.all([
-    wantMacro ? _macroContext().catch(() => null) : Promise.resolve(null),
+    _macroContext().catch(() => null),
     _heavyweights(SYMBOL, isToday ? today : usedDate).catch(() => null),
     _fullBreadth(SYMBOL, isToday ? today : usedDate).catch(() => null),
   ]);
@@ -1473,51 +1602,82 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
     };
   })();
 
-  // ── Buyer / Seller Flow (CE & PE side) — driven by OI ΔΔ around ATM ──
+  // ── Buyer / Seller Flow (CE & PE side) — buildup-tag weighted volume ──
   const buyerSellerFlow = (() => {
     if (!atm || !strikes?.length) {
       return {
-        ce: { net: 0, label: 'unknown', buyersPct: 50, sellersPct: 50, buyersAbs: 0 },
-        pe: { net: 0, label: 'unknown', buyersPct: 50, sellersPct: 50, buyersAbs: 0 },
+        ce: { net: 0, label: '—', buyersPct: 50, sellersPct: 50, buyersAbs: 0, sellersAbs: 0 },
+        pe: { net: 0, label: '—', buyersPct: 50, sellersPct: 50, buyersAbs: 0, sellersAbs: 0 },
       };
     }
-    // Sum signed OI Δ across ATM ± 4
+    // Take ATM ± 4 — narrower than ATM ± 5 to avoid skew from deep OTM dust.
     const sorted = [...strikes].sort((a, b) => a.strike - b.strike);
     const idx = sorted.findIndex(s => s.strike === atm);
     const start = Math.max(0, idx - 4);
     const end   = Math.min(sorted.length, idx + 5);
-    let ceNet = 0, peNet = 0;
+
+    // Tag weights — split each leg's volume into buy / sell shares.
+    // Avoids 0%/100% extremes you get with hard binary splits.
+    //   buyShare + sellShare = 1.0
+    const TAG_W = {
+      'Long Buildup':  { buy: 0.80, sell: 0.20 }, // longs winning
+      'Long Unwinding':{ buy: 0.35, sell: 0.65 }, // longs exiting → bearish for that leg
+      'Short Buildup': { buy: 0.20, sell: 0.80 }, // sellers winning
+      'Short Covering':{ buy: 0.65, sell: 0.35 }, // shorts exiting → bullish for that leg
+      'Balanced':      { buy: 0.50, sell: 0.50 },
+    };
+
+    function flowFor(leg, side /* 'CE'|'PE' */) {
+      const vol = _safe(leg?.volume ?? leg?.vol);
+      const oiChg = _safe(leg?.oiChange ?? leg?.oiChg);
+      let weights = null;
+      const tag = leg?.buildup || null;
+      if (tag && TAG_W[tag]) weights = TAG_W[tag];
+
+      // Fallback heuristic when no buildup tag — derive from OI Δ direction
+      // and intraday spot direction.
+      if (!weights) {
+        const up = (spotChange ?? 0) >= 0;
+        if (side === 'CE') {
+          if (oiChg > 0 && up)        weights = TAG_W['Long Buildup'];
+          else if (oiChg < 0 && !up)  weights = TAG_W['Long Unwinding'];
+          else if (oiChg > 0 && !up)  weights = TAG_W['Short Buildup'];
+          else                        weights = TAG_W['Short Covering'];
+        } else {
+          // PE side: long buildup happens when index is FALLING (puts bought)
+          if (oiChg > 0 && !up)       weights = TAG_W['Long Buildup'];
+          else if (oiChg < 0 && up)   weights = TAG_W['Long Unwinding'];
+          else if (oiChg > 0 && up)   weights = TAG_W['Short Buildup'];
+          else                        weights = TAG_W['Short Covering'];
+        }
+      }
+      return { buy: vol * weights.buy, sell: vol * weights.sell };
+    }
+
     let ceBuy = 0, ceSell = 0, peBuy = 0, peSell = 0;
     for (const s of sorted.slice(start, end)) {
-      const ce = _safe(s.call?.oiChange ?? s.ce?.oiChg ?? s.ce?.oiChange);
-      const pe = _safe(s.put?.oiChange  ?? s.pe?.oiChg ?? s.pe?.oiChange);
-      // CE writers (positive Δ) = bearish for CE BUYERS but seller-flow on CE side.
-      // For "Buyer Dominance on CE" we want CE-LONG demand: positive demand
-      // ≈ CE unwinding (negative Δ) + ATM CE volume. Use abs of Δ × dir as proxy.
-      ceNet += ce;
-      peNet += pe;
-      if (ce > 0) ceSell += ce; else ceBuy += -ce;
-      if (pe > 0) peSell += pe; else peBuy += -pe;
+      const ceLeg = s.call || s.ce || {};
+      const peLeg = s.put  || s.pe || {};
+      const cf = flowFor(ceLeg, 'CE');
+      const pf = flowFor(peLeg, 'PE');
+      ceBuy += cf.buy; ceSell += cf.sell;
+      peBuy += pf.buy; peSell += pf.sell;
     }
     const ceTotal = ceBuy + ceSell || 1;
     const peTotal = peBuy + peSell || 1;
     const ceBuyersPct = Math.round((ceBuy / ceTotal) * 100);
     const peBuyersPct = Math.round((peBuy / peTotal) * 100);
+    const ceNet = ceBuy - ceSell;
+    const peNet = peBuy - peSell;
+
+    const labelOf = (pct) =>
+      pct >= 60 ? 'Buyers Dominant'
+      : pct <= 40 ? 'Sellers Dominant'
+      : 'Balanced Flow';
+
     return {
-      ce: {
-        net: ceNet,
-        label: ceBuyersPct >= 55 ? 'Buyers Dominant' : ceBuyersPct <= 45 ? 'Sellers Dominant' : 'Balanced',
-        buyersPct: ceBuyersPct,
-        sellersPct: 100 - ceBuyersPct,
-        buyersAbs: ceBuy,
-      },
-      pe: {
-        net: peNet,
-        label: peBuyersPct >= 55 ? 'Buyers Dominant' : peBuyersPct <= 45 ? 'Sellers Dominant' : 'Balanced',
-        buyersPct: peBuyersPct,
-        sellersPct: 100 - peBuyersPct,
-        buyersAbs: peBuy,
-      },
+      ce: { net: ceNet, label: labelOf(ceBuyersPct), buyersPct: ceBuyersPct, sellersPct: 100 - ceBuyersPct, buyersAbs: ceBuy, sellersAbs: ceSell },
+      pe: { net: peNet, label: labelOf(peBuyersPct), buyersPct: peBuyersPct, sellersPct: 100 - peBuyersPct, buyersAbs: peBuy, sellersAbs: peSell },
     };
   })();
 
@@ -1611,9 +1771,11 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
 
   // ── Enriched FRVP Institutional Map (Row 2 card) ─────────────────────
   const frvpInstitutional = (() => {
-    const buyersEntering  = buyerSellerFlow.ce.buyersPct;
+    // Buyers panel = avg of CE-buyers + PE-buyers (both legs view).
+    // Sellers panel = avg of CE-sellers + PE-sellers.
+    const buyersEntering  = Math.round((buyerSellerFlow.ce.buyersPct + buyerSellerFlow.pe.buyersPct) / 2);
     const buyersLeaving   = 100 - buyersEntering;
-    const sellersEntering = buyerSellerFlow.pe.sellersPct;
+    const sellersEntering = Math.round((buyerSellerFlow.ce.sellersPct + buyerSellerFlow.pe.sellersPct) / 2);
     const sellersLeaving  = 100 - sellersEntering;
     const insideValue = (vp && Number.isFinite(spotPrice) && spotPrice >= vp.val && spotPrice <= vp.vah) ? 'YES' : 'NO';
     const outsideValue = insideValue === 'NO' ? 'YES' : 'NO';
@@ -1705,8 +1867,8 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
     actualDate: usedDate,
     fallbackUsed: usedFallback,
     expiry: oc?.expiry || null,
-    expiryDate: oc?.expiryDate || null,
-    daysToExpiry: oc?.daysToExpiry || null,
+    expiryDate: oc?.expiryDate || oc?.expiry || null,
+    daysToExpiry: oc?.daysToExpiry ?? null,
     lotSize,
   };
 
@@ -1795,6 +1957,10 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
       vwap, ema9, ema20, ema50,
       atr: atrVal, rsi: rsi14,
       sessionAvwap, priorAvwap,
+      // Was the live WebSocket tick used to derive `ltp` (instead of the
+      // last 1m candle close)? Useful for debugging staleness in the UI.
+      live: liveTickAge != null && liveTickAge <= 5000,
+      liveTickAgeMs: liveTickAge,
     },
     futures: {
       ltp: futLtp,

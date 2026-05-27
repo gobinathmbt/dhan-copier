@@ -125,6 +125,8 @@ export interface IntelV2Snapshot {
     rsi: number | null;
     sessionAvwap: number | null;
     priorAvwap: number | null;
+    live?: boolean;
+    liveTickAgeMs?: number | null;
   };
 
   futures: {

@@ -1,5 +1,5 @@
 import type { IntelV2Snapshot, IntelV2Symbol } from "@/lib/intelV2Types";
-import { Activity, Calendar, ChevronLeft, ChevronRight } from "lucide-react";
+import { Activity, Calendar, ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 import { v2Fmt, v2FmtSigned, V2Pill } from "./common";
 import { cn } from "@/lib/utils";
 import { useEffect, useState } from "react";
@@ -11,6 +11,9 @@ interface TopHeaderV2Props {
   date: string | null;
   onDate: (d: string | null) => void;
   availableDates: string[];
+  loading?: boolean;
+  lastFetchAt?: number | null;
+  onRefresh?: () => void | Promise<void>;
 }
 
 function todayIST(): string {
@@ -18,7 +21,14 @@ function todayIST(): string {
   return `${ist.getUTCFullYear()}-${String(ist.getUTCMonth() + 1).padStart(2, "0")}-${String(ist.getUTCDate()).padStart(2, "0")}`;
 }
 
-export function TopHeaderV2({ data, symbol, onSymbol, date, onDate, availableDates }: TopHeaderV2Props) {
+function secondsAgo(now: Date, ts: number): number {
+  return Math.max(0, Math.floor((now.getTime() - ts) / 1000));
+}
+
+export function TopHeaderV2({
+  data, symbol, onSymbol, date, onDate, availableDates,
+  loading = false, lastFetchAt = null, onRefresh,
+}: TopHeaderV2Props) {
   const [now, setNow] = useState(new Date());
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 1000);
@@ -97,6 +107,7 @@ export function TopHeaderV2({ data, symbol, onSymbol, date, onDate, availableDat
           value={v2Fmt(data?.spot.ltp, 2)}
           changeAbs={spotChange}
           changePct={spotPct}
+          live={!!data?.spot.live}
         />
         <Quote
           label={symbol === "SENSEX" ? "Sensex Fut" : "Nifty Fut"}
@@ -117,7 +128,7 @@ export function TopHeaderV2({ data, symbol, onSymbol, date, onDate, availableDat
         />
       </div>
 
-      {/* RIGHT — Date picker, time, status */}
+      {/* RIGHT — Date picker, refresh, time, status */}
       <div className="flex items-center gap-3">
         <div className="flex items-center gap-1 rounded-md border border-white/[0.07] bg-white/[0.03] px-2 py-1.5">
           <button
@@ -158,6 +169,30 @@ export function TopHeaderV2({ data, symbol, onSymbol, date, onDate, availableDat
           </button>
         </div>
 
+        {/* Refresh button + last-updated indicator */}
+        <div className="flex items-center gap-1.5 rounded-md border border-white/[0.07] bg-white/[0.03] px-2 py-1.5">
+          <button
+            onClick={() => onRefresh?.()}
+            disabled={loading}
+            className={cn(
+              "rounded p-0.5 transition-colors",
+              loading ? "text-emerald-300" : "text-white/65 hover:bg-white/10 hover:text-white",
+              "disabled:opacity-60",
+            )}
+            title="Refresh now"
+          >
+            <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
+          </button>
+          <span className="font-mono text-[10px] text-white/55 min-w-[58px] text-center">
+            {lastFetchAt ? `${secondsAgo(now, lastFetchAt)}s ago` : "—"}
+          </span>
+          <V2Pill
+            label={showLive ? "AUTO 3s" : "STATIC"}
+            tone={showLive ? "bull" : "neutral"}
+            size="xs"
+          />
+        </div>
+
         <div className="flex flex-col items-end">
           <V2Pill
             label={data?.market.isOpen ? "OPEN" : "CLOSED"}
@@ -172,7 +207,7 @@ export function TopHeaderV2({ data, symbol, onSymbol, date, onDate, availableDat
 }
 
 function Quote({
-  label, value, changeAbs, changePct, tone, subText,
+  label, value, changeAbs, changePct, tone, subText, live,
 }: {
   label: string;
   value: string;
@@ -180,6 +215,7 @@ function Quote({
   changePct?: number | null;
   tone?: "bull" | "bear" | "neutral";
   subText?: string;
+  live?: boolean;
 }) {
   const c = changeAbs ?? changePct ?? 0;
   const positive = c >= 0;
@@ -188,7 +224,15 @@ function Quote({
     : positive ? "text-emerald-400" : "text-rose-400";
   return (
     <div className="flex flex-col items-center">
-      <span className="text-[10px] uppercase tracking-[0.14em] text-white/55">{label}</span>
+      <span className="flex items-center gap-1 text-[10px] uppercase tracking-[0.14em] text-white/55">
+        {label}
+        {live ? (
+          <span
+            className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(34,197,94,0.8)]"
+            title="Live WebSocket tick"
+          />
+        ) : null}
+      </span>
       <span className="font-mono text-[18px] font-bold text-white">{value}</span>
       <span className={cn("font-mono text-[11px]", tColor)}>
         {changeAbs != null ? v2FmtSigned(changeAbs, 2) : ""}
