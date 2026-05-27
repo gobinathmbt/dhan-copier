@@ -14,6 +14,7 @@ import { Route as ScalpingRouteImport } from './routes/scalping'
 import { Route as Nifty50RouteImport } from './routes/nifty50'
 import { Route as LogsRouteImport } from './routes/logs'
 import { Route as LoginRouteImport } from './routes/login'
+import { Route as IntelV2RouteImport } from './routes/intel-v2'
 import { Route as IntelRouteImport } from './routes/intel'
 import { Route as CustomChartRouteImport } from './routes/custom-chart'
 import { Route as ChartRouteImport } from './routes/chart'
@@ -45,6 +46,11 @@ const LogsRoute = LogsRouteImport.update({
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const IntelV2Route = IntelV2RouteImport.update({
+  id: '/intel-v2',
+  path: '/intel-v2',
   getParentRoute: () => rootRouteImport,
 } as any)
 const IntelRoute = IntelRouteImport.update({
@@ -89,6 +95,7 @@ export interface FileRoutesByFullPath {
   '/chart': typeof ChartRoute
   '/custom-chart': typeof CustomChartRoute
   '/intel': typeof IntelRoute
+  '/intel-v2': typeof IntelV2Route
   '/login': typeof LoginRoute
   '/logs': typeof LogsRoute
   '/nifty50': typeof Nifty50RouteWithChildren
@@ -103,6 +110,7 @@ export interface FileRoutesByTo {
   '/chart': typeof ChartRoute
   '/custom-chart': typeof CustomChartRoute
   '/intel': typeof IntelRoute
+  '/intel-v2': typeof IntelV2Route
   '/login': typeof LoginRoute
   '/logs': typeof LogsRoute
   '/nifty50': typeof Nifty50RouteWithChildren
@@ -118,6 +126,7 @@ export interface FileRoutesById {
   '/chart': typeof ChartRoute
   '/custom-chart': typeof CustomChartRoute
   '/intel': typeof IntelRoute
+  '/intel-v2': typeof IntelV2Route
   '/login': typeof LoginRoute
   '/logs': typeof LogsRoute
   '/nifty50': typeof Nifty50RouteWithChildren
@@ -134,6 +143,7 @@ export interface FileRouteTypes {
     | '/chart'
     | '/custom-chart'
     | '/intel'
+    | '/intel-v2'
     | '/login'
     | '/logs'
     | '/nifty50'
@@ -148,6 +158,7 @@ export interface FileRouteTypes {
     | '/chart'
     | '/custom-chart'
     | '/intel'
+    | '/intel-v2'
     | '/login'
     | '/logs'
     | '/nifty50'
@@ -162,6 +173,7 @@ export interface FileRouteTypes {
     | '/chart'
     | '/custom-chart'
     | '/intel'
+    | '/intel-v2'
     | '/login'
     | '/logs'
     | '/nifty50'
@@ -177,6 +189,7 @@ export interface RootRouteChildren {
   ChartRoute: typeof ChartRoute
   CustomChartRoute: typeof CustomChartRoute
   IntelRoute: typeof IntelRoute
+  IntelV2Route: typeof IntelV2Route
   LoginRoute: typeof LoginRoute
   LogsRoute: typeof LogsRoute
   Nifty50Route: typeof Nifty50RouteWithChildren
@@ -219,6 +232,13 @@ declare module '@tanstack/react-router' {
       path: '/login'
       fullPath: '/login'
       preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/intel-v2': {
+      id: '/intel-v2'
+      path: '/intel-v2'
+      fullPath: '/intel-v2'
+      preLoaderRoute: typeof IntelV2RouteImport
       parentRoute: typeof rootRouteImport
     }
     '/intel': {
@@ -292,6 +312,7 @@ const rootRouteChildren: RootRouteChildren = {
   ChartRoute: ChartRoute,
   CustomChartRoute: CustomChartRoute,
   IntelRoute: IntelRoute,
+  IntelV2Route: IntelV2Route,
   LoginRoute: LoginRoute,
   LogsRoute: LogsRoute,
   Nifty50Route: Nifty50RouteWithChildren,

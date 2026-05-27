@@ -1,0 +1,68 @@
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
+import { isAuthenticated } from "@/lib/auth";
+import { useIntelV2Snapshot, fetchAvailableDates } from "@/hooks/useIntelV2Snapshot";
+import type { IntelV2Symbol } from "@/lib/intelV2Types";
+
+import { TopHeaderV2 } from "@/components/intelv2/dash/TopHeader";
+import { Row1MasterDecision } from "@/components/intelv2/dash/Row1MasterDecision";
+import { Row2InstitutionalFlow } from "@/components/intelv2/dash/Row2InstitutionalFlow";
+import { Row3ConfirmationLayer } from "@/components/intelv2/dash/Row3ConfirmationLayer";
+import { Row4StructureContext } from "@/components/intelv2/dash/Row4StructureContext";
+import { Row5NoTradeEngine } from "@/components/intelv2/dash/Row5NoTradeEngine";
+import { Row6BottomPanel } from "@/components/intelv2/dash/Row6BottomPanel";
+import { AlertsTickerV2 } from "@/components/intelv2/dash/AlertsTicker";
+
+export const Route = createFileRoute("/intel-v2")({
+  component: IntelV2Page,
+});
+
+function IntelV2Page() {
+  const navigate = useNavigate();
+  useEffect(() => {
+    if (!isAuthenticated()) navigate({ to: "/login" });
+  }, [navigate]);
+
+  const [symbol, setSymbol] = useState<IntelV2Symbol>("NIFTY_50");
+  const [date, setDate]     = useState<string | null>(null);
+  const [availableDates, setAvailableDates] = useState<string[]>([]);
+
+  const { data } = useIntelV2Snapshot({
+    symbol,
+    date,
+    intervalMs: 2000,
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const ds = await fetchAvailableDates(symbol);
+      if (!cancelled) setAvailableDates(ds);
+    })();
+    return () => { cancelled = true; };
+  }, [symbol]);
+
+  return (
+    <div className="fixed inset-0 left-16 flex flex-col bg-[#070a0e] text-white">
+      <TopHeaderV2
+        data={data}
+        symbol={symbol}
+        onSymbol={setSymbol}
+        date={date}
+        onDate={setDate}
+        availableDates={availableDates}
+      />
+
+      <main className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto p-2.5">
+        <Row1MasterDecision data={data} />
+        <Row2InstitutionalFlow data={data} />
+        <Row3ConfirmationLayer data={data} />
+        <Row4StructureContext data={data} />
+        <Row5NoTradeEngine data={data} />
+        <Row6BottomPanel data={data} />
+      </main>
+
+      <AlertsTickerV2 data={data} />
+    </div>
+  );
+}

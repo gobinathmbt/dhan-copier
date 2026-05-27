@@ -1,5 +1,5 @@
 import { Link, useLocation, useNavigate, useRouter } from "@tanstack/react-router";
-import { Activity, LayoutDashboard, LineChart, Users, ScrollText, ClipboardList, TrendingUp, LogOut, Wifi, WifiOff, Target, Brain, Radar } from "lucide-react";
+import { Activity, LayoutDashboard, LineChart, Users, ScrollText, ClipboardList, TrendingUp, LogOut, Wifi, WifiOff, Target, Brain, Radar, Radio } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useModeStore } from "@/stores/mode.store";
 import { clearToken } from "@/lib/auth";
@@ -13,6 +13,7 @@ const NAV_ITEMS = [
   { to: "/custom-chart", label: "Chart", icon: LineChart },
   // { to: "/trade", label: "Order", icon: ClipboardList },
   { to: "/intel", label: "Intel Terminal", icon: Radar },
+  { to: "/intel-v2", label: "Intel V2 Console", icon: Radio },
   { to: "/nifty50", label: "Nifty 50", icon: Target },
   { to: "/scalping", label: "Intraday Scalping Algo AI", icon: Brain },
   { to: "/accounts", label: "Accounts", icon: Users },
