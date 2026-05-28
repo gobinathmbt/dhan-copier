@@ -127,7 +127,7 @@ function SetupCard({
         </div>
 
         {/* Targets */}
-        <div>
+        {/* <div>
           <div className="mb-0.5 text-center text-[8px] font-bold uppercase tracking-[0.18em] text-white/55">
             Targets (Intraday)
           </div>
@@ -136,15 +136,15 @@ function SetupCard({
             <TargetCell label="T2" value={data.targets.t2} accent={accentColor} />
             <TargetCell label="T3" value={data.targets.t3} accent={accentColor} />
           </div>
-        </div>
+        </div> */}
 
         {/* SL */}
-        <div className="rounded-md border border-rose-500/30 bg-rose-500/[0.05] px-2 py-1 text-center">
+        {/* <div className="rounded-md border border-rose-500/30 bg-rose-500/[0.05] px-2 py-1 text-center">
           <div className="text-[8px] font-bold uppercase tracking-[0.18em] text-rose-300">SL (Stop Loss)</div>
           <div className="font-mono text-[12px] font-bold text-rose-400">
             {data.side === "CE" ? "Below" : "Above"} {data.stopLoss.toLocaleString()}
           </div>
-        </div>
+        </div> */}
 
         {/* Why */}
         <div className="rounded-sm bg-white/[0.025] px-2 py-1 text-[9px] text-white/65">

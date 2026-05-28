@@ -4,11 +4,15 @@ import { V2Card, V2Pill, v2Fmt, V2_TONE, V2Hint } from "./common";
 export function Row4StructureContext({ data }: { data: IntelV2Snapshot | null }) {
   return (
     <div className="grid h-[300px] grid-cols-12 gap-2">
-      <div className="col-span-2 min-h-0"><Vwap data={data} /></div>
+      <div className="col-span-3 min-h-0"><Vwap data={data} /></div>
       <div className="col-span-3 min-h-0"><EmaStack data={data} /></div>
-      <div className="col-span-2 min-h-0"><CprDaily data={data} /></div>
-      <div className="col-span-2 min-h-0"><MaxPain data={data} /></div>
-      <div className="col-span-3 min-h-0"><GiftNifty data={data} /></div>
+      <div className="col-span-3 min-h-0"><CprDaily data={data} /></div>
+      <div className="col-span-3 min-h-0"><MaxPain data={data} /></div>
+      {/* 4.6 GIFT Nifty â€” COMMENTED OUT
+          (already shown in Row1 top quote ribbon as one of the 8 institutional
+          quote tiles; rendering it here was duplicate). To re-enable, uncomment
+          the line below and adjust the col-span values above back to 2/3/2/2/3. */}
+      {/* <div className="col-span-3 min-h-0"><GiftNifty data={data} /></div> */}
     </div>
   );
 }

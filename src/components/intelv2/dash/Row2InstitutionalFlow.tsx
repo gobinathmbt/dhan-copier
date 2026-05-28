@@ -11,8 +11,8 @@ export function Row2InstitutionalFlow({ data }: { data: IntelV2Snapshot | null }
   return (
     <div className="flex flex-col gap-2">
       {/* Single tall row â€” 2.2 Combined (Writing Pressure + Market Direction) (60%) +
-          2.5 FRVP Institutional Map (40%) â€” heights extended */}
-      <div className="grid h-[1100px] grid-cols-10 gap-2">
+          2.5 FRVP Institutional Map (40%) */}
+      <div className="grid h-[760px] grid-cols-10 gap-2">
         <div className="col-span-6 min-h-0">
           <CombinedWritingMarketCard data={data} />
         </div>
@@ -21,8 +21,8 @@ export function Row2InstitutionalFlow({ data }: { data: IntelV2Snapshot | null }
         </div>
       </div>
 
-      {/* Below row â€” Support/Resistance Pressure full width (also extended) */}
-      <div className="grid h-[480px] grid-cols-1 gap-2">
+      {/* Below row â€” Support/Resistance Pressure full width */}
+      <div className="grid h-[420px] grid-cols-1 gap-2">
         <div className="min-h-0">
           <SupportResistanceCardV2 data={data} />
         </div>
@@ -89,11 +89,11 @@ function CombinedWritingPressureBody({ data }: { data: IntelV2Snapshot | null })
   const ceTotalPct = ceStrikes.reduce((s, r) => s + Math.max(0, r.oiChangePct), 0);
   const peTotalPct = peStrikes.reduce((s, r) => s + Math.max(0, r.oiChangePct), 0);
   const ceActivity = ceTotalPct >= 250 ? "Aggressive"
-                  : ceTotalPct >= 120 ? "Active"
-                  : ceTotalPct >= 50  ? "Moderate" : "Light";
+    : ceTotalPct >= 120 ? "Active"
+      : ceTotalPct >= 50 ? "Moderate" : "Light";
   const peActivity = peTotalPct >= 250 ? "Aggressive"
-                  : peTotalPct >= 120 ? "Active"
-                  : peTotalPct >= 50  ? "Moderate" : "Light";
+    : peTotalPct >= 120 ? "Active"
+      : peTotalPct >= 50 ? "Moderate" : "Light";
   const ceLo = ceStrikes.length ? Math.min(...ceStrikes.map(r => r.strike)) : null;
   const ceHi = ceStrikes.length ? Math.max(...ceStrikes.map(r => r.strike)) : null;
   const peLo = peStrikes.length ? Math.min(...peStrikes.map(r => r.strike)) : null;
@@ -195,8 +195,8 @@ function CombinedMarketDirectionBody({ data }: { data: IntelV2Snapshot | null })
       <div className="flex flex-col gap-1.5">
         <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-sky-300">OI Estimated Move</span>
         <div className="grid grid-cols-3 gap-2">
+          <CombinedTargetTile label="Upside Target" value={move.upsideTarget} tone="bull" icon="▲" />
           <CombinedTargetTile label="Downside Target" value={move.downsideTarget} tone="bear" icon="▼" />
-          <CombinedTargetTile label="Upside Target"   value={move.upsideTarget}   tone="bull" icon="▲" />
           <div className="flex flex-col items-center justify-center rounded-md border border-amber-500/40 bg-amber-500/[0.06] py-1">
             <span className="text-[9px] font-bold uppercase tracking-[0.16em] text-amber-300">Max Pain</span>
             <span className="font-mono text-[18px] font-black tabular-nums text-amber-300">
@@ -220,9 +220,8 @@ function CombinedLevelRow({
   const t = V2_TONE[tone];
   return (
     <div
-      className={`flex items-center justify-between px-2.5 py-1 text-[12px] ${
-        !first ? "border-t border-white/[0.04]" : ""
-      }`}
+      className={`flex items-center justify-between px-2.5 py-1 text-[12px] ${!first ? "border-t border-white/[0.04]" : ""
+        }`}
     >
       <span className="text-white/75">{label}</span>
       <span className="font-mono text-[13px] font-bold tabular-nums" style={{ color: t.color }}>
@@ -508,11 +507,11 @@ function WritingPressure({ data }: { data: IntelV2Snapshot | null }) {
   const ceTotalPct = ceStrikes.reduce((s, r) => s + Math.max(0, r.oiChangePct), 0);
   const peTotalPct = peStrikes.reduce((s, r) => s + Math.max(0, r.oiChangePct), 0);
   const ceActivity = ceTotalPct >= 250 ? "Aggressive"
-                  : ceTotalPct >= 120 ? "Active"
-                  : ceTotalPct >= 50  ? "Moderate" : "Light";
+    : ceTotalPct >= 120 ? "Active"
+      : ceTotalPct >= 50 ? "Moderate" : "Light";
   const peActivity = peTotalPct >= 250 ? "Aggressive"
-                  : peTotalPct >= 120 ? "Active"
-                  : peTotalPct >= 50  ? "Moderate" : "Light";
+    : peTotalPct >= 120 ? "Active"
+      : peTotalPct >= 50 ? "Moderate" : "Light";
 
   // Resistance / support range â€” min..max strike of the top entries.
   const ceLo = ceStrikes.length ? Math.min(...ceStrikes.map(r => r.strike)) : null;
@@ -618,16 +617,16 @@ function PickCard({ pick, highlighted }: { pick: BestPick | null; highlighted: b
   const accent = isCE ? "#22c55e" : "#ef4444";
   const probColor =
     pick.probability >= 70 ? "#22c55e"
-    : pick.probability >= 60 ? "#84cc16"
-    : pick.probability >= 50 ? "#facc15"
-    : pick.probability >= 40 ? "#f97316"
-    : "#ef4444";
+      : pick.probability >= 60 ? "#84cc16"
+        : pick.probability >= 50 ? "#facc15"
+          : pick.probability >= 40 ? "#f97316"
+            : "#ef4444";
   const actionTone =
     pick.action === "STRONG BUY" ? "bull"
-    : pick.action === "BUY" ? "bull"
-    : pick.action === "CAUTIOUS BUY" ? "warn"
-    : pick.action === "WAIT" ? "warn"
-    : "bear";
+      : pick.action === "BUY" ? "bull"
+        : pick.action === "CAUTIOUS BUY" ? "warn"
+          : pick.action === "WAIT" ? "warn"
+            : "bear";
 
   return (
     <div
@@ -735,14 +734,14 @@ function WritingPanel({
       if (pct >= 50) return "Very Strong";
       if (pct >= 30) return "Strong Resistance";
       if (pct >= 15) return "Resistance";
-      if (pct >= 5)  return "Moderate";
+      if (pct >= 5) return "Moderate";
       if (pct <= -10) return "Unwinding";
       return "Stable";
     } else {
       if (pct >= 50 && position === 0) return "Major Support";
       if (pct >= 30) return "Strong Support";
       if (pct >= 15) return "Immediate Support";
-      if (pct >= 5)  return "Moderate";
+      if (pct >= 5) return "Moderate";
       if (pct <= -10) return "Weakening";
       return "Weak Support";
     }
@@ -873,7 +872,7 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
   // Tone resolution â€” engine drives if available, else legacy fallback
   const verdictTone = e?.interpretation?.tone === "bull" ? "bull"
     : e?.interpretation?.tone === "bear" ? "bear"
-    : e?.interpretation?.tone === "neutral" ? "neutral" : "warn";
+      : e?.interpretation?.tone === "neutral" ? "neutral" : "warn";
 
   // Top-line directional bias (Section 11)
   const dirBias = e?.directionalBias;
@@ -888,7 +887,7 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
 
   // Dominance
   const dom = e?.dominance;
-  const buyersScore  = dom?.buyersScore  ?? Math.round((f.buyers.entering + (100 - f.sellers.entering)) / 2);
+  const buyersScore = dom?.buyersScore ?? Math.round((f.buyers.entering + (100 - f.sellers.entering)) / 2);
   const sellersScore = dom?.sellersScore ?? (100 - buyersScore);
   const domSide = dom?.dominantSide || (buyersScore >= 60 ? "BUYERS" : sellersScore >= 60 ? "SELLERS" : "BALANCED");
   const domTone = domSide === "BUYERS" ? "bull" : domSide === "SELLERS" ? "bear" : "warn";
@@ -919,194 +918,194 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
       }
     >
       <div className="-m-1.5 flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-1.5 pr-2">
-      {/* â”€â”€ TOP STRIP â€” VAH / POC / VAL + gradient bar with marker + Spot status */}
-      <div className="grid grid-cols-[auto_1fr_auto] items-center gap-3">
-        <div className="flex flex-col gap-1 text-[11px]">
-          <Row label="VAH" value={v2Fmt(profile?.vah ?? f.vah, 0)} mono color="#9ca3af" />
-          <Row label="POC" value={v2Fmt(profile?.poc ?? f.poc, 0)} mono color="#facc15" highlight />
-          <Row label="VAL" value={v2Fmt(profile?.val ?? f.val, 0)} mono color="#9ca3af" />
-        </div>
-        <div className="relative flex h-14 flex-col items-stretch justify-center">
-          <div className="mb-1 flex items-center justify-between text-[10px] font-bold uppercase tracking-[0.16em]">
-            <span className="text-emerald-400">CE Zone</span>
-            <span className="text-white/55">
-              {e?.location?.side === "above_value" ? "Above Value"
-                : e?.location?.side === "below_value" ? "Below Value"
-                : e?.location?.nearPOC ? "Near POC"
-                : "Inside Value"}
-            </span>
-            <span className="text-rose-400">PE Zone</span>
+        {/* â”€â”€ TOP STRIP â€” VAH / POC / VAL + gradient bar with marker + Spot status */}
+        <div className="grid grid-cols-[auto_1fr_auto] items-center gap-3">
+          <div className="flex flex-col gap-1 text-[11px]">
+            <Row label="VAH" value={v2Fmt(profile?.vah ?? f.vah, 0)} mono color="#9ca3af" />
+            <Row label="POC" value={v2Fmt(profile?.poc ?? f.poc, 0)} mono color="#facc15" highlight />
+            <Row label="VAL" value={v2Fmt(profile?.val ?? f.val, 0)} mono color="#9ca3af" />
           </div>
-          <div className="relative">
-            <div
-              className="h-2 w-full overflow-hidden rounded-full"
-              style={{
-                background: "linear-gradient(90deg, rgba(34,197,94,0.45) 0%, rgba(34,197,94,0.18) 50%, rgba(239,68,68,0.18) 50%, rgba(239,68,68,0.45) 100%)",
-              }}
-            />
-            <div className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2" style={{ left: markerLeft }}>
-              <div className="flex flex-col items-center">
-                <div className="h-4 w-0.5 bg-white/85" />
-                <div className="h-3 w-3 rounded-full border border-white bg-white shadow" />
-                <div className="h-4 w-0.5 bg-white/85" />
+          <div className="relative flex h-14 flex-col items-stretch justify-center">
+            <div className="mb-1 flex items-center justify-between text-[10px] font-bold uppercase tracking-[0.16em]">
+              <span className="text-emerald-400">CE Zone</span>
+              <span className="text-white/55">
+                {e?.location?.side === "above_value" ? "Above Value"
+                  : e?.location?.side === "below_value" ? "Below Value"
+                    : e?.location?.nearPOC ? "Near POC"
+                      : "Inside Value"}
+              </span>
+              <span className="text-rose-400">PE Zone</span>
+            </div>
+            <div className="relative">
+              <div
+                className="h-2 w-full overflow-hidden rounded-full"
+                style={{
+                  background: "linear-gradient(90deg, rgba(34,197,94,0.45) 0%, rgba(34,197,94,0.18) 50%, rgba(239,68,68,0.18) 50%, rgba(239,68,68,0.45) 100%)",
+                }}
+              />
+              <div className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2" style={{ left: markerLeft }}>
+                <div className="flex flex-col items-center">
+                  <div className="h-4 w-0.5 bg-white/85" />
+                  <div className="h-3 w-3 rounded-full border border-white bg-white shadow" />
+                  <div className="h-4 w-0.5 bg-white/85" />
+                </div>
               </div>
             </div>
           </div>
-        </div>
-        <div className="flex flex-col gap-1 text-[11px]">
-          <Row label="Price" value={v2Fmt(f.price, 2)} mono color="#22c55e" />
-          <Row label="Inside" value={f.insideValue} pillTone={f.insideValue === "YES" ? "bull" : "bear"} />
-          <Row label="Outside" value={f.outsideValue} pillTone={f.outsideValue === "YES" ? "bull" : "bear"} />
-        </div>
-      </div>
-
-      {/* â”€â”€ ACCEPTANCE / REJECTION ribbon â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-      {acc ? (
-        <div className="mt-2 grid grid-cols-2 gap-1.5 text-[10px]">
-          <AcceptTile
-            label={`Above VAH ${profile?.vah ?? f.vah ?? "â€”"}`}
-            accepted={acc.acceptedAboveVAH}
-            rejected={acc.rejectedAboveVAH}
-            bars={acc.consecutiveAbove}
-            volumeSurge={acc.volumeSurgeAbove}
-          />
-          <AcceptTile
-            label={`Below VAL ${profile?.val ?? f.val ?? "â€”"}`}
-            accepted={acc.acceptedBelowVAL}
-            rejected={acc.rejectedBelowVAL}
-            bars={acc.consecutiveBelow}
-            volumeSurge={acc.volumeSurgeBelow}
-          />
-        </div>
-      ) : null}
-
-      {/* â”€â”€ DIRECTIONAL BIAS for option buyers â€” promoted ABOVE the dominance row â”€ */}
-      {dirBias ? (
-        <div
-          className="mt-2 flex flex-col gap-0.5 rounded-sm border px-2.5 py-1.5"
-          style={{ borderColor: `${biasColor}55`, background: `${biasColor}10` }}
-        >
-          <div className="flex items-center justify-between text-[12px]">
-            <span className="flex items-center gap-2 font-bold uppercase tracking-[0.14em]" style={{ color: biasColor }}>
-              {dirBias.side === "CE" ? `BUY CE ${dirBias.targetStrike ?? ""}`
-               : dirBias.side === "PE" ? `BUY PE ${dirBias.targetStrike ?? ""}`
-               : "WAIT"}
-              <V2Pill label={dirBias.strength} tone={biasTone as "bull" | "bear" | "warn"} size="xs" />
-            </span>
-            <span className="text-[10px] text-white/65">{dirBias.reason}</span>
+          <div className="flex flex-col gap-1 text-[11px]">
+            <Row label="Price" value={v2Fmt(f.price, 2)} mono color="#22c55e" />
+            <Row label="Inside" value={f.insideValue} pillTone={f.insideValue === "YES" ? "bull" : "bear"} />
+            <Row label="Outside" value={f.outsideValue} pillTone={f.outsideValue === "YES" ? "bull" : "bear"} />
           </div>
         </div>
-      ) : null}
 
-      {/* â”€â”€ BUYERS / SELLERS / PARTICIPATION grid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-      <div className="mt-2 grid grid-cols-3 gap-2 text-[11px]">
-        <div className="rounded-sm border border-emerald-500/20 bg-emerald-500/[0.04] px-2 py-1.5">
-          <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-emerald-400">BUYERS</div>
-          <CompactPair label="Entering" value={`${f.buyers.entering}%`} valueColor="#22c55e" />
-          <CompactPair label="CE Side"  value={`${ceBuyersPct.toFixed(0)}%`} valueColor="#22c55e" />
-          {e?.flow?.dominantCeBuyStrike != null ? (
-            <CompactPair label="CE Strike" value={String(e.flow.dominantCeBuyStrike)} valueColor="#22c55e" />
-          ) : null}
-        </div>
-        <div className="rounded-sm border border-rose-500/20 bg-rose-500/[0.04] px-2 py-1.5">
-          <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-rose-400">SELLERS</div>
-          <CompactPair label="Entering" value={`${f.sellers.entering}%`} valueColor="#ef4444" />
-          <CompactPair label="PE Side"  value={`${peBuyersPct.toFixed(0)}%`} valueColor="#ef4444" />
-          {e?.flow?.dominantPeBuyStrike != null ? (
-            <CompactPair label="PE Strike" value={String(e.flow.dominantPeBuyStrike)} valueColor="#ef4444" />
-          ) : null}
-        </div>
-        <div className="rounded-sm border border-sky-500/20 bg-sky-500/[0.04] px-2 py-1.5">
-          <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-sky-300">PARTICIPATION</div>
-          <CompactPair label="Strike" value={f.participationStrike?.toString() || "â€”"} valueColor="#fff" />
-          <CompactPair
-            label="Strength"
-            value={profile ? `${profile.profileStrength.toFixed(0)}%` : f.participationLevel || "â€”"}
-            valueColor={profile ? (profile.profileStrength >= 35 ? "#22c55e" : profile.profileStrength <= 15 ? "#ef4444" : "#facc15") : "#facc15"}
-          />
-          {advanced?.gammaWall ? (
-            <CompactPair label="Î³ Wall" value={String(advanced.gammaWall.strike)} valueColor="#a855f7" />
-          ) : null}
-        </div>
-      </div>
-
-      {/* â”€â”€ DOMINANCE METER â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-      <div className="mt-2 flex flex-col gap-1.5 rounded-sm border border-white/[0.06] bg-white/[0.03] px-2.5 py-2">
-        <div className="flex items-center justify-between text-[11px]">
-          <span className="font-bold uppercase tracking-wider" style={{ color: domColor }}>
-            {domSide === "BUYERS" ? `BUYERS DOMINATING${e?.flow?.dominantCeBuyStrike != null ? ` (CE ${e.flow.dominantCeBuyStrike})` : ""}`
-             : domSide === "SELLERS" ? `SELLERS DOMINATING${e?.flow?.dominantPeBuyStrike != null ? ` (PE ${e.flow.dominantPeBuyStrike})` : ""}`
-             : "BALANCED FLOW"}
-          </span>
-          <span className="flex items-center gap-1.5 font-mono font-bold tabular-nums" style={{ color: domColor }}>
-            {Math.round(Math.max(buyersScore, sellersScore))}%
-            {dom?.conviction === "high"
-              ? <span className="rounded-sm bg-emerald-500/20 px-1.5 py-0.5 text-[9px] tracking-wider text-emerald-300">CONFIRMED</span>
-              : dom?.conviction === "divergent"
-                ? <span className="rounded-sm bg-amber-500/20 px-1.5 py-0.5 text-[9px] tracking-wider text-amber-300">DIVERGENT</span>
-                : null}
-          </span>
-        </div>
-        <div className="flex h-2 overflow-hidden rounded-full bg-white/[0.06]">
-          <div className="h-full bg-emerald-500/80" style={{ width: `${buyersScore}%` }} />
-          <div className="h-full bg-rose-500/80" style={{ width: `${sellersScore}%` }} />
-        </div>
-        <div className="flex items-center justify-between text-[10px]">
-          <span className="text-emerald-400">Buyers {Math.round(buyersScore)}%</span>
-          <span className="text-white/45 font-mono">
-            Î” {e?.delta?.deltaPct != null ? `${e.delta.deltaPct >= 0 ? "+" : ""}${e.delta.deltaPct.toFixed(1)}%` : "â€”"}
-          </span>
-          <span className="text-rose-400">Sellers {Math.round(sellersScore)}%</span>
-        </div>
-        <div className="text-center text-[9px] uppercase tracking-[0.18em] text-white/35">
-          Buyer Dominant Flow Estimate Â· Not Orderbook Tape
-        </div>
-      </div>
-
-      {/* â”€â”€ ADVANCED OVERLAYS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-      {advanced ? (
-        <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px]">
-          {advanced.gammaWall ? (
-            <Badge label="Gamma Wall" value={String(advanced.gammaWall.strike)} tone="purple" />
-          ) : null}
-          {advanced.premiumVel ? (
-            <Badge
-              label="Premium"
-              value={advanced.premiumVel.state.replace("_", " ")}
-              tone={advanced.premiumVel.state === "CE_EXPANDING" ? "bull"
-                : advanced.premiumVel.state === "PE_EXPANDING" ? "bear" : "warn"}
+        {/* â”€â”€ ACCEPTANCE / REJECTION ribbon â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+        {acc ? (
+          <div className="mt-2 grid grid-cols-2 gap-1.5 text-[10px]">
+            <AcceptTile
+              label={`Above VAH ${profile?.vah ?? f.vah ?? "â€”"}`}
+              accepted={acc.acceptedAboveVAH}
+              rejected={acc.rejectedAboveVAH}
+              bars={acc.consecutiveAbove}
+              volumeSurge={acc.volumeSurgeAbove}
             />
-          ) : null}
-          {advanced.nakedPOC ? (
-            <Badge label="Naked POC" value={String(advanced.nakedPOC.price)} tone="info" />
-          ) : null}
-          {advanced.developingPOC && advanced.developingPOC.length >= 2 ? (
-            <Badge
-              label="POC Trail"
-              value={(() => {
-                const arr = advanced.developingPOC;
-                const start = arr[0].poc;
-                const end = arr[arr.length - 1].poc;
-                return end > start ? "â†‘ Migrating Up"
-                  : end < start ? "â†“ Migrating Down"
-                  : "â†’ Flat";
-              })()}
-              tone={(() => {
-                const arr = advanced.developingPOC;
-                const start = arr[0].poc;
-                const end = arr[arr.length - 1].poc;
-                return end > start ? "bull" : end < start ? "bear" : "neutral";
-              })()}
+            <AcceptTile
+              label={`Below VAL ${profile?.val ?? f.val ?? "â€”"}`}
+              accepted={acc.acceptedBelowVAL}
+              rejected={acc.rejectedBelowVAL}
+              bars={acc.consecutiveBelow}
+              volumeSurge={acc.volumeSurgeBelow}
             />
-          ) : null}
-        </div>
-      ) : null}
+          </div>
+        ) : null}
 
-      <V2Hint
-        label={e?.interpretation?.verdict?.replace(/_/g, " ") || "Interpretation"}
-        text={e?.interpretation?.summary || f.interpretation}
-        tone={verdictTone as "bull" | "bear" | "warn" | "neutral"}
-      />
+        {/* â”€â”€ DIRECTIONAL BIAS for option buyers â€” promoted ABOVE the dominance row â”€ */}
+        {dirBias ? (
+          <div
+            className="mt-2 flex flex-col gap-0.5 rounded-sm border px-2.5 py-1.5"
+            style={{ borderColor: `${biasColor}55`, background: `${biasColor}10` }}
+          >
+            <div className="flex items-center justify-between text-[12px]">
+              <span className="flex items-center gap-2 font-bold uppercase tracking-[0.14em]" style={{ color: biasColor }}>
+                {dirBias.side === "CE" ? `BUY CE ${dirBias.targetStrike ?? ""}`
+                  : dirBias.side === "PE" ? `BUY PE ${dirBias.targetStrike ?? ""}`
+                    : "WAIT"}
+                <V2Pill label={dirBias.strength} tone={biasTone as "bull" | "bear" | "warn"} size="xs" />
+              </span>
+              <span className="text-[10px] text-white/65">{dirBias.reason}</span>
+            </div>
+          </div>
+        ) : null}
+
+        {/* â”€â”€ BUYERS / SELLERS / PARTICIPATION grid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+        <div className="mt-2 grid grid-cols-3 gap-2 text-[11px]">
+          <div className="rounded-sm border border-emerald-500/20 bg-emerald-500/[0.04] px-2 py-1.5">
+            <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-emerald-400">BUYERS</div>
+            <CompactPair label="Entering" value={`${f.buyers.entering}%`} valueColor="#22c55e" />
+            <CompactPair label="CE Side" value={`${ceBuyersPct.toFixed(0)}%`} valueColor="#22c55e" />
+            {e?.flow?.dominantCeBuyStrike != null ? (
+              <CompactPair label="CE Strike" value={String(e.flow.dominantCeBuyStrike)} valueColor="#22c55e" />
+            ) : null}
+          </div>
+          <div className="rounded-sm border border-rose-500/20 bg-rose-500/[0.04] px-2 py-1.5">
+            <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-rose-400">SELLERS</div>
+            <CompactPair label="Entering" value={`${f.sellers.entering}%`} valueColor="#ef4444" />
+            <CompactPair label="PE Side" value={`${peBuyersPct.toFixed(0)}%`} valueColor="#ef4444" />
+            {e?.flow?.dominantPeBuyStrike != null ? (
+              <CompactPair label="PE Strike" value={String(e.flow.dominantPeBuyStrike)} valueColor="#ef4444" />
+            ) : null}
+          </div>
+          <div className="rounded-sm border border-sky-500/20 bg-sky-500/[0.04] px-2 py-1.5">
+            <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-sky-300">PARTICIPATION</div>
+            <CompactPair label="Strike" value={f.participationStrike?.toString() || "â€”"} valueColor="#fff" />
+            <CompactPair
+              label="Strength"
+              value={profile ? `${profile.profileStrength.toFixed(0)}%` : f.participationLevel || "â€”"}
+              valueColor={profile ? (profile.profileStrength >= 35 ? "#22c55e" : profile.profileStrength <= 15 ? "#ef4444" : "#facc15") : "#facc15"}
+            />
+            {advanced?.gammaWall ? (
+              <CompactPair label="Î³ Wall" value={String(advanced.gammaWall.strike)} valueColor="#a855f7" />
+            ) : null}
+          </div>
+        </div>
+
+        {/* â”€â”€ DOMINANCE METER â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+        <div className="mt-2 flex flex-col gap-1.5 rounded-sm border border-white/[0.06] bg-white/[0.03] px-2.5 py-2">
+          <div className="flex items-center justify-between text-[11px]">
+            <span className="font-bold uppercase tracking-wider" style={{ color: domColor }}>
+              {domSide === "BUYERS" ? `BUYERS DOMINATING${e?.flow?.dominantCeBuyStrike != null ? ` (CE ${e.flow.dominantCeBuyStrike})` : ""}`
+                : domSide === "SELLERS" ? `SELLERS DOMINATING${e?.flow?.dominantPeBuyStrike != null ? ` (PE ${e.flow.dominantPeBuyStrike})` : ""}`
+                  : "BALANCED FLOW"}
+            </span>
+            <span className="flex items-center gap-1.5 font-mono font-bold tabular-nums" style={{ color: domColor }}>
+              {Math.round(Math.max(buyersScore, sellersScore))}%
+              {dom?.conviction === "high"
+                ? <span className="rounded-sm bg-emerald-500/20 px-1.5 py-0.5 text-[9px] tracking-wider text-emerald-300">CONFIRMED</span>
+                : dom?.conviction === "divergent"
+                  ? <span className="rounded-sm bg-amber-500/20 px-1.5 py-0.5 text-[9px] tracking-wider text-amber-300">DIVERGENT</span>
+                  : null}
+            </span>
+          </div>
+          <div className="flex h-2 overflow-hidden rounded-full bg-white/[0.06]">
+            <div className="h-full bg-emerald-500/80" style={{ width: `${buyersScore}%` }} />
+            <div className="h-full bg-rose-500/80" style={{ width: `${sellersScore}%` }} />
+          </div>
+          <div className="flex items-center justify-between text-[10px]">
+            <span className="text-emerald-400">Buyers {Math.round(buyersScore)}%</span>
+            <span className="text-white/45 font-mono">
+              Î” {e?.delta?.deltaPct != null ? `${e.delta.deltaPct >= 0 ? "+" : ""}${e.delta.deltaPct.toFixed(1)}%` : "â€”"}
+            </span>
+            <span className="text-rose-400">Sellers {Math.round(sellersScore)}%</span>
+          </div>
+          <div className="text-center text-[9px] uppercase tracking-[0.18em] text-white/35">
+            Buyer Dominant Flow Estimate Â· Not Orderbook Tape
+          </div>
+        </div>
+
+        {/* â”€â”€ ADVANCED OVERLAYS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+        {advanced ? (
+          <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px]">
+            {advanced.gammaWall ? (
+              <Badge label="Gamma Wall" value={String(advanced.gammaWall.strike)} tone="purple" />
+            ) : null}
+            {advanced.premiumVel ? (
+              <Badge
+                label="Premium"
+                value={advanced.premiumVel.state.replace("_", " ")}
+                tone={advanced.premiumVel.state === "CE_EXPANDING" ? "bull"
+                  : advanced.premiumVel.state === "PE_EXPANDING" ? "bear" : "warn"}
+              />
+            ) : null}
+            {advanced.nakedPOC ? (
+              <Badge label="Naked POC" value={String(advanced.nakedPOC.price)} tone="info" />
+            ) : null}
+            {advanced.developingPOC && advanced.developingPOC.length >= 2 ? (
+              <Badge
+                label="POC Trail"
+                value={(() => {
+                  const arr = advanced.developingPOC;
+                  const start = arr[0].poc;
+                  const end = arr[arr.length - 1].poc;
+                  return end > start ? "â†‘ Migrating Up"
+                    : end < start ? "â†“ Migrating Down"
+                      : "â†’ Flat";
+                })()}
+                tone={(() => {
+                  const arr = advanced.developingPOC;
+                  const start = arr[0].poc;
+                  const end = arr[arr.length - 1].poc;
+                  return end > start ? "bull" : end < start ? "bear" : "neutral";
+                })()}
+              />
+            ) : null}
+          </div>
+        ) : null}
+
+        <V2Hint
+          label={e?.interpretation?.verdict?.replace(/_/g, " ") || "Interpretation"}
+          text={e?.interpretation?.summary || f.interpretation}
+          tone={verdictTone as "bull" | "bear" | "warn" | "neutral"}
+        />
       </div>
     </V2Card>
   );
@@ -1124,7 +1123,7 @@ function AcceptTile({
 }) {
   let state = "Probing";
   let tone: "bull" | "bear" | "warn" | "neutral" = "neutral";
-  if (rejected)      { state = "Rejected"; tone = "bear"; }
+  if (rejected) { state = "Rejected"; tone = "bear"; }
   else if (accepted) { state = "Accepted"; tone = "bull"; }
   else if (bars > 0) { state = `${bars} bar${bars > 1 ? "s" : ""}`; tone = "warn"; }
   return (
