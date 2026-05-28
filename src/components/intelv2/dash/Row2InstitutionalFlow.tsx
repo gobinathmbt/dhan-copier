@@ -1,14 +1,27 @@
 import type { IntelV2Snapshot } from "@/lib/intelV2Types";
 import { V2Card, V2Pill, v2Fmt, v2FmtSigned, v2FmtSignedCompact, V2_TONE, V2Hint } from "./common";
+import { OiBuildupAnalysisCard } from "./OiBuildupAnalysisCard";
+import { SupportResistanceCardV2 } from "./SupportResistanceCard";
 
 export function Row2InstitutionalFlow({ data }: { data: IntelV2Snapshot | null }) {
   return (
-    <div className="grid h-[360px] grid-cols-12 gap-2">
-      <div className="col-span-2 min-h-0"><SpotVsFutures data={data} /></div>
-      <div className="col-span-3 min-h-0"><OiShift data={data} /></div>
-      <div className="col-span-2 min-h-0"><OiBuildup data={data} /></div>
-      <div className="col-span-2 min-h-0"><PremiumVelocity data={data} /></div>
-      <div className="col-span-3 min-h-0"><FrvpInstitutional data={data} /></div>
+    <div className="flex flex-col gap-2">
+      {/* Top compact row — Spot/Fut, OI Shift, FRVP Institutional Map */}
+      <div className="grid h-[360px] grid-cols-12 gap-2">
+        <div className="col-span-2 min-h-0"><SpotVsFutures data={data} /></div>
+        <div className="col-span-5 min-h-0"><OiShift data={data} /></div>
+        <div className="col-span-5 min-h-0"><FrvpInstitutional data={data} /></div>
+      </div>
+
+      {/* Big institutional OI Buildup Analysis (60%) + Support/Resistance Pressure (40%) */}
+      <div className="grid min-h-[640px] grid-cols-10 gap-2">
+        <div className="col-span-6 min-h-0">
+          <OiBuildupAnalysisCard data={data} />
+        </div>
+        <div className="col-span-4 min-h-0">
+          <SupportResistanceCardV2 data={data} />
+        </div>
+      </div>
     </div>
   );
 }
@@ -222,114 +235,6 @@ function OiShift({ data }: { data: IntelV2Snapshot | null }) {
         text={bias?.trend?.label || bias?.label || "Balanced"}
         tone={biasTone as "bull" | "bear" | "warn"}
       />
-    </V2Card>
-  );
-}
-
-// 2.3 OI BUILDUP ANALYSIS — strike-aware rows (e.g. "23900 PE +5.61L")
-function OiBuildup({ data }: { data: IntelV2Snapshot | null }) {
-  const b = data?.dashboard?.buildUp;
-  const rows: Array<{
-    label: string;
-    detected: boolean;
-    pickStrike: number | null;
-    pickSide: "CE" | "PE" | null;
-    pickDelta: number | null;
-    tone: "bull" | "bear" | "warn" | "info";
-  }> = [
-    { label: "Long Buildup",  detected: !!b?.longBuildUp,
-      pickStrike: b?.longBuildUpStrike?.strike ?? null,
-      pickSide:   b?.longBuildUpStrike?.side ?? null,
-      pickDelta:  b?.longBuildUpStrike?.delta ?? null,
-      tone: "bull" },
-    { label: "Short Buildup", detected: !!b?.shortBuildUp,
-      pickStrike: b?.shortBuildUpStrike?.strike ?? null,
-      pickSide:   b?.shortBuildUpStrike?.side ?? null,
-      pickDelta:  b?.shortBuildUpStrike?.delta ?? null,
-      tone: "bear" },
-    { label: "Long Unwinding",detected: !!b?.longUnwinding,
-      pickStrike: b?.longUnwindingStrike?.strike ?? null,
-      pickSide:   b?.longUnwindingStrike?.side ?? null,
-      pickDelta:  b?.longUnwindingStrike?.delta ?? null,
-      tone: "warn" },
-    { label: "Short Covering",detected: !!b?.shortCovering,
-      pickStrike: b?.shortCoveringStrike?.strike ?? null,
-      pickSide:   b?.shortCoveringStrike?.side ?? null,
-      pickDelta:  b?.shortCoveringStrike?.delta ?? null,
-      tone: "info" },
-  ];
-  return (
-    <V2Card title="2.3 OI Buildup Analysis">
-      <div className="flex flex-col gap-1.5">
-        {rows.map((r) => (
-          <div
-            key={r.label}
-            className="flex items-center justify-between rounded-sm px-2 py-1.5 text-[12px]"
-            style={{
-              background: r.detected ? V2_TONE[r.tone].soft : "rgba(255,255,255,0.025)",
-            }}
-          >
-            <span className="text-white/85">{r.label}</span>
-            <span className="text-right font-mono">
-              {r.pickStrike != null ? (
-                <span style={{ color: V2_TONE[r.tone].color }}>
-                  <span className="font-bold">{r.pickStrike}</span>{" "}
-                  <span className="text-[10px] opacity-90">{r.pickSide}</span>{" "}
-                  <span className="font-bold">{v2FmtSignedCompact(r.pickDelta)}</span>
-                </span>
-              ) : (
-                <span className="text-white/45">—</span>
-              )}
-            </span>
-          </div>
-        ))}
-      </div>
-      <div className="mt-2 grid grid-cols-2 gap-1.5">
-        <div className="flex flex-col items-center rounded-sm bg-white/[0.03] px-2 py-1">
-          <span className="text-[9px] uppercase text-white/45">Buildup Strength</span>
-          <span className="font-mono text-[12px] font-bold text-emerald-400">{b?.strengthLabel || "MODERATE"}</span>
-        </div>
-        <div className="flex flex-col items-center rounded-sm bg-white/[0.03] px-2 py-1">
-          <span className="text-[9px] uppercase text-white/45">Buildup Velocity</span>
-          <span className="font-mono text-[12px] font-bold text-emerald-400">{b?.velocityLabel || "MODERATE"}</span>
-        </div>
-      </div>
-      <V2Hint label="Interpretation" text={b?.interpretation || ""} tone="bull" />
-    </V2Card>
-  );
-}
-
-// 2.4 PREMIUM VELOCITY
-function PremiumVelocity({ data }: { data: IntelV2Snapshot | null }) {
-  const ce = data?.options?.atmCall?.ltp ?? null;
-  const pe = data?.options?.atmPut?.ltp ?? null;
-  const atmIv = data?.options?.atmIv ?? 0;
-  const hint = data?.dashboard?.hints?.premiumVel;
-  return (
-    <V2Card title="2.4 Premium Velocity">
-      <div className="grid grid-cols-2 gap-2">
-        <div className="flex flex-col rounded-sm bg-emerald-400/[0.06] px-2.5 py-2">
-          <span className="text-[10px] uppercase tracking-wide text-white/55">CE Premium</span>
-          <span className="font-mono text-[16px] font-bold text-emerald-400">{v2Fmt(ce, 2)}</span>
-        </div>
-        <div className="flex flex-col rounded-sm bg-rose-400/[0.06] px-2.5 py-2">
-          <span className="text-[10px] uppercase tracking-wide text-white/55">PE Premium</span>
-          <span className="font-mono text-[16px] font-bold text-rose-400">{v2Fmt(pe, 2)}</span>
-        </div>
-      </div>
-      <div className="mt-2 flex items-center justify-between rounded-sm bg-white/[0.03] px-2.5 py-1.5">
-        <span className="text-[10px] uppercase tracking-wide text-white/55">ATM IV</span>
-        <span className="font-mono text-[13px] font-bold text-white/85">{v2Fmt(atmIv, 2)}%</span>
-      </div>
-      <div className="mt-1.5 flex items-center justify-between rounded-sm bg-white/[0.03] px-2.5 py-1.5">
-        <span className="text-[10px] uppercase tracking-wide text-white/55">Health</span>
-        <V2Pill
-          label={atmIv >= 12 && atmIv <= 30 ? "HEALTHY" : atmIv > 30 ? "EXPENSIVE" : "DEAD"}
-          tone={atmIv >= 12 && atmIv <= 30 ? "bull" : atmIv > 30 ? "warn" : "bear"}
-          size="sm"
-        />
-      </div>
-      <V2Hint label="Spot vs Premium" text={hint || ""} tone="bull" />
     </V2Card>
   );
 }

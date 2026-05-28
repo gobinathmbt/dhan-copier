@@ -904,6 +904,168 @@ function _oiHistogram(strikes, atm, range = 4, displayStep = 100, ctx = {}) {
 }
 
 /**
+ * Build the rich "OI Buildup Analysis" payload that drives the
+ * Row 2.3 institutional card. It mirrors what professional desks watch:
+ *   • Top stats strip — Spot, Total CE OI, Total PE OI, PCR, Market View
+ *   • Per-side tables — top 5 strikes by absolute OI build, with prior-day
+ *     OI proxy, today's OI, ΔOI, %Δ, and an interpretation tag
+ *   • Bar-chart series — ATM ± 4 strikes spaced in `displayStep`s for
+ *     CE and PE, signed in lakh / crore for compact display
+ *   • Key takeaway — short string summarising the dominant cluster
+ *
+ * `prevTotalCeOi` / `prevTotalPeOi` are derived from the sum of "yesterday"
+ * proxies. We don't have a separate yesterday snapshot in the service, so
+ * yesterday is reconstructed as `today - oiChange` per leg — matches the
+ * Sensibull/IIFL convention.
+ */
+function _oiBuildupAnalysis(strikes, atm, spotPrice, displayStep = 100, range = 4) {
+  if (!Array.isArray(strikes) || !atm) {
+    return null;
+  }
+  // Total OI across the whole chain (today + prior-day proxy)
+  let totalCeToday = 0, totalPeToday = 0;
+  let totalCePrev  = 0, totalPePrev  = 0;
+  for (const s of strikes) {
+    const ceOi    = _safe(s.call?.oi ?? s.ce?.oi);
+    const peOi    = _safe(s.put?.oi  ?? s.pe?.oi);
+    const ceOiChg = _safe(s.call?.oiChange ?? s.ce?.oiChg ?? s.ce?.oiChange);
+    const peOiChg = _safe(s.put?.oiChange  ?? s.pe?.oiChg ?? s.pe?.oiChange);
+    totalCeToday += ceOi;
+    totalPeToday += peOi;
+    totalCePrev  += Math.max(0, ceOi - ceOiChg);
+    totalPePrev  += Math.max(0, peOi - peOiChg);
+  }
+  const totalCeChg    = totalCeToday - totalCePrev;
+  const totalPeChg    = totalPeToday - totalPePrev;
+  const totalCeChgPct = totalCePrev > 0 ? (totalCeChg / totalCePrev) * 100 : 0;
+  const totalPeChgPct = totalPePrev > 0 ? (totalPeChg / totalPePrev) * 100 : 0;
+  const ratio = totalCeToday > 0 ? totalPeToday / totalCeToday : 0; // PCR
+
+  // Market view label — uses PCR + heavyweight tilt
+  let marketView = 'Neutral';
+  let marketViewTone = 'warn';
+  if (ratio >= 1.15) { marketView = 'Bullish'; marketViewTone = 'bull'; }
+  else if (ratio >= 1.05) { marketView = 'Slightly Bullish'; marketViewTone = 'bull'; }
+  else if (ratio <= 0.85) { marketView = 'Bearish'; marketViewTone = 'bear'; }
+  else if (ratio <= 0.95) { marketView = 'Slightly Bearish'; marketViewTone = 'bear'; }
+
+  // Helper — interpret a single strike's % change
+  const interpret = (pctChg) => {
+    if (!Number.isFinite(pctChg)) return 'Stable';
+    if (pctChg >= 15) return 'Strong Buildup';
+    if (pctChg >= 8)  return 'Buildup';
+    if (pctChg >= 3)  return 'Moderate Buildup';
+    if (pctChg <= -15) return 'Strong Unwinding';
+    if (pctChg <= -8)  return 'Unwinding';
+    if (pctChg <= -3)  return 'Mild Unwinding';
+    return 'Stable';
+  };
+
+  // Build per-side row arrays — top 5 strikes by absolute build, sorted by
+  // strike DESC for CE (resistance ladder) and ASC for PE (support ladder).
+  // CE = resistance (above spot); PE = support (below spot).
+  const ceRows = [];
+  const peRows = [];
+  for (const s of strikes) {
+    const k = Number(s.strike);
+    if (!Number.isFinite(k)) continue;
+    const ceOiToday = _safe(s.call?.oi ?? s.ce?.oi);
+    const peOiToday = _safe(s.put?.oi  ?? s.pe?.oi);
+    const ceOiChg   = _safe(s.call?.oiChange ?? s.ce?.oiChg ?? s.ce?.oiChange);
+    const peOiChg   = _safe(s.put?.oiChange  ?? s.pe?.oiChg ?? s.pe?.oiChange);
+    const ceOiPrev  = Math.max(0, ceOiToday - ceOiChg);
+    const peOiPrev  = Math.max(0, peOiToday - peOiChg);
+    const ceChgPct  = ceOiPrev > 0 ? (ceOiChg / ceOiPrev) * 100 : 0;
+    const peChgPct  = peOiPrev > 0 ? (peOiChg / peOiPrev) * 100 : 0;
+
+    ceRows.push({
+      strike: k,
+      oiToday: ceOiToday, oiPrev: ceOiPrev, oiChange: ceOiChg,
+      oiChangePct: _round(ceChgPct, 2),
+      interpretation: interpret(ceChgPct),
+      isAtm: k === atm,
+    });
+    peRows.push({
+      strike: k,
+      oiToday: peOiToday, oiPrev: peOiPrev, oiChange: peOiChg,
+      oiChangePct: _round(peChgPct, 2),
+      interpretation: interpret(peChgPct),
+      isAtm: k === atm,
+    });
+  }
+  // Top 5 CE strikes by absolute build (most-active resistance ladder)
+  const topCe = [...ceRows]
+    .sort((a, b) => Math.abs(b.oiChange) - Math.abs(a.oiChange))
+    .slice(0, 5)
+    .sort((a, b) => b.strike - a.strike);
+  // Top 5 PE strikes by absolute build
+  const topPe = [...peRows]
+    .sort((a, b) => Math.abs(b.oiChange) - Math.abs(a.oiChange))
+    .slice(0, 5)
+    .sort((a, b) => b.strike - a.strike);
+
+  // Bar-chart series — ATM ± `range` strikes at displayStep grid
+  const anchor = Math.round(atm / displayStep) * displayStep;
+  const byStrike = new Map(strikes.map(s => [Number(s.strike), s]));
+  const ceChart = [];
+  const peChart = [];
+  for (let i = -range; i <= range; i++) {
+    const k = anchor + i * displayStep;
+    const s = byStrike.get(k);
+    if (!s) continue;
+    const ceOiChg = _safe(s.call?.oiChange ?? s.ce?.oiChg ?? s.ce?.oiChange);
+    const peOiChg = _safe(s.put?.oiChange  ?? s.pe?.oiChg ?? s.pe?.oiChange);
+    ceChart.push({ strike: k, oiChange: ceOiChg, isAtm: k === atm });
+    peChart.push({ strike: k, oiChange: peOiChg, isAtm: k === atm });
+  }
+
+  // Key Takeaway — find the cluster of consecutive strikes with the
+  // heaviest build per side.
+  function clusterBand(rows) {
+    const sorted = [...rows].sort((a, b) => a.strike - b.strike);
+    const builds = sorted.filter(r => r.oiChange > 0);
+    if (!builds.length) return null;
+    // Top 3 strikes by absolute build
+    const top = [...builds].sort((a, b) => b.oiChange - a.oiChange).slice(0, 3);
+    const minK = Math.min(...top.map(r => r.strike));
+    const maxK = Math.max(...top.map(r => r.strike));
+    return { from: minK, to: maxK, count: top.length };
+  }
+  const ceBand = clusterBand(ceRows);
+  const peBand = clusterBand(peRows);
+  const ceTakeaway = ceBand
+    ? `Strong OI buildup seen at ${ceBand.from} – ${ceBand.to} strikes, indicating resistance zone.`
+    : 'No significant CE buildup.';
+  const peTakeaway = peBand
+    ? `Strong OI buildup at ${peBand.from} – ${peBand.to} strikes, indicating strong support zone.`
+    : 'No significant PE buildup.';
+
+  return {
+    spot: {
+      price: _round(spotPrice, 2),
+    },
+    totals: {
+      ce: {
+        today: totalCeToday, prev: totalCePrev,
+        change: totalCeChg, changePct: _round(totalCeChgPct, 2),
+      },
+      pe: {
+        today: totalPeToday, prev: totalPePrev,
+        change: totalPeChg, changePct: _round(totalPeChgPct, 2),
+      },
+      pcr: _round(ratio, 2),
+    },
+    marketView: { label: marketView, tone: marketViewTone, ratio: _round(ratio, 2) },
+    ceTable: topCe,
+    peTable: topPe,
+    ceChart,
+    peChart,
+    ceTakeaway,
+    peTakeaway,
+  };
+}
+
+/**
  * Summarise an OI-shift histogram into a single bias verdict + a percentage,
  * and a rich trend block showing direction, strength, dominant side, and
  * the strike with the heaviest writer activity.
@@ -1714,6 +1876,8 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
   // under the table. Each row also carries a per-strike buyer-favor split.
   const oiHistogram = _oiHistogram(strikes, atm, 4, 100, { spot: spotPrice });
   const oiShiftBias = _oiShiftBias(oiHistogram);
+  // 2.3 OI Buildup Analysis — top stats + per-side tables + bar charts
+  const oiBuildupAnalysis = _oiBuildupAnalysis(strikes, atm, spotPrice, 100, 4);
 
   const ivRank = _ivRank(atmBlk.atmIv);
   const ivTrendSeries = (() => {
@@ -2241,6 +2405,7 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
       },
       oiHistogram,
       oiShiftBias,
+      oiBuildupAnalysis,
       cvdSeries,
       delta: {
         totalBuyVol: delta.totalBuy, totalSellVol: delta.totalSell,

@@ -1,20 +1,18 @@
 import type { IntelV2Snapshot } from "@/lib/intelV2Types";
 import { V2Card, V2Pill, v2Fmt, v2FmtCompact, V2_TONE } from "./common";
-import { SupportResistanceCardV2 } from "./SupportResistanceCard";
 import { TopStrikeCardV2 } from "./TopStrikeCard";
 
 /**
  * Bottom panel — two stacked tiers:
- *   Tier A (260px): Support/Resistance Pressure | Top Strike Selection
- *   Tier B (220px): Intraday Price Action | Selected Option Chain | Key Levels
+ *   Tier A (320px): Top Strike Selection (full width — S/R moved up next to 2.3)
+ *   Tier B (440px): Intraday Price Action | Selected Option Chain | Key Levels
  */
 export function Row6BottomPanel({ data }: { data: IntelV2Snapshot | null }) {
   return (
-    <div className="grid min-h-0 flex-1 grid-rows-[400px_minmax(440px,1fr)] gap-2">
-      {/* Tier A — SR + Top Strike */}
+    <div className="grid min-h-0 flex-1 grid-rows-[320px_minmax(440px,1fr)] gap-2">
+      {/* Tier A — Top Strike Selection (full width) */}
       <div className="grid min-h-0 grid-cols-12 gap-2">
-        <div className="col-span-5 min-h-0"><SupportResistanceCardV2 data={data} /></div>
-        <div className="col-span-7 min-h-0"><TopStrikeCardV2 data={data} /></div>
+        <div className="col-span-12 min-h-0"><TopStrikeCardV2 data={data} /></div>
       </div>
 
       {/* Tier B — Tactical view */}

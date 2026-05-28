@@ -383,6 +383,37 @@ export interface IntelV2Snapshot {
         label: string;
       };
     };
+    oiBuildupAnalysis: null | {
+      spot: { price: number };
+      totals: {
+        ce: { today: number; prev: number; change: number; changePct: number };
+        pe: { today: number; prev: number; change: number; changePct: number };
+        pcr: number;
+      };
+      marketView: { label: string; tone: string; ratio: number };
+      ceTable: Array<{
+        strike: number;
+        oiToday: number;
+        oiPrev: number;
+        oiChange: number;
+        oiChangePct: number;
+        interpretation: string;
+        isAtm: boolean;
+      }>;
+      peTable: Array<{
+        strike: number;
+        oiToday: number;
+        oiPrev: number;
+        oiChange: number;
+        oiChangePct: number;
+        interpretation: string;
+        isAtm: boolean;
+      }>;
+      ceChart: Array<{ strike: number; oiChange: number; isAtm: boolean }>;
+      peChart: Array<{ strike: number; oiChange: number; isAtm: boolean }>;
+      ceTakeaway: string;
+      peTakeaway: string;
+    };
     cvdSeries: Array<{ t: number; cvd: number; lastLtp: number | null }>;
     delta: {
       totalBuyVol: number; totalSellVol: number;
