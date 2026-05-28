@@ -1,28 +1,258 @@
 ﻿import type { IntelV2Snapshot } from "@/lib/intelV2Types";
 import { V2Card, V2Pill, v2Fmt, V2_TONE, V2Hint } from "./common";
-// 2.3 OI Buildup Analysis — REMOVED. Functionality covered by 2.2 + S/R Pressure.
+// 2.3 OI Buildup Analysis — REMOVED. Functionality covered by 2.2 Combined card.
 // import { OiBuildupAnalysisCard } from "./OiBuildupAnalysisCard";
 import { SupportResistanceCardV2 } from "./SupportResistanceCard";
-import { MarketDirectionCard } from "./MarketDirectionCard";
+// MarketDirectionCard is now embedded inside CombinedWritingMarketCard,
+// no longer rendered standalone. The file remains for reference.
+// import { MarketDirectionCard } from "./MarketDirectionCard";
 
 export function Row2InstitutionalFlow({ data }: { data: IntelV2Snapshot | null }) {
   return (
     <div className="flex flex-col gap-2">
-      {/* Top row â€” 2.2 Writing Pressure (60%) + 2.5 FRVP Institutional Map (40%) */}
-      <div className="grid h-[560px] grid-cols-10 gap-2">
-        <div className="col-span-6 min-h-0"><WritingPressure data={data} /></div>
-        <div className="col-span-4 min-h-0"><FrvpInstitutional data={data} /></div>
+      {/* Single tall row â€” 2.2 Combined (Writing Pressure + Market Direction) (60%) +
+          2.5 FRVP Institutional Map (40%) â€” heights extended */}
+      <div className="grid h-[1100px] grid-cols-10 gap-2">
+        <div className="col-span-6 min-h-0">
+          <CombinedWritingMarketCard data={data} />
+        </div>
+        <div className="col-span-4 min-h-0">
+          <FrvpInstitutional data={data} />
+        </div>
       </div>
 
-      {/* Middle row â€” 2.2b Market Direction (60%) + Support/Resistance Pressure (40%) */}
-      <div className="grid min-h-[560px] grid-cols-10 gap-2">
-        <div className="col-span-6 min-h-0"><MarketDirectionCard data={data} /></div>
-        <div className="col-span-4 min-h-0">
+      {/* Below row â€” Support/Resistance Pressure full width (also extended) */}
+      <div className="grid h-[480px] grid-cols-1 gap-2">
+        <div className="min-h-0">
           <SupportResistanceCardV2 data={data} />
         </div>
       </div>
 
-      {/* 2.3 OI Buildup Analysis â€” REMOVED. Functionality covered by 2.2 + Market Direction + S/R */}
+      {/* 2.3 OI Buildup Analysis â€” REMOVED. Combined into 2.2 Writing+Market */}
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * 2.2 — COMBINED CARD
+ * Wraps the existing WritingPressure (CE Walls / PE Walls / footer) on
+ * top and the MarketDirectionCard (meter + intraday levels + OI move)
+ * on the bottom — both stacked inside a single V2Card.
+ * ───────────────────────────────────────────────────────────────────── */
+function CombinedWritingMarketCard({ data }: { data: IntelV2Snapshot | null }) {
+  return (
+    <V2Card
+      title={
+        <span className="flex items-center gap-2">
+          2.2 Writing Pressure + Market Direction
+          <span className="text-[9px] font-normal text-white/45">
+            (Combined â€” Walls + Direction Meter + OI Move)
+          </span>
+        </span>
+      }
+    >
+      <div className="-m-1.5 flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-1.5 pr-2">
+        {/* TOP HALF — Writing Pressure (CE Walls + PE Walls) */}
+        <CombinedWritingPressureBody data={data} />
+
+        {/* DIVIDER */}
+        <div className="my-1 h-px w-full bg-gradient-to-r from-transparent via-white/15 to-transparent" />
+
+        {/* BOTTOM HALF — Market Direction body */}
+        <CombinedMarketDirectionBody data={data} />
+      </div>
+    </V2Card>
+  );
+}
+
+/* ── Writing Pressure body (no V2Card wrapper — for combined card) ── */
+function CombinedWritingPressureBody({ data }: { data: IntelV2Snapshot | null }) {
+  const ana = data?.dashboard?.oiBuildupAnalysis;
+  if (!ana) {
+    return (
+      <div className="flex items-center justify-center py-4 text-[12px] text-white/40">
+        No OI buildup data
+      </div>
+    );
+  }
+  const spot = ana.spot.price;
+  const ceStrikes = [...ana.ceTable]
+    .filter(r => r.strike >= spot - 50)
+    .sort((a, b) => Math.abs(b.oiChange) - Math.abs(a.oiChange))
+    .slice(0, 5)
+    .sort((a, b) => b.strike - a.strike);
+  const peStrikes = [...ana.peTable]
+    .filter(r => r.strike <= spot + 50)
+    .sort((a, b) => Math.abs(b.oiChange) - Math.abs(a.oiChange))
+    .slice(0, 5)
+    .sort((a, b) => b.strike - a.strike);
+  const ceTotalPct = ceStrikes.reduce((s, r) => s + Math.max(0, r.oiChangePct), 0);
+  const peTotalPct = peStrikes.reduce((s, r) => s + Math.max(0, r.oiChangePct), 0);
+  const ceActivity = ceTotalPct >= 250 ? "Aggressive"
+                  : ceTotalPct >= 120 ? "Active"
+                  : ceTotalPct >= 50  ? "Moderate" : "Light";
+  const peActivity = peTotalPct >= 250 ? "Aggressive"
+                  : peTotalPct >= 120 ? "Active"
+                  : peTotalPct >= 50  ? "Moderate" : "Light";
+  const ceLo = ceStrikes.length ? Math.min(...ceStrikes.map(r => r.strike)) : null;
+  const ceHi = ceStrikes.length ? Math.max(...ceStrikes.map(r => r.strike)) : null;
+  const peLo = peStrikes.length ? Math.min(...peStrikes.map(r => r.strike)) : null;
+  const peHi = peStrikes.length ? Math.max(...peStrikes.map(r => r.strike)) : null;
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-sky-300">
+        Writing Pressure (Resistance & Support)
+      </div>
+      <div className="grid min-h-0 grid-cols-2 gap-2">
+        <WritingPanel side="CE" rows={ceStrikes} activity={ceActivity} rangeLo={ceLo} rangeHi={ceHi} />
+        <WritingPanel side="PE" rows={peStrikes} activity={peActivity} rangeLo={peLo} rangeHi={peHi} />
+      </div>
+    </div>
+  );
+}
+
+/* ── Market Direction body (no V2Card wrapper — for combined card) ── */
+function CombinedMarketDirectionBody({ data }: { data: IntelV2Snapshot | null }) {
+  // Re-use the standalone MarketDirectionCard logic by inlining its body.
+  // We strip the outer V2Card so it nests cleanly inside the combined card.
+  const md = data?.dashboard?.marketDirection;
+  if (!md) {
+    return (
+      <div className="flex items-center justify-center py-4 text-[12px] text-white/40">
+        Awaiting market direction data…
+      </div>
+    );
+  }
+  const m = md.directionMeter;
+  const move = md.oiEstimatedMove;
+  const verdictColor = V2_TONE[m.tone].color;
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-sky-300">
+        Market Direction
+      </div>
+
+      {/* 1. Direction Meter */}
+      <div className="flex flex-col gap-1.5">
+        <div className="relative h-3 w-full overflow-visible rounded-full">
+          <div
+            className="absolute inset-0 rounded-full"
+            style={{
+              background:
+                "linear-gradient(to right, rgba(239,68,68,0.85) 0%, rgba(239,68,68,0.55) 30%, rgba(250,204,21,0.55) 50%, rgba(34,197,94,0.55) 70%, rgba(34,197,94,0.85) 100%)",
+            }}
+          />
+          <div className="absolute -top-1 -translate-x-1/2" style={{ left: `${m.needlePos}%` }}>
+            <div className="h-5 w-2.5 rounded-sm border-2 border-white bg-white shadow-[0_0_6px_rgba(255,255,255,0.6)]" />
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <div className="rounded-md border border-rose-500/40 bg-rose-500/[0.10] px-3 py-1.5">
+            <div className="font-mono text-[20px] font-black leading-none text-rose-400">{m.downside}%</div>
+            <div className="mt-0.5 text-[10px] font-bold uppercase tracking-[0.16em] text-rose-400">Downside</div>
+          </div>
+          <div className="rounded-md border border-emerald-500/40 bg-emerald-500/[0.10] px-3 py-1.5 text-right">
+            <div className="font-mono text-[20px] font-black leading-none text-emerald-400">{m.upside}%</div>
+            <div className="mt-0.5 text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400">Upside</div>
+          </div>
+        </div>
+        <div className="flex items-center justify-center">
+          <span
+            className="rounded-sm px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.16em]"
+            style={{ background: verdictColor + "22", color: verdictColor }}
+          >
+            {m.verdict}
+          </span>
+        </div>
+      </div>
+
+      {/* 2. Intraday Levels */}
+      <div className="flex flex-col gap-1">
+        <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-white/85">
+          Intraday Levels <span className="text-white/45">(Important)</span>
+        </span>
+        <div className="grid grid-cols-2 gap-2">
+          <div className="rounded-md border border-rose-500/30 bg-rose-500/[0.05]">
+            {md.resistances.length === 0 && (
+              <div className="px-2 py-2 text-center text-[10px] text-white/45">No resistance data</div>
+            )}
+            {md.resistances.map((r, i) => (
+              <CombinedLevelRow key={i} label={r.tier} value={r.strike} tone="bear" first={i === 0} />
+            ))}
+          </div>
+          <div className="rounded-md border border-emerald-500/30 bg-emerald-500/[0.05]">
+            {md.supports.length === 0 && (
+              <div className="px-2 py-2 text-center text-[10px] text-white/45">No support data</div>
+            )}
+            {md.supports.map((r, i) => (
+              <CombinedLevelRow key={i} label={r.tier} value={r.strike} tone="bull" first={i === 0} />
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* 3. OI Estimated Move */}
+      <div className="flex flex-col gap-1.5">
+        <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-sky-300">OI Estimated Move</span>
+        <div className="grid grid-cols-3 gap-2">
+          <CombinedTargetTile label="Downside Target" value={move.downsideTarget} tone="bear" icon="▼" />
+          <CombinedTargetTile label="Upside Target"   value={move.upsideTarget}   tone="bull" icon="▲" />
+          <div className="flex flex-col items-center justify-center rounded-md border border-amber-500/40 bg-amber-500/[0.06] py-1">
+            <span className="text-[9px] font-bold uppercase tracking-[0.16em] text-amber-300">Max Pain</span>
+            <span className="font-mono text-[18px] font-black tabular-nums text-amber-300">
+              {move.maxPain ? move.maxPain.toLocaleString() : "—"}
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CombinedLevelRow({
+  label, value, tone, first,
+}: {
+  label: string;
+  value: number;
+  tone: "bull" | "bear";
+  first: boolean;
+}) {
+  const t = V2_TONE[tone];
+  return (
+    <div
+      className={`flex items-center justify-between px-2.5 py-1 text-[12px] ${
+        !first ? "border-t border-white/[0.04]" : ""
+      }`}
+    >
+      <span className="text-white/75">{label}</span>
+      <span className="font-mono text-[13px] font-bold tabular-nums" style={{ color: t.color }}>
+        {value.toLocaleString()}
+      </span>
+    </div>
+  );
+}
+
+function CombinedTargetTile({
+  label, value, tone, icon,
+}: {
+  label: string;
+  value: number | null;
+  tone: "bull" | "bear";
+  icon: string;
+}) {
+  const t = V2_TONE[tone];
+  return (
+    <div
+      className="flex flex-col items-center rounded-md border px-2 py-1"
+      style={{ borderColor: t.border, background: t.soft }}
+    >
+      <span className="flex items-center gap-1 text-[9px] font-bold uppercase tracking-[0.16em]" style={{ color: t.color }}>
+        <span>{icon}</span>
+        {label}
+      </span>
+      <span className="mt-0.5 font-mono text-[18px] font-black tabular-nums leading-none" style={{ color: t.color }}>
+        {value ? value.toLocaleString() : "—"}
+      </span>
     </div>
   );
 }
@@ -310,8 +540,10 @@ function WritingPressure({ data }: { data: IntelV2Snapshot | null }) {
             rangeHi={peHi}
           />
         </div>
-        {/* Bottom: Best Trade Pick — CE strike + PE strike with probabilities */}
-        <BestTradePickStrip data={data} />
+        {/* Bottom: Best Trade Pick â€” COMMENTED OUT
+            (already shown in the top tradeBoard row above; keeping it here
+            is duplicate). To re-enable, uncomment the line below. */}
+        {/* <BestTradePickStrip data={data} /> */}
       </div>
     </V2Card>
   );

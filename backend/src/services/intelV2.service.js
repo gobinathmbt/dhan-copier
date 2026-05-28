@@ -1286,7 +1286,11 @@ function _masterVerdict({ pcr, peWriting, ceWriting, spot, vwap, ema9, ema20, em
   return { side, verdict, cePct: _round(cePct, 1), pePct: _round(pePct, 1), factors: f, weights: W };
 }
 
-/** Best-strike picker based on verdict + ladder health. */
+/** Best-strike picker based on verdict + ladder health.
+ *
+ *  IMPORTANT: callers may pass a pre-filtered ladder (e.g. only 100-spaced
+ *  strikes within ATM ± 6) — this function only ranks them.
+ */
 function _pickBestStrike(side, ladder, atm) {
   if (!Array.isArray(ladder) || !atm || (side !== 'CE' && side !== 'PE')) return null;
   const candidates = ladder.map(row => {
@@ -1301,7 +1305,7 @@ function _pickBestStrike(side, ladder, atm) {
     else if (dAbs >= 0.20 && dAbs <= 0.65) score += 18;
     else score += 5;
     if (moneyness === 0) score += 10;
-    else if (moneyness === 50 || moneyness === 100) score += 14;
+    else if (moneyness === 100 || moneyness === 200) score += 14;
     else if (moneyness < 0) score -= 10;
     if (ltp < 0.5) score -= 60;
     else if (ltp < 5) score -= 20;
@@ -1315,6 +1319,25 @@ function _pickBestStrike(side, ladder, atm) {
   .filter(c => c.ltp > 0.5)
   .sort((a, b) => b.score - a.score);
   return candidates[0] || null;
+}
+
+/**
+ * Reduce a ladder to ONLY 100-step strikes within ATM ± 6 strikes.
+ * Used by _bestTradePicks so the BUY CE / BUY PE recommendations always
+ * show round 100-step strikes (e.g. 23900 / 24000 / 24100), never 23950.
+ *
+ * Window — base anchor = round(atm/100)*100, then ±6 × 100 around it.
+ * Returns a fresh ladder array; caller's ladder is not mutated.
+ */
+function _hundredStepWindow(ladder, atm, range = 6) {
+  if (!Array.isArray(ladder) || !atm) return [];
+  const anchor = Math.round(atm / 100) * 100;
+  const lo = anchor - range * 100;
+  const hi = anchor + range * 100;
+  return ladder.filter(row => {
+    const k = Number(row.strike);
+    return Number.isFinite(k) && k % 100 === 0 && k >= lo && k <= hi;
+  });
 }
 
 /**
@@ -1345,8 +1368,15 @@ function _bestTradePicks({
 }) {
   if (!Array.isArray(ladder) || !atm) return null;
 
+  // Restrict candidate strikes to round 100-step strikes within ATM ± 6.
+  // This guarantees BUY CE / BUY PE recommendations land on clean strikes
+  // like 23900 / 24000 / 24100 (never 23950).
+  const filteredLadder = _hundredStepWindow(ladder, atm, 6);
+  // Anchor used for "ATM" detection in moneyness label (round to 100s)
+  const atmAnchor = Math.round(atm / 100) * 100;
+
   const buildPick = (side) => {
-    const pick = _pickBestStrike(side, ladder, atm);
+    const pick = _pickBestStrike(side, filteredLadder, atmAnchor);
     if (!pick) return null;
     const factors = {};
     let prob = 35; // base
@@ -2518,7 +2548,10 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
       ? (primary.side === 'CE' ? bestTradePick.pe : bestTradePick.ce)
       : null;
 
-    const STEP = sym.step || 50;
+    // STEP forced to 100 — Best Option Buy and Alternate Scenario should
+    // only land on round 100-spaced strikes (e.g. 23900, 24000, 24100).
+    // Falling back to 50 only when symbol is hard-coded to 50 (none currently).
+    const STEP = 100;
 
     function buildSetupCard(pick, isAlternate) {
       if (!pick) return null;
