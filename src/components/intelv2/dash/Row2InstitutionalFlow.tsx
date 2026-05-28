@@ -1,27 +1,28 @@
 ﻿import type { IntelV2Snapshot } from "@/lib/intelV2Types";
 import { V2Card, V2Pill, v2Fmt, V2_TONE, V2Hint } from "./common";
-import { OiBuildupAnalysisCard } from "./OiBuildupAnalysisCard";
+// 2.3 OI Buildup Analysis — REMOVED. Functionality covered by 2.2 + S/R Pressure.
+// import { OiBuildupAnalysisCard } from "./OiBuildupAnalysisCard";
 import { SupportResistanceCardV2 } from "./SupportResistanceCard";
+import { MarketDirectionCard } from "./MarketDirectionCard";
 
 export function Row2InstitutionalFlow({ data }: { data: IntelV2Snapshot | null }) {
   return (
     <div className="flex flex-col gap-2">
-      {/* Top compact row â€” Writing Pressure (left 50%) + FRVP Institutional Map (right 50%) */}
-      {/* 2.1 Spot vs Futures has been commented out below â€” spot/futures already shown in TopHeader */}
-      <div className="grid h-[560px] grid-cols-2 gap-2">
-        <div className="min-h-0"><WritingPressure data={data} /></div>
-        <div className="min-h-0"><FrvpInstitutional data={data} /></div>
+      {/* Top row â€” 2.2 Writing Pressure (60%) + 2.5 FRVP Institutional Map (40%) */}
+      <div className="grid h-[560px] grid-cols-10 gap-2">
+        <div className="col-span-6 min-h-0"><WritingPressure data={data} /></div>
+        <div className="col-span-4 min-h-0"><FrvpInstitutional data={data} /></div>
       </div>
 
-      {/* Big institutional OI Buildup Analysis (60%) + Support/Resistance Pressure (40%) */}
-      <div className="grid min-h-[640px] grid-cols-10 gap-2">
-        <div className="col-span-6 min-h-0">
-          <OiBuildupAnalysisCard data={data} />
-        </div>
+      {/* Middle row â€” 2.2b Market Direction (60%) + Support/Resistance Pressure (40%) */}
+      <div className="grid min-h-[560px] grid-cols-10 gap-2">
+        <div className="col-span-6 min-h-0"><MarketDirectionCard data={data} /></div>
         <div className="col-span-4 min-h-0">
           <SupportResistanceCardV2 data={data} />
         </div>
       </div>
+
+      {/* 2.3 OI Buildup Analysis â€” REMOVED. Functionality covered by 2.2 + Market Direction + S/R */}
     </div>
   );
 }
@@ -482,7 +483,7 @@ function WritingPanel({
   const accent = isCE ? "#ef4444" : "#22c55e";
   const accentSoft = isCE ? "rgba(239,68,68,0.06)" : "rgba(34,197,94,0.06)";
   const accentBorder = isCE ? "rgba(239,68,68,0.30)" : "rgba(34,197,94,0.30)";
-  const icon = isCE ? "ðŸ»" : "ðŸ‚";
+  const icon = isCE ? "" : "";
   const titleText = isCE ? "CALL WRITING PRESSURE (RESISTANCE)" : "PUT WRITING SUPPORT (SUPPORT)";
   const writerLabel = isCE ? "CALL WRITER ACTIVITY" : "PUT WRITER ACTIVITY";
   const hint = isCE

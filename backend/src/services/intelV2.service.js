@@ -2044,6 +2044,96 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
   });
 
   const supportResistance = _supportResistance(strikes, atm, spotPrice);
+
+  // ── 2.2 Market Direction Card ───────────────────────────────────────
+  // 3-tier resistance ladder + 3-tier support ladder + OI estimated move.
+  // Uses option chain ranked by absolute OI on each side, then categorises
+  // by strength (top OI = Immediate / next = Strong/Major / 3rd = Extreme/Critical).
+  const marketDirection = (() => {
+    const sortedStrikes = [...strikes].sort((a, b) => a.strike - b.strike);
+
+    // CE side — strikes >= ATM, ranked by OI desc, take top 3
+    const ceCandidates = sortedStrikes
+      .filter(s => Number(s.strike) >= atm)
+      .map(s => ({
+        strike: Number(s.strike),
+        oi: _safe(s.call?.oi ?? s.ce?.oi),
+        oiChange: _safe(s.call?.oiChange ?? s.ce?.oiChg ?? s.ce?.oiChange),
+      }))
+      .filter(r => r.oi > 0)
+      .sort((a, b) => b.oi - a.oi)
+      .slice(0, 3)
+      .sort((a, b) => a.strike - b.strike);  // ascending by strike for ladder
+
+    // PE side — strikes <= ATM, ranked by OI desc, take top 3
+    const peCandidates = sortedStrikes
+      .filter(s => Number(s.strike) <= atm)
+      .map(s => ({
+        strike: Number(s.strike),
+        oi: _safe(s.put?.oi ?? s.pe?.oi),
+        oiChange: _safe(s.put?.oiChange ?? s.pe?.oiChg ?? s.pe?.oiChange),
+      }))
+      .filter(r => r.oi > 0)
+      .sort((a, b) => b.oi - a.oi)
+      .slice(0, 3)
+      .sort((a, b) => b.strike - a.strike); // descending so closest is at top
+
+    // Tier labels (closest to spot = "Immediate", farthest = "Extreme")
+    const ceTiers = ['Immediate Resistance', 'Strong Resistance', 'Extreme Resistance'];
+    const peTiers = ['Immediate Support', 'Major Support', 'Critical Support'];
+    const resistances = ceCandidates.map((c, i) => ({
+      tier: ceTiers[i] || 'Resistance',
+      strike: c.strike,
+      oi: c.oi,
+      oiChange: c.oiChange,
+    }));
+    const supports = peCandidates.map((c, i) => ({
+      tier: peTiers[i] || 'Support',
+      strike: c.strike,
+      oi: c.oi,
+      oiChange: c.oiChange,
+    }));
+
+    // Direction meter — downside vs upside %
+    const downsidePct = _round(verdict.pePct, 0);
+    const upsidePct   = _round(verdict.cePct, 0);
+    // Needle position 0..100 (0 = full downside, 100 = full upside)
+    const needlePos = upsidePct;
+
+    // OI Estimated Move targets — based on max-pain pull + writer walls
+    //   Downside target = strongest support strike (most likely magnet down)
+    //   Upside target   = strongest resistance strike (most likely cap up)
+    //   But for "estimated move" we want the next confluence:
+    //     Downside = nearest PE wall above strongest support (or 2nd PE wall)
+    //     Upside   = nearest CE wall below strongest resistance (or 2nd CE wall)
+    const downsideTarget = peCandidates[1]?.strike ?? peCandidates[0]?.strike ?? null;
+    const upsideTarget   = ceCandidates[1]?.strike ?? ceCandidates[0]?.strike ?? null;
+
+    return {
+      directionMeter: {
+        downside: downsidePct,
+        upside:   upsidePct,
+        needlePos,
+        verdict:
+          downsidePct >= 65 ? 'STRONG DOWNSIDE'
+          : downsidePct >= 55 ? 'DOWNSIDE BIAS'
+          : upsidePct   >= 65 ? 'STRONG UPSIDE'
+          : upsidePct   >= 55 ? 'UPSIDE BIAS'
+          : 'BALANCED',
+        tone:
+          downsidePct >= 55 ? 'bear'
+          : upsidePct >= 55 ? 'bull' : 'warn',
+      },
+      resistances,
+      supports,
+      oiEstimatedMove: {
+        downsideTarget,
+        upsideTarget,
+        maxPain: atmBlk.maxPain,
+        spot: _round(spotPrice, 2),
+      },
+    };
+  })();
   const topStrikeSelections = _topStrikeSelections(ladder, atm, verdict, atmBlk);
   // OI Shift card — ATM ± 4 strikes spaced in 100s (e.g. 23800, 23900, ATM,
   // …). The bias summary turns the table into a single side+% verdict shown
@@ -2785,6 +2875,7 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
       oiHistogram,
       oiShiftBias,
       oiBuildupAnalysis,
+      marketDirection,
       cvdSeries,
       delta: {
         totalBuyVol: delta.totalBuy, totalSellVol: delta.totalSell,

@@ -524,6 +524,23 @@ export interface IntelV2Snapshot {
       ceTakeaway: string;
       peTakeaway: string;
     };
+    marketDirection: null | {
+      directionMeter: {
+        downside: number;
+        upside: number;
+        needlePos: number;
+        verdict: "STRONG DOWNSIDE" | "DOWNSIDE BIAS" | "STRONG UPSIDE" | "UPSIDE BIAS" | "BALANCED";
+        tone: "bull" | "bear" | "warn";
+      };
+      resistances: Array<{ tier: string; strike: number; oi: number; oiChange: number }>;
+      supports:    Array<{ tier: string; strike: number; oi: number; oiChange: number }>;
+      oiEstimatedMove: {
+        downsideTarget: number | null;
+        upsideTarget: number | null;
+        maxPain: number | null;
+        spot: number;
+      };
+    };
     cvdSeries: Array<{ t: number; cvd: number; lastLtp: number | null }>;
     delta: {
       totalBuyVol: number; totalSellVol: number;
