@@ -631,6 +631,50 @@ export interface IntelV2Snapshot {
       };
       reasons: string[];
     };
+    marketStory: {
+      headline: string;
+      tone: "bull" | "bear" | "warn";
+      paragraph: string;
+      lines: string[];
+      builtAt: number;
+    };
+    tradeStrategy: {
+      key: "BUY_ON_DIP_CE" | "SELL_ON_RISE_PE" | "BREAKOUT_CE_BUY" | "BREAKDOWN_PE_BUY" | "RANGE_MARKET";
+      verdict: "BUY CE" | "BUY PE" | "WAIT";
+      strategy: "BUY ON DIP" | "SELL ON RISE" | "BREAKOUT BUY" | "BREAKDOWN BUY" | "RANGE MARKET";
+      icon: string;
+      side: "CE" | "PE" | null;
+      strike: number | null;
+      tone: "bull" | "bear" | "warn";
+      headline: string;
+      subline: string;
+      confidence: number;
+      topReasons: string[];
+      scores: Record<string, number>;
+      edge: number;
+      ranked: Array<{ key: string; score: number }>;
+    };
+    premiumMomentum: {
+      topState: string;
+      topTone: "bull" | "bear" | "warn" | "neutral";
+      topLabel: string;
+      ceExpansionPct: number;
+      peExpansionPct: number;
+      ceSpark: number[];
+      peSpark: number[];
+      ceLtp: number;
+      peLtp: number;
+      momentumQuality: "STRONG" | "MODERATE" | "WEAK";
+      momentumTone: "bull" | "bear" | "warn" | "neutral";
+      momentumScore: number;
+      deltaSpeed: "AGGRESSIVE" | "MODERATE" | "SLOW" | "FLAT";
+      deltaTone: "bull" | "bear" | "warn";
+      deltaPct: number;
+      scalpingAggression: "HIGH" | "MODERATE" | "LOW";
+      scalpingTone: "bull" | "warn" | "neutral";
+      scalpingScore: number;
+      volSurge: boolean;
+    };
     bestTradePick: null | {
       ce: null | {
         side: "CE";

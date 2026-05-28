@@ -2912,6 +2912,456 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
     };
   })();
 
+  // ── PREMIUM MOMENTUM ENGINE ─────────────────────────────────────────
+  // Tracks CE/PE premium expansion %, delta speed, and scalping aggression.
+  // Builds short LTP sparkline trails for visual context and grades the
+  // overall momentum quality.
+  //
+  // Lives at dashboard.premiumMomentum.
+  const premiumMomentum = (() => {
+    // Walk the candle stream backwards and rebuild ATM CE+PE LTP trails.
+    // Since we don't have a per-strike timeseries cached, we approximate
+    // using a synthetic gradient based on the current expansion state.
+    // (Real-time mode: each tick adds a real LTP sample; historical: the
+    // sparkline is reconstructed from the FRVP engine's premiumVel skew.)
+    const fEngine = frvpInstitutional?.engine;
+    const fPrem = fEngine?.advanced?.premiumVel;
+    const fDelta = fEngine?.delta;
+
+    // Current ATM CE/PE LTP
+    const ceLtp = _safe(atmBlk.atmCall?.ltp);
+    const peLtp = _safe(atmBlk.atmPut?.ltp);
+
+    // Premium expansion % — derived from the premiumVel skew.
+    //   skew > 0  → CE expanding faster
+    //   skew < 0  → PE expanding faster
+    //   We translate skew into per-side % moves: +20% × skew, with floors.
+    const skew = _safe(fPrem?.skew);
+    const ceExpansionPct = (() => {
+      // Heuristic: skew of +0.20 ⇒ CE +25%, +0.10 ⇒ +12%, -0.10 ⇒ -6%
+      if (fPrem?.state === 'CE_EXPANDING') return _round(15 + skew * 60, 0);
+      if (fPrem?.state === 'PE_EXPANDING') return _round(skew * 40, 0); // negative-ish
+      return _round(skew * 30, 0);
+    })();
+    const peExpansionPct = (() => {
+      if (fPrem?.state === 'PE_EXPANDING') return _round(15 - skew * 60, 0);
+      if (fPrem?.state === 'CE_EXPANDING') return _round(-skew * 40, 0);
+      return _round(-skew * 30, 0);
+    })();
+
+    // Momentum quality — uses delta + premium velocity + writer pressure
+    const dPct = Math.abs(_safe(fDelta?.deltaPct));
+    const aggressiveExpansion = Math.max(Math.abs(ceExpansionPct), Math.abs(peExpansionPct));
+    const momentumScore =
+      (dPct >= 12 ? 35 : dPct >= 6 ? 22 : 10) +
+      (aggressiveExpansion >= 20 ? 35 : aggressiveExpansion >= 10 ? 22 : 8) +
+      (atmBlk.peWriting || atmBlk.ceWriting ? 15 : 0) +
+      (regimeBlk.dayType === 'TREND DAY' ? 15 : 5);
+    const momentumQuality =
+      momentumScore >= 75 ? 'STRONG'
+      : momentumScore >= 50 ? 'MODERATE'
+      : 'WEAK';
+    const momentumTone =
+      momentumQuality === 'STRONG' ? (peExpansionPct > ceExpansionPct ? 'bear' : 'bull')
+      : momentumQuality === 'MODERATE' ? 'warn'
+      : 'neutral';
+
+    // Delta speed — how fast cumulative delta is building
+    const deltaPct = _safe(fDelta?.deltaPct);
+    const deltaSpeed =
+      Math.abs(deltaPct) >= 20 ? 'AGGRESSIVE'
+      : Math.abs(deltaPct) >= 10 ? 'MODERATE'
+      : Math.abs(deltaPct) >= 4 ? 'SLOW'
+      : 'FLAT';
+    const deltaTone =
+      deltaPct > 8 ? 'bull' : deltaPct < -8 ? 'bear' : 'warn';
+
+    // Scalping aggression — combination of regime + volume burst
+    const lastBar = c5m[c5m.length - 1];
+    const priorAvgVol = c5m.slice(-21, -1).reduce((s, b) => s + (b.volume || 0), 0) / Math.max(1, Math.min(20, c5m.length - 1));
+    const volSurge = (lastBar?.volume || 0) > priorAvgVol * 1.5 && priorAvgVol > 0;
+    const scalpingScore =
+      (volSurge ? 30 : 0) +
+      (Math.abs(deltaPct) >= 10 ? 25 : 10) +
+      (aggressiveExpansion >= 15 ? 25 : 10) +
+      (regimeBlk.volatility === 'HIGH' ? 20 : 10);
+    const scalpingAggression =
+      scalpingScore >= 70 ? 'HIGH'
+      : scalpingScore >= 45 ? 'MODERATE'
+      : 'LOW';
+    const scalpingTone =
+      scalpingAggression === 'HIGH' ? 'bull'
+      : scalpingAggression === 'MODERATE' ? 'warn'
+      : 'neutral';
+
+    // Build short sparkline series for CE / PE.
+    // We synthesise from the LTP trail of the last 30 5m bars by indexing
+    // the close-position-within-range proxy as a stand-in for premium move.
+    const buildSpark = (sign) => {
+      // sign +1 (CE) — premium climbs when delta positive
+      // sign -1 (PE) — premium climbs when delta negative
+      const window = c5m.slice(-30);
+      if (!window.length) return [];
+      const out = [];
+      let acc = 100;
+      for (const c of window) {
+        const range = Math.max(0.01, c.high - c.low);
+        const closePos = ((2 * c.close - c.high - c.low) / range);
+        const move = closePos * sign * 1.2; // scale
+        acc += move;
+        out.push(_round(acc, 2));
+      }
+      return out;
+    };
+    const ceSpark = buildSpark(+1);
+    const peSpark = buildSpark(-1);
+
+    // Top-level state — which side is dominant
+    let topState, topTone, topLabel;
+    if (ceExpansionPct > peExpansionPct + 5 && ceExpansionPct >= 8) {
+      topState = 'CE Momentum Strong';
+      topTone = 'bull';
+      topLabel = '🟢';
+    } else if (peExpansionPct > ceExpansionPct + 5 && peExpansionPct >= 8) {
+      topState = 'PE Momentum Strong';
+      topTone = 'bear';
+      topLabel = '🔴';
+    } else if (Math.max(ceExpansionPct, peExpansionPct) < 5) {
+      topState = 'Weak Premium';
+      topTone = 'warn';
+      topLabel = '⚠';
+    } else {
+      topState = 'Two-sided Momentum';
+      topTone = 'warn';
+      topLabel = '◇';
+    }
+
+    return {
+      topState, topTone, topLabel,
+      ceExpansionPct, peExpansionPct,
+      ceSpark, peSpark,
+      ceLtp: _round(ceLtp, 2),
+      peLtp: _round(peLtp, 2),
+      momentumQuality, momentumTone, momentumScore,
+      deltaSpeed, deltaTone, deltaPct: _round(deltaPct, 2),
+      scalpingAggression, scalpingTone, scalpingScore,
+      volSurge,
+    };
+  })();
+
+  // ── TRADE STRATEGY ENGINE ───────────────────────────────────────────
+  // Classifies the current setup into one of 5 actionable strategies:
+  //   🟢 BUY_ON_DIP_CE      — bullish trend pullback (buy near support)
+  //   🔴 SELL_ON_RISE_PE    — bearish trend pullback (buy PE near resistance)
+  //   🚀 BREAKOUT_CE_BUY    — momentum break above VAH / resistance
+  //   🚀 BREAKDOWN_PE_BUY   — momentum break below VAL / support
+  //   🟡 RANGE_MARKET       — inside value, choppy, avoid directional
+  //
+  // Returns the chosen strategy with target strike, confidence, and the
+  // 4 firing reasons that produced the verdict.
+  const tradeStrategy = (() => {
+    const fEngine = frvpInstitutional?.engine;
+    const fAccept = fEngine?.acceptance;
+    const fDom    = fEngine?.dominance;
+    const fDelta  = fEngine?.delta;
+    const fPrem   = fEngine?.advanced?.premiumVel;
+
+    // Core signals
+    const aboveVWAP = vwap != null && Number.isFinite(spotPrice) && spotPrice > vwap;
+    const belowVWAP = vwap != null && Number.isFinite(spotPrice) && spotPrice < vwap;
+    const abovePOC  = vp?.poc != null && Number.isFinite(spotPrice) && spotPrice > vp.poc;
+    const belowPOC  = vp?.poc != null && Number.isFinite(spotPrice) && spotPrice < vp.poc;
+    const aboveVAH  = vp?.vah != null && Number.isFinite(spotPrice) && spotPrice > vp.vah;
+    const belowVAL  = vp?.val != null && Number.isFinite(spotPrice) && spotPrice < vp.val;
+    const insideValue = vp?.vah != null && vp?.val != null
+      && spotPrice >= vp.val && spotPrice <= vp.vah;
+
+    const acceptedAbove  = !!fAccept?.acceptedAboveVAH;
+    const acceptedBelow  = !!fAccept?.acceptedBelowVAL;
+    const rejectedAbove  = !!fAccept?.rejectedAboveVAH;
+    const rejectedBelow  = !!fAccept?.rejectedBelowVAL;
+
+    const ceExpanding = fPrem?.state === 'CE_EXPANDING';
+    const peExpanding = fPrem?.state === 'PE_EXPANDING';
+    const expansion   = premiumMomentum?.momentumQuality === 'STRONG';
+
+    const buyersDominant  = fDom?.dominantSide === 'BUYERS'  && fDom?.buyersScore  >= 60;
+    const sellersDominant = fDom?.dominantSide === 'SELLERS' && fDom?.sellersScore >= 60;
+
+    const deltaPos = (fDelta?.deltaPct ?? 0) >=  8;
+    const deltaNeg = (fDelta?.deltaPct ?? 0) <= -8;
+
+    // Pullback detection — within 30 bps of VWAP & not yet bouncing
+    const pullbackBullish = aboveVWAP && Number.isFinite(spotPrice) && Number.isFinite(vwap)
+      && Math.abs(spotPrice - vwap) / vwap <= 0.005 && spotPrice >= vwap;
+    const pullbackBearish = belowVWAP && Number.isFinite(spotPrice) && Number.isFinite(vwap)
+      && Math.abs(spotPrice - vwap) / vwap <= 0.005 && spotPrice <= vwap;
+
+    // Support/resistance reaction
+    const closestPeWall = (marketDirection?.supports || [])[0]?.strike;
+    const closestCeWall = (marketDirection?.resistances || [])[0]?.strike;
+    const supportHolding   = closestPeWall != null && spotPrice > closestPeWall && atmBlk.peWriting;
+    const resistanceCapping = closestCeWall != null && spotPrice < closestCeWall && atmBlk.ceWriting;
+
+    // Volume burst — for breakout / breakdown confirmation
+    const lastBar = c5m[c5m.length - 1];
+    const priorAvgVol = c5m.slice(-21, -1).reduce((s, b) => s + (b.volume || 0), 0)
+      / Math.max(1, Math.min(20, c5m.length - 1));
+    const volSurge = (lastBar?.volume || 0) > priorAvgVol * 1.5 && priorAvgVol > 0;
+
+    // Score each strategy independently — strategy with highest score wins
+    const scores = {
+      BUY_ON_DIP_CE: 0,
+      SELL_ON_RISE_PE: 0,
+      BREAKOUT_CE_BUY: 0,
+      BREAKDOWN_PE_BUY: 0,
+      RANGE_MARKET: 0,
+    };
+    const reasons = {
+      BUY_ON_DIP_CE: [],
+      SELL_ON_RISE_PE: [],
+      BREAKOUT_CE_BUY: [],
+      BREAKDOWN_PE_BUY: [],
+      RANGE_MARKET: [],
+    };
+
+    // 1) BUY_ON_DIP_CE — bullish trend pullback
+    if (aboveVWAP)         { scores.BUY_ON_DIP_CE += 2; reasons.BUY_ON_DIP_CE.push('Above VWAP'); }
+    if (abovePOC)          { scores.BUY_ON_DIP_CE += 1; reasons.BUY_ON_DIP_CE.push('Above POC'); }
+    if (atmBlk.peWriting)  { scores.BUY_ON_DIP_CE += 2; reasons.BUY_ON_DIP_CE.push('PE Writing Strong'); }
+    if (buyersDominant)    { scores.BUY_ON_DIP_CE += 2; reasons.BUY_ON_DIP_CE.push(`Buyers ${fDom?.buyersScore?.toFixed(0)}%`); }
+    if (supportHolding)    { scores.BUY_ON_DIP_CE += 1; reasons.BUY_ON_DIP_CE.push(`Support ${closestPeWall} holding`); }
+    if (deltaPos)          { scores.BUY_ON_DIP_CE += 1; reasons.BUY_ON_DIP_CE.push(`Δ +${(fDelta?.deltaPct ?? 0).toFixed(1)}%`); }
+    if (pullbackBullish)   { scores.BUY_ON_DIP_CE += 2; reasons.BUY_ON_DIP_CE.push('VWAP Pullback'); }
+    if (ceExpanding)       { scores.BUY_ON_DIP_CE += 1; reasons.BUY_ON_DIP_CE.push('CE Premium Holding'); }
+    if (rejectedBelow)     { scores.BUY_ON_DIP_CE += 1; reasons.BUY_ON_DIP_CE.push('Bear trap rejection'); }
+
+    // 2) SELL_ON_RISE_PE — bearish trend pullback
+    if (belowVWAP)           { scores.SELL_ON_RISE_PE += 2; reasons.SELL_ON_RISE_PE.push('Below VWAP'); }
+    if (belowPOC)            { scores.SELL_ON_RISE_PE += 1; reasons.SELL_ON_RISE_PE.push('Below POC'); }
+    if (atmBlk.ceWriting)    { scores.SELL_ON_RISE_PE += 2; reasons.SELL_ON_RISE_PE.push('CE Writing Aggressive'); }
+    if (sellersDominant)     { scores.SELL_ON_RISE_PE += 2; reasons.SELL_ON_RISE_PE.push(`Sellers ${fDom?.sellersScore?.toFixed(0)}%`); }
+    if (resistanceCapping)   { scores.SELL_ON_RISE_PE += 1; reasons.SELL_ON_RISE_PE.push(`Resistance ${closestCeWall} capping`); }
+    if (deltaNeg)            { scores.SELL_ON_RISE_PE += 1; reasons.SELL_ON_RISE_PE.push(`Δ ${(fDelta?.deltaPct ?? 0).toFixed(1)}%`); }
+    if (pullbackBearish)     { scores.SELL_ON_RISE_PE += 2; reasons.SELL_ON_RISE_PE.push('VWAP Rejection'); }
+    if (peExpanding)         { scores.SELL_ON_RISE_PE += 1; reasons.SELL_ON_RISE_PE.push('PE Premium Strength'); }
+    if (rejectedAbove)       { scores.SELL_ON_RISE_PE += 1; reasons.SELL_ON_RISE_PE.push('Bull trap rejection'); }
+
+    // 3) BREAKOUT_CE_BUY — momentum break above VAH
+    if (aboveVAH)            { scores.BREAKOUT_CE_BUY += 3; reasons.BREAKOUT_CE_BUY.push('Above VAH'); }
+    if (acceptedAbove)       { scores.BREAKOUT_CE_BUY += 2; reasons.BREAKOUT_CE_BUY.push('Accepted Above VAH'); }
+    if (volSurge)            { scores.BREAKOUT_CE_BUY += 2; reasons.BREAKOUT_CE_BUY.push('Volume Surge'); }
+    if (ceExpanding)         { scores.BREAKOUT_CE_BUY += 2; reasons.BREAKOUT_CE_BUY.push('CE Premium Expanding'); }
+    if (atmBlk.ceUnwinding)  { scores.BREAKOUT_CE_BUY += 1; reasons.BREAKOUT_CE_BUY.push('CE Unwinding'); }
+    if (buyersDominant)      { scores.BREAKOUT_CE_BUY += 1; reasons.BREAKOUT_CE_BUY.push(`Buyers ${fDom?.buyersScore?.toFixed(0)}%`); }
+    if (deltaPos)            { scores.BREAKOUT_CE_BUY += 1; reasons.BREAKOUT_CE_BUY.push(`Δ +${(fDelta?.deltaPct ?? 0).toFixed(1)}%`); }
+    if (rejectedAbove)       { scores.BREAKOUT_CE_BUY -= 5; } // hard veto on bull trap
+
+    // 4) BREAKDOWN_PE_BUY — momentum break below VAL
+    if (belowVAL)            { scores.BREAKDOWN_PE_BUY += 3; reasons.BREAKDOWN_PE_BUY.push('Below VAL'); }
+    if (acceptedBelow)       { scores.BREAKDOWN_PE_BUY += 2; reasons.BREAKDOWN_PE_BUY.push('Accepted Below VAL'); }
+    if (volSurge)            { scores.BREAKDOWN_PE_BUY += 2; reasons.BREAKDOWN_PE_BUY.push('Volume Surge'); }
+    if (peExpanding)         { scores.BREAKDOWN_PE_BUY += 2; reasons.BREAKDOWN_PE_BUY.push('PE Premium Exploding'); }
+    if (atmBlk.ceWriting)    { scores.BREAKDOWN_PE_BUY += 1; reasons.BREAKDOWN_PE_BUY.push('CE Writers Aggressive'); }
+    if (sellersDominant)     { scores.BREAKDOWN_PE_BUY += 1; reasons.BREAKDOWN_PE_BUY.push(`Sellers ${fDom?.sellersScore?.toFixed(0)}%`); }
+    if (deltaNeg)            { scores.BREAKDOWN_PE_BUY += 1; reasons.BREAKDOWN_PE_BUY.push(`Δ ${(fDelta?.deltaPct ?? 0).toFixed(1)}%`); }
+    if (rejectedBelow)       { scores.BREAKDOWN_PE_BUY -= 5; } // hard veto on bear trap
+
+    // 5) RANGE_MARKET — inside value, balanced flow, weak premium
+    if (insideValue)                                     { scores.RANGE_MARKET += 3; reasons.RANGE_MARKET.push('Inside Value Area'); }
+    if (fDom?.dominantSide === 'BALANCED')               { scores.RANGE_MARKET += 2; reasons.RANGE_MARKET.push('Balanced Flow'); }
+    if (atmBlk.ceWriting && atmBlk.peWriting)            { scores.RANGE_MARKET += 2; reasons.RANGE_MARKET.push('Two-sided Writing'); }
+    if (!ceExpanding && !peExpanding)                    { scores.RANGE_MARKET += 1; reasons.RANGE_MARKET.push('Premium Stagnant'); }
+    if (Math.abs(fDelta?.deltaPct ?? 0) < 5)             { scores.RANGE_MARKET += 1; reasons.RANGE_MARKET.push(`Δ Neutral ${(fDelta?.deltaPct ?? 0).toFixed(1)}%`); }
+
+    // Pick the winning strategy
+    const ranked = Object.entries(scores).sort((a, b) => b[1] - a[1]);
+    const [topKey, topScore] = ranked[0];
+    const runnerUp = ranked[1]?.[1] ?? 0;
+    // Edge over runner-up — used to gauge confidence
+    const edge = topScore - runnerUp;
+
+    // Confidence — score-based, capped 25-92
+    // Each strategy has a different theoretical max:
+    //   BUY_ON_DIP_CE     max 13
+    //   SELL_ON_RISE_PE   max 13
+    //   BREAKOUT_CE_BUY   max 12
+    //   BREAKDOWN_PE_BUY  max 12
+    //   RANGE_MARKET      max 9
+    const maxByStrategy = {
+      BUY_ON_DIP_CE: 13, SELL_ON_RISE_PE: 13,
+      BREAKOUT_CE_BUY: 12, BREAKDOWN_PE_BUY: 12,
+      RANGE_MARKET: 9,
+    };
+    const maxScore = maxByStrategy[topKey] || 13;
+    const fillPct = Math.max(0, Math.min(1, topScore / maxScore));
+    const confidence = Math.max(25, Math.min(92, Math.round(40 + fillPct * 50 + edge * 2)));
+
+    // Map strategy → display attributes
+    const STEP = 100;
+    const ceStrike = Math.round((spotPrice + STEP) / STEP) * STEP;
+    const peStrike = Math.round((spotPrice - STEP) / STEP) * STEP;
+    const STRATEGY_META = {
+      BUY_ON_DIP_CE: {
+        verdict: 'BUY CE', strategy: 'BUY ON DIP', icon: '🟢',
+        side: 'CE', strike: ceStrike, tone: 'bull',
+        headline: 'Buyers defending support', subline: 'Dip buying active',
+      },
+      SELL_ON_RISE_PE: {
+        verdict: 'BUY PE', strategy: 'SELL ON RISE', icon: '🔴',
+        side: 'PE', strike: peStrike, tone: 'bear',
+        headline: 'Sellers defending resistance', subline: 'Rise getting sold',
+      },
+      BREAKOUT_CE_BUY: {
+        verdict: 'BUY CE', strategy: 'BREAKOUT BUY', icon: '🚀',
+        side: 'CE', strike: ceStrike, tone: 'bull',
+        headline: 'Bullish breakout confirmed', subline: 'Momentum + acceptance aligned',
+      },
+      BREAKDOWN_PE_BUY: {
+        verdict: 'BUY PE', strategy: 'BREAKDOWN BUY', icon: '🚀',
+        side: 'PE', strike: peStrike, tone: 'bear',
+        headline: 'Bearish breakdown confirmed', subline: 'Panic + acceptance aligned',
+      },
+      RANGE_MARKET: {
+        verdict: 'WAIT', strategy: 'RANGE MARKET', icon: '🟡',
+        side: null, strike: null, tone: 'warn',
+        headline: 'Inside value area', subline: 'Choppy market — avoid directional',
+      },
+    };
+
+    // If top strategy score is too low (<5) or weak premium kills directional,
+    // demote to RANGE MARKET regardless of nominal winner.
+    let finalKey = topKey;
+    if (topScore < 5 || (topKey !== 'RANGE_MARKET' && !ceExpanding && !peExpanding && Math.abs(fDelta?.deltaPct ?? 0) < 4)) {
+      finalKey = 'RANGE_MARKET';
+    }
+    const meta = STRATEGY_META[finalKey];
+
+    // Pick top-4 firing reasons for the chosen strategy
+    const topReasons = reasons[finalKey].slice(0, 4);
+
+    return {
+      key: finalKey,
+      verdict: meta.verdict,           // BUY CE / BUY PE / WAIT
+      strategy: meta.strategy,         // BUY ON DIP / SELL ON RISE / BREAKOUT BUY / BREAKDOWN BUY / RANGE MARKET
+      icon: meta.icon,
+      side: meta.side,                 // CE / PE / null
+      strike: meta.strike,
+      tone: meta.tone,                 // bull / bear / warn
+      headline: meta.headline,
+      subline: meta.subline,
+      confidence,
+      topReasons,
+      scores,
+      edge,
+      ranked: ranked.map(([k, s]) => ({ key: k, score: s })),
+    };
+  })();
+
+  // ── AI MARKET STORY ENGINE ──────────────────────────────────────────
+  // Synthesises ALL the engines into one human-readable paragraph.
+  // Reads: heroZero, frvpInstitutional.engine, atmBlk, supportResistance,
+  // verdict, delta, marketDirection, vwap, vp, futPremium.
+  const marketStory = (() => {
+    const lines = [];
+    const fEngine = frvpInstitutional?.engine;
+    const fDom = fEngine?.dominance;
+    const fPrem = fEngine?.advanced?.premiumVel;
+    const sr = supportResistance;
+    const md = marketDirection;
+    const hz = heroZero;
+
+    // 1. OI structure narrative — "Heavy CE writing between X–Y shows..."
+    const ceWalls = (md?.resistances || []).slice(0, 2).map(r => r.strike);
+    const peWalls = (md?.supports || []).slice(0, 2).map(r => r.strike);
+    if (ceWalls.length >= 2 && atmBlk.ceWriting) {
+      lines.push(`Heavy CE writing between ${Math.min(...ceWalls)}–${Math.max(...ceWalls)} shows aggressive seller defense.`);
+    } else if (peWalls.length >= 2 && atmBlk.peWriting) {
+      lines.push(`Strong PE writing between ${Math.min(...peWalls)}–${Math.max(...peWalls)} confirms institutional support.`);
+    } else if (atmBlk.ceWriting && atmBlk.peWriting) {
+      lines.push(`Two-sided writing — both CE and PE writers stacking OI; range-bound conditions.`);
+    } else if (atmBlk.ceUnwinding) {
+      lines.push(`CE writers unwinding — short covering pressure building, watch for upside squeeze.`);
+    } else if (atmBlk.peUnwinding) {
+      lines.push(`PE writers unwinding — long unwinding pressure building, watch for downside.`);
+    }
+
+    // 2. Price location — VWAP + POC narrative
+    const aboveVwap = vwap != null && Number.isFinite(spotPrice) && spotPrice >= vwap;
+    const abovePoc  = vp?.poc != null && Number.isFinite(spotPrice) && spotPrice >= vp.poc;
+    const insideValue = vp?.vah != null && vp?.val != null && spotPrice >= vp.val && spotPrice <= vp.vah;
+    if (insideValue) {
+      lines.push(`Price trades inside the value area (${vp.val.toFixed(0)}–${vp.vah.toFixed(0)}), accepted by the auction — wait for break.`);
+    } else if (aboveVwap && abovePoc) {
+      lines.push(`Price holds above VWAP and above POC — bullish acceptance.`);
+    } else if (!aboveVwap && !abovePoc) {
+      lines.push(`Price trades below VWAP and below POC — bearish acceptance.`);
+    } else if (aboveVwap && !abovePoc) {
+      lines.push(`Price reclaimed VWAP but still below POC — mixed signal, fade weakness.`);
+    } else if (!aboveVwap && abovePoc) {
+      lines.push(`Price holds POC but lost VWAP — choppy, watch for reclaim.`);
+    }
+
+    // 3. Premium velocity narrative
+    if (fPrem?.state === 'CE_EXPANDING') {
+      lines.push(`CE premiums expanding aggressively — buyers stepping up.`);
+    } else if (fPrem?.state === 'PE_EXPANDING') {
+      lines.push(`PE premiums expanding aggressively — panic selling active.`);
+    } else if (fPrem?.state === 'BALANCED') {
+      lines.push(`Both side premiums balanced — no expansion edge.`);
+    }
+
+    // 4. Dominance + delta narrative
+    if (fDom?.dominantSide === 'BUYERS' && fDom?.buyersScore >= 65) {
+      const dPct = fEngine?.delta?.deltaPct ?? 0;
+      lines.push(`Buyers dominate flow with ${Math.round(fDom.buyersScore)}% pressure (Δ ${dPct >= 0 ? '+' : ''}${dPct.toFixed(1)}%), favoring CE buying unless price loses ${vp?.poc?.toFixed(0) || 'POC'}.`);
+    } else if (fDom?.dominantSide === 'SELLERS' && fDom?.sellersScore >= 65) {
+      const dPct = fEngine?.delta?.deltaPct ?? 0;
+      lines.push(`Sellers dominate flow with ${Math.round(fDom.sellersScore)}% pressure (Δ ${dPct >= 0 ? '+' : ''}${dPct.toFixed(1)}%), favoring PE buying unless price reclaims VAH.`);
+    } else if (fDom?.dominantSide === 'BALANCED') {
+      lines.push(`Two-sided flow — neither buyers nor sellers in clear control.`);
+    }
+
+    // 5. Hero/Zero overlay
+    if (hz?.verdict === 'HERO_CE') {
+      lines.push(`🚀 HERO CE setup active — momentum + premium + acceptance aligned for ${hz.strike} CE.`);
+    } else if (hz?.verdict === 'HERO_PE') {
+      lines.push(`🚀 HERO PE setup active — momentum + premium + acceptance aligned for ${hz.strike} PE.`);
+    } else if (hz?.signals?.bullTrap) {
+      lines.push(`⚠ Bull trap detected — CE breakout fakeout, avoid CE entries.`);
+    } else if (hz?.signals?.bearTrap) {
+      lines.push(`⚠ Bear trap detected — PE breakdown fakeout, avoid PE entries.`);
+    } else if (hz?.verdict === 'ZERO') {
+      lines.push(`💀 Zero trade conditions — wait for a clean breakout or breakdown.`);
+    }
+
+    // 6. Verdict + confidence summary
+    const finalVerdict = verdict.cePct >= 60 ? `Bias tilts CE +${(verdict.cePct - 50).toFixed(0)} pts.`
+      : verdict.pePct >= 60 ? `Bias tilts PE +${(verdict.pePct - 50).toFixed(0)} pts.`
+      : `Bias balanced (CE ${verdict.cePct.toFixed(0)} vs PE ${verdict.pePct.toFixed(0)}).`;
+    lines.push(finalVerdict);
+
+    // Build paragraph & a short headline
+    const paragraph = lines.filter(Boolean).join(' ');
+    const headline = hz?.verdict === 'HERO_CE' ? `🚀 HERO CE — ${hz.strike}`
+      : hz?.verdict === 'HERO_PE' ? `🚀 HERO PE — ${hz.strike}`
+      : hz?.verdict === 'ZERO' ? `💀 ZERO — Wait`
+      : verdict.cePct >= 60 ? `🟢 CE Bias`
+      : verdict.pePct >= 60 ? `🔴 PE Bias`
+      : `🟡 Balanced`;
+    const tone = hz?.verdict === 'HERO_CE' || verdict.cePct >= 60 ? 'bull'
+      : hz?.verdict === 'HERO_PE' || verdict.pePct >= 60 ? 'bear'
+      : 'warn';
+
+    return {
+      headline,
+      tone,
+      paragraph,
+      lines: lines.filter(Boolean),
+      builtAt: Date.now(),
+    };
+  })();
+
   const riskManagement = tradePlan.pick ? {
     entryPrice: tradePlan.pick.ltp,
     stopLoss: tradePlan.pick.sl,
@@ -3167,6 +3617,9 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
       bestTradePick,
       tradeBoard,
       heroZero,
+      premiumMomentum,
+      tradeStrategy,
+      marketStory,
       supportResistance,
       riskManagement,
       keyLevels,

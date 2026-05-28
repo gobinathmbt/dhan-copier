@@ -29,12 +29,12 @@ export function Row1bTradeBoard({ data }: { data: IntelV2Snapshot | null }) {
       <div className="col-span-4 min-h-0">
         <SetupCard title="Alternate Scenario" subtitle="(If Reversal)" icon="🔁" data={tb.alternateScenario} />
       </div>
-      <div className="col-span-2 min-h-0">
+      <div className="col-span-4 min-h-0">
         <BuyersSellersDonut data={data} />
       </div>
-      <div className="col-span-2 min-h-0">
+      {/* <div className="col-span-2 min-h-0">
         <ExecutionContextCard ctx={tb.executionContext} />
-      </div>
+      </div> */}
     </div>
   );
 }
