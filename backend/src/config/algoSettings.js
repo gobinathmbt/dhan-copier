@@ -169,9 +169,11 @@ const ALGO_SETTINGS = {
   enableTierSizing: true,
 
   // ── Trade window (IST HHMM, e.g. 920 = 09:20) ─────────────────────────
-  // Hybrid engine restricts NEW entries to this window. Default 09:20-15:00
-  // per user spec 2026-05-19. Set both to null to disable.
-  tradeWindowStart: 920,
+  // Hybrid engine restricts NEW entries to this window. Default 09:15-15:00
+  // (CALIBRATED 2026-05-27: was 09:20 → 09:15 to start at the bell; the
+  // engines' own data-readiness gates hold off entries until enough
+  // candles exist). Set both to null to disable.
+  tradeWindowStart: 915,
   tradeWindowEnd:   1500,
 
   // ── Ultra Scalp Engine (UT Bot mirror) ────────────────────────────────

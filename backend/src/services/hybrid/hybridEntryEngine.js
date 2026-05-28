@@ -1606,12 +1606,14 @@ async function decide({
   // override for live trading hygiene.
   //
   // Configure via settings.tradeWindowStart / settings.tradeWindowEnd
-  // (numbers in HHMM format, e.g. 920 or 1500). When unset, defaults are
-  // used. To disable the window entirely, set both to null.
+  // (numbers in HHMM format, e.g. 915 or 1500). When unset, defaults open
+  // at the market bell (09:15) and stop new entries at 15:00 IST. The
+  // strategy engines (support / ultra / core) gate their own warmup
+  // ("insufficient 3m candles" etc.) — this window is just a hard cap.
   const _winStartRaw = settings?.tradeWindowStart;
   const _winEndRaw   = settings?.tradeWindowEnd;
   const tradeWindowStart = (_winStartRaw === null || _winStartRaw === undefined)
-    ? 920  : Number(_winStartRaw);
+    ? 915  : Number(_winStartRaw);
   const tradeWindowEnd   = (_winEndRaw === null || _winEndRaw === undefined)
     ? 1500 : Number(_winEndRaw);
   const _hhmm = sessionPhase?.hhmm;
