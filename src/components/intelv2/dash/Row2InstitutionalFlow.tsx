@@ -22,8 +22,8 @@ export function Row2InstitutionalFlow({ data }: { data: IntelV2Snapshot | null }
         </div>
       </div>
 
-      {/* Below row â€” Support/Resistance Pressure full width */}
-      <div className="grid h-[420px] grid-cols-1 gap-2">
+      {/* Below row â€” Support/Resistance Pressure full width (compact) */}
+      <div className="grid h-[260px] grid-cols-1 gap-2">
         <div className="min-h-0">
           <SupportResistanceCardV2 data={data} />
         </div>

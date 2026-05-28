@@ -30,7 +30,7 @@ export function Row1bTradeBoard({ data }: { data: IntelV2Snapshot | null }) {
         <SetupCard title="Alternate Scenario" subtitle="(If Reversal)" icon="🔁" data={tb.alternateScenario} />
       </div>
       <div className="col-span-2 min-h-0">
-        <RiskGaugeCard gauge={tb.riskGauge} />
+        <BuyersSellersDonut data={data} />
       </div>
       <div className="col-span-2 min-h-0">
         <ExecutionContextCard ctx={tb.executionContext} />
@@ -171,57 +171,104 @@ function TargetCell({ label, value, accent }: { label: string; value: number; ac
 }
 
 /* ─────────────────────────────────────────────────────────────────────
- * Risk Gauge — radial score + 3 chips
+ * Buyers vs Sellers Donut — replaces the Risk Gauge.
+ * Sources from frvpInstitutional.engine.dominance (buyers/sellers score)
+ * and frvpInstitutional.engine.delta (deltaPct + bias).
  * ───────────────────────────────────────────────────────────────────── */
-function RiskGaugeCard({ gauge }: { gauge: NonNullable<NonNullable<IntelV2Snapshot["dashboard"]["tradeBoard"]>["riskGauge"]> }) {
-  const score = gauge.score;
-  const color =
-    score >= 70 ? V2_TONE.bear.color
-    : score >= 50 ? "#f97316"
-    : score >= 30 ? V2_TONE.warn.color
-    : V2_TONE.bull.color;
-  const strokeDasharray = 251;
-  const offset = strokeDasharray - (strokeDasharray * score) / 100;
+function BuyersSellersDonut({ data }: { data: IntelV2Snapshot | null }) {
+  const dom = data?.dashboard?.frvpInstitutional?.engine?.dominance;
+  const delt = data?.dashboard?.frvpInstitutional?.engine?.delta;
+  const buyers = Math.round(dom?.buyersScore ?? 50);
+  const sellers = Math.round(dom?.sellersScore ?? 50);
+  const dominant = dom?.dominantSide ?? "BALANCED";
+  const isBuyers = dominant === "BUYERS";
+  const isSellers = dominant === "SELLERS";
+  const dominantPct = isBuyers ? buyers : isSellers ? sellers : Math.max(buyers, sellers);
+  const dominantColor = isBuyers ? V2_TONE.bull.color : isSellers ? V2_TONE.bear.color : V2_TONE.warn.color;
+
+  const buyersLabel = buyers >= 60 ? "Dominating" : buyers >= 45 ? "Balanced" : "Weak";
+  const sellersLabel = sellers >= 60 ? "Dominating" : sellers >= 45 ? "Balanced" : "Weak";
+
+  const deltaPct = delt?.deltaPct ?? 0;
+  const deltaBias = delt?.bias ?? "neutral";
+  const deltaColor = deltaBias === "bullish" ? V2_TONE.bull.color
+    : deltaBias === "bearish" ? V2_TONE.bear.color
+    : V2_TONE.warn.color;
+  const deltaLabel = deltaBias === "bullish" ? "Positive"
+    : deltaBias === "bearish" ? "Negative"
+    : "Neutral";
+
+  // Donut math — 2π × r
+  const r = 36;
+  const c = 2 * Math.PI * r;
+  const buyersArc = (buyers / 100) * c;
+  const sellersArc = (sellers / 100) * c;
+
   return (
-    <V2Card title={<span>⚠ Risk Gauge</span>} accent={gauge.tone}>
-      <div className="-m-1.5 flex min-h-0 flex-1 flex-col items-center justify-around gap-1.5 p-1.5">
-        <div className="relative h-20 w-20">
+    <V2Card title={<span>🥊 Buyers vs Sellers</span>}>
+      <div className="-m-1.5 grid min-h-0 flex-1 grid-cols-[auto_1fr] items-center gap-2 p-1.5">
+        {/* Donut */}
+        <div className="relative h-[110px] w-[110px]">
           <svg viewBox="0 0 100 100" className="h-full w-full -rotate-90">
-            <circle cx="50" cy="50" r="40" fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="8" />
+            <circle cx="50" cy="50" r={r} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="10" />
+            {/* Buyers arc — green, starts at top, sweeps clockwise for buyers% */}
             <circle
-              cx="50" cy="50" r="40" fill="none"
-              stroke={color} strokeWidth="8" strokeLinecap="round"
-              strokeDasharray={strokeDasharray}
-              strokeDashoffset={offset}
-              style={{ transition: "stroke-dashoffset 0.6s ease, stroke 0.4s ease" }}
+              cx="50" cy="50" r={r} fill="none"
+              stroke={V2_TONE.bull.color} strokeWidth="10" strokeLinecap="butt"
+              strokeDasharray={`${buyersArc} ${c}`}
+              strokeDashoffset={0}
+              style={{ transition: "stroke-dasharray 0.6s ease" }}
+            />
+            {/* Sellers arc — red, starts where buyers ends */}
+            <circle
+              cx="50" cy="50" r={r} fill="none"
+              stroke={V2_TONE.bear.color} strokeWidth="10" strokeLinecap="butt"
+              strokeDasharray={`${sellersArc} ${c}`}
+              strokeDashoffset={-buyersArc}
+              style={{ transition: "stroke-dashoffset 0.6s ease, stroke-dasharray 0.6s ease" }}
             />
           </svg>
           <div className="absolute inset-0 flex flex-col items-center justify-center">
-            <span className="font-mono text-[18px] font-black leading-none" style={{ color }}>{score}%</span>
-            <span className="mt-0.5 text-[8px] font-bold uppercase tracking-wider" style={{ color }}>
-              {gauge.label}
+            <span className="font-mono text-[20px] font-black leading-none" style={{ color: dominantColor }}>
+              {dominantPct}%
+            </span>
+            <span className="mt-0.5 text-[8px] font-bold uppercase tracking-wider" style={{ color: dominantColor }}>
+              {dominant === "BUYERS" ? "BUYERS" : dominant === "SELLERS" ? "SELLERS" : "BALANCED"}
             </span>
           </div>
         </div>
-        <div className="grid w-full grid-cols-3 gap-1">
-          {gauge.chips.map((c, i) => {
-            const t = V2_TONE[c.tone];
-            return (
-              <div
-                key={i}
-                className="flex flex-col items-center rounded-sm border px-0.5 py-0.5"
-                style={{ borderColor: t.border, background: t.soft }}
-              >
-                <span className="text-[7px] font-bold uppercase tracking-wider text-white/55">{c.label}</span>
-                <span className="font-mono text-[10px] font-bold leading-none" style={{ color: t.color }}>
-                  {c.value}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-        <div className="line-clamp-2 text-center text-[9px] leading-tight text-white/65">
-          {gauge.hint}
+
+        {/* Right legend + delta */}
+        <div className="flex flex-col gap-1.5 text-[10px]">
+          <div className="flex items-center gap-1.5">
+            <span className="h-2 w-2 rounded-full" style={{ background: V2_TONE.bear.color }} />
+            <span className="font-bold text-white/80">Sellers</span>
+            <span className="ml-auto font-mono font-bold tabular-nums" style={{ color: V2_TONE.bear.color }}>
+              {sellers}%
+            </span>
+          </div>
+          <span className="-mt-1 ml-3.5 text-[9px] text-white/55">- {sellersLabel}</span>
+
+          <div className="flex items-center gap-1.5">
+            <span className="h-2 w-2 rounded-full" style={{ background: V2_TONE.bull.color }} />
+            <span className="font-bold text-white/80">Buyers</span>
+            <span className="ml-auto font-mono font-bold tabular-nums" style={{ color: V2_TONE.bull.color }}>
+              {buyers}%
+            </span>
+          </div>
+          <span className="-mt-1 ml-3.5 text-[9px] text-white/55">- {buyersLabel}</span>
+
+          <div className="my-0.5 h-px w-full bg-white/10" />
+
+          <div className="flex flex-col">
+            <span className="text-[8px] font-bold uppercase tracking-wider text-white/55">Delta</span>
+            <span className="font-mono text-[14px] font-bold tabular-nums" style={{ color: deltaColor }}>
+              {deltaPct >= 0 ? "+" : ""}{deltaPct.toFixed(2)}
+            </span>
+            <span className="text-[9px] font-bold" style={{ color: deltaColor }}>
+              ({deltaLabel})
+            </span>
+          </div>
         </div>
       </div>
     </V2Card>

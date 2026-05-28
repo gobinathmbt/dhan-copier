@@ -59,45 +59,50 @@ export function SupportResistanceCardV2({ data }: { data: IntelV2Snapshot | null
           </div>
         </div>
 
-        {/* Pressure bar */}
+        {/* Pressure bar â€” CE Walls (resistance) LEFT, PE Walls (support) RIGHT */}
         <div>
           <div className="mb-1.5 flex items-center justify-between text-[11px] uppercase tracking-[0.14em]">
-            <span className="flex items-center gap-1 text-emerald-400">
-              <TrendingUp size={11} />
-              Support · PE Walls
-            </span>
             <span className="flex items-center gap-1 text-rose-400">
-              Resistance · CE Walls
               <TrendingDown size={11} />
+              Resistance Â· CE Walls
+            </span>
+            <span className="flex items-center gap-1 text-emerald-400">
+              Support Â· PE Walls
+              <TrendingUp size={11} />
             </span>
           </div>
 
           <div className="relative h-8 overflow-visible rounded-md border border-white/[0.08] bg-black/40">
+            {/* LEFT half â€” CE / Resistance (red) */}
             <div
               className="absolute inset-y-0 left-0 flex items-center justify-start px-2 transition-all duration-700"
               style={{
-                width: `${tilt}%`,
-                background:
-                  "linear-gradient(90deg, rgba(16,185,129,0.45) 0%, rgba(16,185,129,0.15) 100%)",
-              }}
-            >
-              <span className="text-[12px] font-bold tabular-nums text-emerald-200">
-                {tilt}%
-              </span>
-            </div>
-            <div
-              className="absolute inset-y-0 right-0 flex items-center justify-end px-2 transition-all duration-700"
-              style={{
                 width: `${100 - tilt}%`,
                 background:
-                  "linear-gradient(90deg, rgba(239,68,68,0.15) 0%, rgba(239,68,68,0.45) 100%)",
+                  "linear-gradient(90deg, rgba(239,68,68,0.45) 0%, rgba(239,68,68,0.15) 100%)",
               }}
             >
               <span className="text-[12px] font-bold tabular-nums text-rose-200">
                 {100 - tilt}%
               </span>
             </div>
+            {/* RIGHT half â€” PE / Support (green) */}
+            <div
+              className="absolute inset-y-0 right-0 flex items-center justify-end px-2 transition-all duration-700"
+              style={{
+                width: `${tilt}%`,
+                background:
+                  "linear-gradient(90deg, rgba(16,185,129,0.15) 0%, rgba(16,185,129,0.45) 100%)",
+              }}
+            >
+              <span className="text-[12px] font-bold tabular-nums text-emerald-200">
+                {tilt}%
+              </span>
+            </div>
             <div className="absolute top-0 h-full w-px bg-white/30" style={{ left: "50%" }} />
+            {/* Needle â€” pulled to the side that dominates.
+                tilt = support pct (0..100). When tilt=70 → bullish → needle should
+                sit at 70% (toward right/PE side). */}
             <div
               className="absolute -top-2 transition-all duration-700 ease-out"
               style={{ left: `${arrowPct}%`, transform: "translateX(-50%)" }}
@@ -123,16 +128,16 @@ export function SupportResistanceCardV2({ data }: { data: IntelV2Snapshot | null
           </div>
 
           <div className="mt-1.5 flex items-center justify-between text-[11px] text-white/55">
-            <span>Strength {supportStrength.toLocaleString()}</span>
-            <span className="text-white/70">
-              spot {spotPrice != null ? spotPrice.toFixed(2) : "—"}
-            </span>
             <span>Strength {resistanceStrength.toLocaleString()}</span>
+            <span className="text-white/70">
+              spot {spotPrice != null ? spotPrice.toFixed(2) : "â€”"}
+            </span>
+            <span>Strength {supportStrength.toLocaleString()}</span>
           </div>
         </div>
 
         {/* Walls side-by-side — CE (resistances) on the LEFT, PE (supports) on the RIGHT */}
-        <div className="grid min-h-0 flex-1 grid-cols-2 gap-3 overflow-hidden">
+        {/* <div className="grid min-h-0 flex-1 grid-cols-2 gap-3 overflow-hidden">
           <WallList
             title="Top Resistances (CE)"
             tone="bear"
@@ -143,7 +148,7 @@ export function SupportResistanceCardV2({ data }: { data: IntelV2Snapshot | null
             tone="bull"
             rows={supports}
           />
-        </div>
+        </div> */}
 
         {/* Bottom meter — which side dominates + percentage */}
         <SupportResistanceMeter
