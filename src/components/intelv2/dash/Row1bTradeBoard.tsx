@@ -30,11 +30,10 @@ export function Row1bTradeBoard({ data }: { data: IntelV2Snapshot | null }) {
         <SetupCard title="Alternate Scenario" subtitle="(If Reversal)" icon="🔁" data={tb.alternateScenario} />
       </div>
       <div className="col-span-4 min-h-0">
-        <BuyersSellersDonut data={data} />
-      </div>
-      {/* <div className="col-span-2 min-h-0">
+        {/* Buyers vs Sellers donut moved INTO 2.5 FRVP Institutional Map.
+            This slot now hosts the Execution Context tile. */}
         <ExecutionContextCard ctx={tb.executionContext} />
-      </div> */}
+      </div>
     </div>
   );
 }

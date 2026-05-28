@@ -1259,36 +1259,96 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
           </div>
         </div>
 
-        {/* â”€â”€ DOMINANCE METER â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-        <div className="mt-2 flex flex-col gap-1.5 rounded-sm border border-white/[0.06] bg-white/[0.03] px-2.5 py-2">
-          <div className="flex items-center justify-between text-[11px]">
-            <span className="font-bold uppercase tracking-wider" style={{ color: domColor }}>
-              {domSide === "BUYERS" ? `BUYERS DOMINATING${e?.flow?.dominantCeBuyStrike != null ? ` (CE ${e.flow.dominantCeBuyStrike})` : ""}`
-                : domSide === "SELLERS" ? `SELLERS DOMINATING${e?.flow?.dominantPeBuyStrike != null ? ` (PE ${e.flow.dominantPeBuyStrike})` : ""}`
-                  : "BALANCED FLOW"}
-            </span>
-            <span className="flex items-center gap-1.5 font-mono font-bold tabular-nums" style={{ color: domColor }}>
-              {Math.round(Math.max(buyersScore, sellersScore))}%
-              {dom?.conviction === "high"
-                ? <span className="rounded-sm bg-emerald-500/20 px-1.5 py-0.5 text-[9px] tracking-wider text-emerald-300">CONFIRMED</span>
-                : dom?.conviction === "divergent"
-                  ? <span className="rounded-sm bg-amber-500/20 px-1.5 py-0.5 text-[9px] tracking-wider text-amber-300">DIVERGENT</span>
-                  : null}
-            </span>
+        {/* â”€â”€ BUYERS VS SELLERS DONUT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            Replaces the legacy SELLERS DOMINATING bar.
+            Same dominance + delta data, just rendered as a donut chart. */}
+        <div className="mt-2 grid grid-cols-[auto_1fr] items-center gap-3 rounded-sm border border-white/[0.06] bg-white/[0.03] px-2.5 py-2">
+          {/* Donut */}
+          <div className="relative h-[88px] w-[88px]">
+            {(() => {
+              const r = 36;
+              const c = 2 * Math.PI * r;
+              const buyersArc = (buyersScore / 100) * c;
+              const sellersArc = (sellersScore / 100) * c;
+              const dominantPct = Math.round(Math.max(buyersScore, sellersScore));
+              return (
+                <>
+                  <svg viewBox="0 0 100 100" className="h-full w-full -rotate-90">
+                    <circle cx="50" cy="50" r={r} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="11" />
+                    <circle
+                      cx="50" cy="50" r={r} fill="none"
+                      stroke="#22c55e" strokeWidth="11"
+                      strokeDasharray={`${buyersArc} ${c}`} strokeDashoffset={0}
+                    />
+                    <circle
+                      cx="50" cy="50" r={r} fill="none"
+                      stroke="#ef4444" strokeWidth="11"
+                      strokeDasharray={`${sellersArc} ${c}`} strokeDashoffset={-buyersArc}
+                    />
+                  </svg>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center">
+                    <span className="font-mono text-[16px] font-black leading-none" style={{ color: domColor }}>
+                      {dominantPct}%
+                    </span>
+                    <span className="mt-0.5 text-[8px] font-bold uppercase tracking-wider" style={{ color: domColor }}>
+                      {domSide}
+                    </span>
+                  </div>
+                </>
+              );
+            })()}
           </div>
-          <div className="flex h-2 overflow-hidden rounded-full bg-white/[0.06]">
-            <div className="h-full bg-emerald-500/80" style={{ width: `${buyersScore}%` }} />
-            <div className="h-full bg-rose-500/80" style={{ width: `${sellersScore}%` }} />
-          </div>
-          <div className="flex items-center justify-between text-[10px]">
-            <span className="text-emerald-400">Buyers {Math.round(buyersScore)}%</span>
-            <span className="text-white/45 font-mono">
-              Î” {e?.delta?.deltaPct != null ? `${e.delta.deltaPct >= 0 ? "+" : ""}${e.delta.deltaPct.toFixed(1)}%` : "â€”"}
+          {/* Right legend */}
+          <div className="flex flex-col gap-1 text-[10px]">
+            <div className="flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-full bg-rose-500" />
+              <span className="font-bold text-white/80">Sellers</span>
+              <span className="ml-auto font-mono font-bold tabular-nums text-rose-400">
+                {Math.round(sellersScore)}%
+              </span>
+            </div>
+            <span className="-mt-1 ml-3.5 text-[9px] text-white/55">
+              - {sellersScore >= 60 ? "Dominating" : sellersScore >= 45 ? "Balanced" : "Weak"}
             </span>
-            <span className="text-rose-400">Sellers {Math.round(sellersScore)}%</span>
-          </div>
-          <div className="text-center text-[9px] uppercase tracking-[0.18em] text-white/35">
-            Buyer Dominant Flow Estimate Â· Not Orderbook Tape
+            <div className="flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-full bg-emerald-500" />
+              <span className="font-bold text-white/80">Buyers</span>
+              <span className="ml-auto font-mono font-bold tabular-nums text-emerald-400">
+                {Math.round(buyersScore)}%
+              </span>
+            </div>
+            <span className="-mt-1 ml-3.5 text-[9px] text-white/55">
+              - {buyersScore >= 60 ? "Dominating" : buyersScore >= 45 ? "Balanced" : "Weak"}
+            </span>
+            {/* Delta footer */}
+            {e?.delta?.deltaPct != null ? (
+              <div className="mt-0.5 flex items-center justify-between border-t border-white/10 pt-1">
+                <span className="text-[8px] font-bold uppercase tracking-wider text-white/55">Delta</span>
+                <span
+                  className="font-mono text-[12px] font-bold tabular-nums"
+                  style={{
+                    color: e.delta.deltaPct > 8 ? "#22c55e"
+                      : e.delta.deltaPct < -8 ? "#ef4444" : "#facc15",
+                  }}
+                >
+                  {e.delta.deltaPct >= 0 ? "+" : ""}{e.delta.deltaPct.toFixed(2)}
+                  <span className="ml-1 text-[9px] opacity-65">
+                    ({e.delta.bias === "bullish" ? "Positive"
+                      : e.delta.bias === "bearish" ? "Negative" : "Neutral"})
+                  </span>
+                </span>
+              </div>
+            ) : null}
+            {dom?.conviction === "high" || dom?.conviction === "divergent" ? (
+              <span
+                className={`self-end rounded-sm px-1.5 py-0.5 text-[8px] tracking-wider ${dom.conviction === "high"
+                    ? "bg-emerald-500/20 text-emerald-300"
+                    : "bg-amber-500/20 text-amber-300"
+                  }`}
+              >
+                {dom.conviction === "high" ? "CONFIRMED" : "DIVERGENT"}
+              </span>
+            ) : null}
           </div>
         </div>
 
