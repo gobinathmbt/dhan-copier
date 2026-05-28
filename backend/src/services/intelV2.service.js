@@ -366,20 +366,21 @@ async function _macroContext() {
   if (Date.now() - _macroCache.at < MACRO_CACHE_MS && _macroCache.data) {
     return _macroCache.data;
   }
-  const [vix, gift, sp, nq, dxy, crude, nikkei] = await Promise.all([
+  const [vix, gift, sp, nq, dxy, crude, nikkei, sensex] = await Promise.all([
     _yahooQuote('^INDIAVIX'),
-    _yahooQuote('^NSEI'),
+    _yahooQuote('^NSEI'),       // proxy — Yahoo doesn't expose live Gift; we fall back to NIFTY index quote
     _yahooQuote('ES=F'),
     _yahooQuote('NQ=F'),
     _yahooQuote('DX-Y.NYB'),
     _yahooQuote('CL=F'),
     _yahooQuote('^N225'),
+    _yahooQuote('^BSESN'),      // BSE SENSEX
   ]);
   let fiiDii = null;
   try { fiiDii = await marketInternals.fetchInstitutionalFlowData(); }
   catch (_) {}
   const data = {
-    vix, giftNifty: gift,
+    vix, giftNifty: gift, sensex,
     usFutures: { sp500: sp, nasdaq: nq },
     dxy, crude, nikkei, fiiDii,
   };

@@ -240,6 +240,7 @@ export interface IntelV2Snapshot {
   macro: null | {
     vix?: { price: number; changePct: number } | null;
     giftNifty?: { price: number; changePct: number } | null;
+    sensex?: { price: number; changePct: number } | null;
     usFutures?: {
       sp500?: { price: number; changePct: number } | null;
       nasdaq?: { price: number; changePct: number } | null;

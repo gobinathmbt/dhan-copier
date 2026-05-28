@@ -11,8 +11,9 @@ import { Row2InstitutionalFlow } from "@/components/intelv2/dash/Row2Institution
 import { Row3ConfirmationLayer } from "@/components/intelv2/dash/Row3ConfirmationLayer";
 import { Row4StructureContext } from "@/components/intelv2/dash/Row4StructureContext";
 import { Row5NoTradeEngine } from "@/components/intelv2/dash/Row5NoTradeEngine";
-import { Row6BottomPanel } from "@/components/intelv2/dash/Row6BottomPanel";
-import { Row7AuctionPanel } from "@/components/intelv2/dash/Row7AuctionPanel";
+// Hidden: Row6 + Row7 are still imported for tree-shaking parity but not rendered.
+// import { Row6BottomPanel } from "@/components/intelv2/dash/Row6BottomPanel";
+// import { Row7AuctionPanel } from "@/components/intelv2/dash/Row7AuctionPanel";
 import { AlertsTickerV2 } from "@/components/intelv2/dash/AlertsTicker";
 
 export const Route = createFileRoute("/intel-v2")({
@@ -65,8 +66,10 @@ function IntelV2Page() {
         <Row3ConfirmationLayer data={data} />
         <Row4StructureContext data={data} />
         <Row5NoTradeEngine data={data} />
-        <Row7AuctionPanel data={data} />
-        <Row6BottomPanel data={data} />
+        {/* Sections below Row 5 are commented out per dashboard simplification.
+            Auction panel + bottom panel remain implemented but hidden. */}
+        {/* <Row7AuctionPanel data={data} /> */}
+        {/* <Row6BottomPanel data={data} /> */}
       </main>
 
       <AlertsTickerV2 data={data} />
