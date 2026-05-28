@@ -7,7 +7,7 @@ export function Row2InstitutionalFlow({ data }: { data: IntelV2Snapshot | null }
   return (
     <div className="flex flex-col gap-2">
       {/* Top compact row — Spot/Fut, OI Shift, FRVP Institutional Map */}
-      <div className="grid h-[360px] grid-cols-12 gap-2">
+      <div className="grid h-[460px] grid-cols-12 gap-2">
         <div className="col-span-2 min-h-0"><SpotVsFutures data={data} /></div>
         <div className="col-span-5 min-h-0"><OiShift data={data} /></div>
         <div className="col-span-5 min-h-0"><FrvpInstitutional data={data} /></div>
@@ -95,6 +95,7 @@ function OiShift({ data }: { data: IntelV2Snapshot | null }) {
 
   return (
     <V2Card title="2.2 OI Shift (Active Strikes)">
+      <div className="-m-1.5 flex min-h-0 flex-1 flex-col overflow-y-auto p-1.5 pr-2">
       <div className="grid grid-cols-[58px_60px_60px_60px_1fr] items-center gap-1 px-1 pb-1 text-[10px] font-bold uppercase tracking-wider text-white/45">
         <span>Strike</span>
         <span className="text-center">CE</span>
@@ -235,6 +236,7 @@ function OiShift({ data }: { data: IntelV2Snapshot | null }) {
         text={bias?.trend?.label || bias?.label || "Balanced"}
         tone={biasTone as "bull" | "bear" | "warn"}
       />
+      </div>
     </V2Card>
   );
 }
@@ -258,7 +260,6 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
   const verdictTone = e?.interpretation?.tone === "bull" ? "bull"
     : e?.interpretation?.tone === "bear" ? "bear"
     : e?.interpretation?.tone === "neutral" ? "neutral" : "warn";
-  const verdictColor = V2_TONE[verdictTone].color;
 
   // Top-line directional bias (Section 11)
   const dirBias = e?.directionalBias;
@@ -303,6 +304,7 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
         </span>
       }
     >
+      <div className="-m-1.5 flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-1.5 pr-2">
       {/* ── TOP STRIP — VAH / POC / VAL + gradient bar with marker + Spot status */}
       <div className="grid grid-cols-[auto_1fr_auto] items-center gap-3">
         <div className="flex flex-col gap-1 text-[11px]">
@@ -348,19 +350,37 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
       {acc ? (
         <div className="mt-2 grid grid-cols-2 gap-1.5 text-[10px]">
           <AcceptTile
-            label="Above VAH"
+            label={`Above VAH ${profile?.vah ?? f.vah ?? "—"}`}
             accepted={acc.acceptedAboveVAH}
             rejected={acc.rejectedAboveVAH}
             bars={acc.consecutiveAbove}
             volumeSurge={acc.volumeSurgeAbove}
           />
           <AcceptTile
-            label="Below VAL"
+            label={`Below VAL ${profile?.val ?? f.val ?? "—"}`}
             accepted={acc.acceptedBelowVAL}
             rejected={acc.rejectedBelowVAL}
             bars={acc.consecutiveBelow}
             volumeSurge={acc.volumeSurgeBelow}
           />
+        </div>
+      ) : null}
+
+      {/* ── DIRECTIONAL BIAS for option buyers — promoted ABOVE the dominance row ─ */}
+      {dirBias ? (
+        <div
+          className="mt-2 flex flex-col gap-0.5 rounded-sm border px-2.5 py-1.5"
+          style={{ borderColor: `${biasColor}55`, background: `${biasColor}10` }}
+        >
+          <div className="flex items-center justify-between text-[12px]">
+            <span className="flex items-center gap-2 font-bold uppercase tracking-[0.14em]" style={{ color: biasColor }}>
+              {dirBias.side === "CE" ? `BUY CE ${dirBias.targetStrike ?? ""}`
+               : dirBias.side === "PE" ? `BUY PE ${dirBias.targetStrike ?? ""}`
+               : "WAIT"}
+              <V2Pill label={dirBias.strength} tone={biasTone as "bull" | "bear" | "warn"} size="xs" />
+            </span>
+            <span className="text-[10px] text-white/65">{dirBias.reason}</span>
+          </div>
         </div>
       ) : null}
 
@@ -370,11 +390,17 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
           <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-emerald-400">BUYERS</div>
           <CompactPair label="Entering" value={`${f.buyers.entering}%`} valueColor="#22c55e" />
           <CompactPair label="CE Side"  value={`${ceBuyersPct.toFixed(0)}%`} valueColor="#22c55e" />
+          {e?.flow?.dominantCeBuyStrike != null ? (
+            <CompactPair label="CE Strike" value={String(e.flow.dominantCeBuyStrike)} valueColor="#22c55e" />
+          ) : null}
         </div>
         <div className="rounded-sm border border-rose-500/20 bg-rose-500/[0.04] px-2 py-1.5">
           <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-rose-400">SELLERS</div>
           <CompactPair label="Entering" value={`${f.sellers.entering}%`} valueColor="#ef4444" />
           <CompactPair label="PE Side"  value={`${peBuyersPct.toFixed(0)}%`} valueColor="#ef4444" />
+          {e?.flow?.dominantPeBuyStrike != null ? (
+            <CompactPair label="PE Strike" value={String(e.flow.dominantPeBuyStrike)} valueColor="#ef4444" />
+          ) : null}
         </div>
         <div className="rounded-sm border border-sky-500/20 bg-sky-500/[0.04] px-2 py-1.5">
           <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-sky-300">PARTICIPATION</div>
@@ -384,6 +410,9 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
             value={profile ? `${profile.profileStrength.toFixed(0)}%` : f.participationLevel || "—"}
             valueColor={profile ? (profile.profileStrength >= 35 ? "#22c55e" : profile.profileStrength <= 15 ? "#ef4444" : "#facc15") : "#facc15"}
           />
+          {advanced?.gammaWall ? (
+            <CompactPair label="γ Wall" value={String(advanced.gammaWall.strike)} valueColor="#a855f7" />
+          ) : null}
         </div>
       </div>
 
@@ -391,8 +420,8 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
       <div className="mt-2 flex flex-col gap-1.5 rounded-sm border border-white/[0.06] bg-white/[0.03] px-2.5 py-2">
         <div className="flex items-center justify-between text-[11px]">
           <span className="font-bold uppercase tracking-wider" style={{ color: domColor }}>
-            {domSide === "BUYERS" ? "BUYERS DOMINATING"
-             : domSide === "SELLERS" ? "SELLERS DOMINATING"
+            {domSide === "BUYERS" ? `BUYERS DOMINATING${e?.flow?.dominantCeBuyStrike != null ? ` (CE ${e.flow.dominantCeBuyStrike})` : ""}`
+             : domSide === "SELLERS" ? `SELLERS DOMINATING${e?.flow?.dominantPeBuyStrike != null ? ` (PE ${e.flow.dominantPeBuyStrike})` : ""}`
              : "BALANCED FLOW"}
           </span>
           <span className="flex items-center gap-1.5 font-mono font-bold tabular-nums" style={{ color: domColor }}>
@@ -419,20 +448,6 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
           Buyer Dominant Flow Estimate · Not Orderbook Tape
         </div>
       </div>
-
-      {/* ── DIRECTIONAL BIAS for option buyers (CE / PE / NEUTRAL) ─── */}
-      {dirBias ? (
-        <div
-          className="mt-2 flex items-center justify-between rounded-sm border px-2.5 py-1.5 text-[11px]"
-          style={{ borderColor: `${biasColor}55`, background: `${biasColor}10` }}
-        >
-          <span className="font-bold uppercase tracking-[0.14em]" style={{ color: biasColor }}>
-            {dirBias.side === "CE" ? "BUY CE" : dirBias.side === "PE" ? "BUY PE" : "WAIT"}
-          </span>
-          <V2Pill label={dirBias.strength} tone={biasTone as "bull" | "bear" | "warn"} size="xs" />
-          <span className="text-[10px] text-white/65">{dirBias.reason}</span>
-        </div>
-      ) : null}
 
       {/* ── ADVANCED OVERLAYS ──────────────────────────────────────── */}
       {advanced ? (
@@ -478,6 +493,7 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
         text={e?.interpretation?.summary || f.interpretation}
         tone={verdictTone as "bull" | "bear" | "warn" | "neutral"}
       />
+      </div>
     </V2Card>
   );
 }
@@ -547,15 +563,6 @@ function Row({
           {value}
         </span>
       )}
-    </div>
-  );
-}
-
-function RowCompact({ label, value, valueColor }: { label: string; value: string; valueColor?: string }) {
-  return (
-    <div className="flex items-center justify-between py-0.5 text-[11px]">
-      <span className="text-white/55">{label}</span>
-      <span className="font-mono font-bold tabular-nums" style={{ color: valueColor || "#fff" }}>{value}</span>
     </div>
   );
 }

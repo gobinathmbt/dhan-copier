@@ -302,15 +302,30 @@ function _classifyBuildup(side, oiChg, spotChange) {
 // ──────────────────────────────────────────────────────────────────────
 function _aggregateFlow(selectedStrikes, spotChange) {
   let ceBuy = 0, ceSell = 0, peBuy = 0, peSell = 0;
+  // Per-strike weighted contributions, used to find which strike is the
+  // dominant CE-buyer / PE-buyer / CE-seller / PE-seller.
+  const perStrike = [];
   for (const s of selectedStrikes) {
     const ceTag = s.ce.buildup || _classifyBuildup('CE', s.ce.oiChg, spotChange);
     const peTag = s.pe.buildup || _classifyBuildup('PE', s.pe.oiChg, spotChange);
     const ceW = _TAG_WEIGHTS[ceTag] || _TAG_WEIGHTS.Balanced;
     const peW = _TAG_WEIGHTS[peTag] || _TAG_WEIGHTS.Balanced;
-    ceBuy  += s.ce.vol * ceW.buy;
-    ceSell += s.ce.vol * ceW.sell;
-    peBuy  += s.pe.vol * peW.buy;
-    peSell += s.pe.vol * peW.sell;
+    const ceBuyShare  = s.ce.vol * ceW.buy;
+    const ceSellShare = s.ce.vol * ceW.sell;
+    const peBuyShare  = s.pe.vol * peW.buy;
+    const peSellShare = s.pe.vol * peW.sell;
+    ceBuy  += ceBuyShare;
+    ceSell += ceSellShare;
+    peBuy  += peBuyShare;
+    peSell += peSellShare;
+    perStrike.push({
+      strike: s.strike,
+      ceTag, peTag,
+      ceBuyShare:  Math.round(ceBuyShare),
+      ceSellShare: Math.round(ceSellShare),
+      peBuyShare:  Math.round(peBuyShare),
+      peSellShare: Math.round(peSellShare),
+    });
   }
   const ceTotal = ceBuy + ceSell || 1;
   const peTotal = peBuy + peSell || 1;
@@ -318,6 +333,18 @@ function _aggregateFlow(selectedStrikes, spotChange) {
   const peBuyersPct = (peBuy / peTotal) * 100;
   const buyersEntering  = (ceBuyersPct + peBuyersPct) / 2;
   const sellersEntering = 100 - buyersEntering;
+
+  // Dominant strike per side (the strike that contributes the most
+  // weighted volume to that side's flow).
+  const pickTop = (key) => {
+    const sorted = [...perStrike].sort((a, b) => b[key] - a[key]);
+    return sorted[0]?.[key] > 0 ? sorted[0] : null;
+  };
+  const dominantCeBuy   = pickTop('ceBuyShare');
+  const dominantCeSell  = pickTop('ceSellShare');
+  const dominantPeBuy   = pickTop('peBuyShare');
+  const dominantPeSell  = pickTop('peSellShare');
+
   return {
     ceBuy: _round(ceBuy, 0), ceSell: _round(ceSell, 0),
     peBuy: _round(peBuy, 0), peSell: _round(peSell, 0),
@@ -328,6 +355,11 @@ function _aggregateFlow(selectedStrikes, spotChange) {
     buyersEntering:  _round(buyersEntering, 1),
     sellersEntering: _round(sellersEntering, 1),
     selectedCount: selectedStrikes.length,
+    dominantCeBuyStrike:  dominantCeBuy?.strike  ?? null,
+    dominantCeSellStrike: dominantCeSell?.strike ?? null,
+    dominantPeBuyStrike:  dominantPeBuy?.strike  ?? null,
+    dominantPeSellStrike: dominantPeSell?.strike ?? null,
+    perStrike,
   };
 }
 
@@ -616,18 +648,95 @@ function evaluate({
     },
     // 11. Top-line directional bias for buyers
     directionalBias: (() => {
+      const dominant = dominance.dominantSide;
+      const conviction = dominance.conviction;
+
       // CE bias if buyers + acceptance above
-      if (dominance.dominantSide === 'BUYERS' && (acceptance.acceptedAboveVAH || location.side === 'above_value')) {
-        return { side: 'CE', strength: dominance.conviction === 'high' ? 'STRONG' : 'MODERATE',
-                 reason: 'buyers + acceptance above value' };
+      if (dominant === 'BUYERS' && (acceptance.acceptedAboveVAH || location.side === 'above_value')) {
+        return {
+          side: 'CE',
+          strength: conviction === 'high' ? 'STRONG' : conviction === 'divergent' ? 'WEAK' : 'MODERATE',
+          reason: 'buyers + acceptance above value',
+          targetStrike: flow.dominantCeBuyStrike ?? atm,
+        };
       }
-      if (dominance.dominantSide === 'SELLERS' && (acceptance.acceptedBelowVAL || location.side === 'below_value')) {
-        return { side: 'PE', strength: dominance.conviction === 'high' ? 'STRONG' : 'MODERATE',
-                 reason: 'sellers + acceptance below value' };
+      if (dominant === 'SELLERS' && (acceptance.acceptedBelowVAL || location.side === 'below_value')) {
+        return {
+          side: 'PE',
+          strength: conviction === 'high' ? 'STRONG' : conviction === 'divergent' ? 'WEAK' : 'MODERATE',
+          reason: 'sellers + acceptance below value',
+          targetStrike: flow.dominantPeBuyStrike ?? atm,
+        };
       }
-      if (acceptance.rejectedAboveVAH) return { side: 'PE', strength: 'STRONG', reason: 'bull trap rejected at VAH' };
-      if (acceptance.rejectedBelowVAL) return { side: 'CE', strength: 'STRONG', reason: 'bear trap rejected at VAL' };
-      return { side: 'NEUTRAL', strength: 'WEAK', reason: 'balanced auction' };
+
+      // Trap signals — only fire when option flow agrees with the trap.
+      // A bear trap that prints PE STRONG flow is a fakeout we must not
+      // chase as a CE entry. Only fire CE on a bear trap when buyers are
+      // clearly stepping in (or at least not getting overrun by sellers).
+      if (acceptance.rejectedAboveVAH) {
+        if (dominant === 'SELLERS') {
+          return {
+            side: 'PE',
+            strength: 'STRONG',
+            reason: 'bull trap at VAH + sellers dominating',
+            targetStrike: flow.dominantPeBuyStrike ?? atm,
+          };
+        }
+        return {
+          side: 'NEUTRAL',
+          strength: 'WEAK',
+          reason: 'bull trap at VAH but flow not yet aligned — wait',
+          targetStrike: null,
+        };
+      }
+      if (acceptance.rejectedBelowVAL) {
+        if (dominant === 'BUYERS') {
+          return {
+            side: 'CE',
+            strength: 'STRONG',
+            reason: 'bear trap at VAL + buyers dominating',
+            targetStrike: flow.dominantCeBuyStrike ?? atm,
+          };
+        }
+        if (dominant === 'SELLERS' || conviction === 'divergent') {
+          return {
+            side: 'NEUTRAL',
+            strength: 'WEAK',
+            reason: 'bear trap at VAL but sellers still dominate — wait',
+            targetStrike: null,
+          };
+        }
+        return {
+          side: 'CE',
+          strength: 'MODERATE',
+          reason: 'bear trap at VAL — flow neutral, partial CE bias',
+          targetStrike: flow.dominantCeBuyStrike ?? atm,
+        };
+      }
+
+      // Inside-value pure-flow plays
+      if (dominant === 'BUYERS' && conviction !== 'divergent') {
+        return {
+          side: 'CE',
+          strength: conviction === 'high' ? 'MODERATE' : 'WEAK',
+          reason: 'buyers leading inside value',
+          targetStrike: flow.dominantCeBuyStrike ?? atm,
+        };
+      }
+      if (dominant === 'SELLERS' && conviction !== 'divergent') {
+        return {
+          side: 'PE',
+          strength: conviction === 'high' ? 'MODERATE' : 'WEAK',
+          reason: 'sellers leading inside value',
+          targetStrike: flow.dominantPeBuyStrike ?? atm,
+        };
+      }
+      return {
+        side: 'NEUTRAL',
+        strength: 'WEAK',
+        reason: 'balanced auction',
+        targetStrike: null,
+      };
     })(),
     // Tone hint for color logic (Section 12)
     tone: interp.tone,

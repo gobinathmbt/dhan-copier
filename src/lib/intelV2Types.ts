@@ -401,6 +401,16 @@ export interface IntelV2Snapshot {
           ceSellersPct: number; peSellersPct: number;
           buyersEntering: number; sellersEntering: number;
           selectedCount: number;
+          dominantCeBuyStrike: number | null;
+          dominantCeSellStrike: number | null;
+          dominantPeBuyStrike: number | null;
+          dominantPeSellStrike: number | null;
+          perStrike: Array<{
+            strike: number;
+            ceTag: string; peTag: string;
+            ceBuyShare: number; ceSellShare: number;
+            peBuyShare: number; peSellShare: number;
+          }>;
         };
         delta: {
           cumulative: number;
@@ -432,6 +442,7 @@ export interface IntelV2Snapshot {
           side: "CE" | "PE" | "NEUTRAL";
           strength: "STRONG" | "MODERATE" | "WEAK";
           reason: string;
+          targetStrike: number | null;
         };
         tone: string;
       };
