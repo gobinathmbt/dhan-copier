@@ -357,6 +357,84 @@ export interface IntelV2Snapshot {
       participationStrike: number | null;
       participationLevel: "High" | "Medium" | "Low";
       interpretation: string;
+      engine: null | {
+        profile: {
+          vah: number; val: number; poc: number;
+          totalVolume: number;
+          profileStrength: number;
+          hvnZones: Array<{ price: number; volume: number; share: number }>;
+          lvnZones: Array<{ price: number; volume: number; share: number }>;
+          bins: Array<{ price: number; volume: number }>;
+          step: number;
+        };
+        location: {
+          insideValue: boolean;
+          outsideValue: boolean;
+          nearPOC: boolean;
+          markerPct: number;
+          side: "above_value" | "below_value" | "inside_value" | "unknown";
+        };
+        acceptance: {
+          acceptedAboveVAH: boolean;
+          acceptedBelowVAL: boolean;
+          rejectedAboveVAH: boolean;
+          rejectedBelowVAL: boolean;
+          consecutiveAbove: number;
+          consecutiveBelow: number;
+          volumeSurgeAbove: boolean;
+          volumeSurgeBelow: boolean;
+          lastClose: number | null;
+        };
+        selectedStrikes: Array<{
+          strike: number; isAtm: boolean;
+          ceOi: number; peOi: number;
+          ceVol: number; peVol: number;
+          ceOiChg: number; peOiChg: number;
+          ceLtp: number; peLtp: number;
+          ceIv: number; peIv: number;
+          ceBuildup: string; peBuildup: string;
+        }>;
+        flow: {
+          ceBuy: number; ceSell: number;
+          peBuy: number; peSell: number;
+          ceBuyersPct: number; peBuyersPct: number;
+          ceSellersPct: number; peSellersPct: number;
+          buyersEntering: number; sellersEntering: number;
+          selectedCount: number;
+        };
+        delta: {
+          cumulative: number;
+          deltaPct: number;
+          totalVolume?: number;
+          bias: "bullish" | "bearish" | "neutral";
+        };
+        dominance: {
+          buyersScore: number;
+          sellersScore: number;
+          dominantSide: "BUYERS" | "SELLERS" | "BALANCED";
+          pctFavour: number;
+          conviction: "high" | "normal" | "divergent";
+        };
+        interpretation: {
+          verdict: string;
+          tone: string;
+          lines: string[];
+          summary: string;
+        };
+        advanced: {
+          developingPOC: Array<{ t: number; poc: number }>;
+          gammaWall: { strike: number; gex: number } | null;
+          premiumVel: { ceLtp: number; peLtp: number; total: number; skew: number; state: string } | null;
+          nakedPOC: { price: number; volume: number; share: number } | null;
+          trapped: { side: string; detail: string } | null;
+        };
+        directionalBias: {
+          side: "CE" | "PE" | "NEUTRAL";
+          strength: "STRONG" | "MODERATE" | "WEAK";
+          reason: string;
+        };
+        tone: string;
+      };
     };
     futuresInfo: {
       oi: number; oiChange: number; volume: number;

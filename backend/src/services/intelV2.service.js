@@ -28,6 +28,7 @@ const dhanProd = require('./dhanProd.service');
 const niftyFuturesProd = require('./niftyFuturesProd.service');
 const settings = require('../config/algoSettings').getSettings();
 const marketInternals = require('./algorithms/marketInternals.service');
+const frvpEngine = require('./frvpEngine.service');
 
 const LIVE_FEED_DIR = path.join(__dirname, '../../live-feed');
 const YAHOO_API = 'https://query1.finance.yahoo.com/v8/finance/chart';
@@ -2142,6 +2143,17 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
 
   // ── Enriched FRVP Institutional Map (Row 2 card) ─────────────────────
   const frvpInstitutional = (() => {
+    // ── Run the full institutional auction engine (13-section spec) ──
+    const engine = frvpEngine.evaluate({
+      symbolKey: SYMBOL,
+      candles5m: c5m,
+      spotPrice,
+      spotChange,
+      strikes,
+      atm,
+      date: usedDate,
+    });
+
     // Buyers panel = avg of CE-buyers + PE-buyers (both legs view).
     // Sellers panel = avg of CE-sellers + PE-sellers.
     const buyersEntering  = Math.round((buyerSellerFlow.ce.buyersPct + buyerSellerFlow.pe.buyersPct) / 2);
@@ -2180,6 +2192,8 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
         if (auctionBiasOf(spotPrice, vp) === 'below') return 'Rejection below value — bearish auction.';
         return 'Mixed auction — observe acceptance.';
       })(),
+      // Full institutional engine output (Sections 1–13)
+      engine,
     };
   })();
 
