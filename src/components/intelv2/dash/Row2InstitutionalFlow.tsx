@@ -68,23 +68,31 @@ function CombinedWritingMarketCard({ data }: { data: IntelV2Snapshot | null }) {
 /* ── Writing Pressure body (no V2Card wrapper — for combined card) ── */
 function CombinedWritingPressureBody({ data }: { data: IntelV2Snapshot | null }) {
   const ana = data?.dashboard?.oiBuildupAnalysis;
-  if (!ana) {
+  const atm = data?.options?.atm;
+  if (!ana || !atm) {
     return (
       <div className="flex items-center justify-center py-4 text-[12px] text-white/40">
         No OI buildup data
       </div>
     );
   }
-  const spot = ana.spot.price;
+  // Restrict candidate strikes to 100-spaced strikes within ATM ± 6.
+  // Ensures the resistance / support ladders show clean strikes only —
+  // never 23950, only 23900 / 24000 / 24100 etc.
+  const anchor = Math.round(atm / 100) * 100;
+  const lo = anchor - 6 * 100;
+  const hi = anchor + 6 * 100;
+  const isClean = (k: number) => k % 100 === 0 && k >= lo && k <= hi;
+
   const ceStrikes = [...ana.ceTable]
-    .filter(r => r.strike >= spot - 50)
+    .filter(r => isClean(r.strike) && r.strike >= anchor)
     .sort((a, b) => Math.abs(b.oiChange) - Math.abs(a.oiChange))
-    .slice(0, 5)
+    .slice(0, 6)
     .sort((a, b) => b.strike - a.strike);
   const peStrikes = [...ana.peTable]
-    .filter(r => r.strike <= spot + 50)
+    .filter(r => isClean(r.strike) && r.strike <= anchor)
     .sort((a, b) => Math.abs(b.oiChange) - Math.abs(a.oiChange))
-    .slice(0, 5)
+    .slice(0, 6)
     .sort((a, b) => b.strike - a.strike);
   const ceTotalPct = ceStrikes.reduce((s, r) => s + Math.max(0, r.oiChangePct), 0);
   const peTotalPct = peStrikes.reduce((s, r) => s + Math.max(0, r.oiChangePct), 0);
@@ -166,28 +174,40 @@ function CombinedMarketDirectionBody({ data }: { data: IntelV2Snapshot | null })
         </div>
       </div>
 
-      {/* 2. Intraday Levels */}
+      {/* 2. Intraday Levels (Important) â€” Excel-style mirrored ladder.
+          Resistances: label LEFT, strike CENTER (rose).
+          Supports:    strike CENTER (emerald), label RIGHT.
+          Up to 6 of each side (ATM Â± 6, 100-step strikes only). */}
       <div className="flex flex-col gap-1">
         <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-white/85">
           Intraday Levels <span className="text-white/45">(Important)</span>
         </span>
-        <div className="grid grid-cols-2 gap-2">
-          <div className="rounded-md border border-rose-500/30 bg-rose-500/[0.05]">
-            {md.resistances.length === 0 && (
-              <div className="px-2 py-2 text-center text-[10px] text-white/45">No resistance data</div>
-            )}
-            {md.resistances.map((r, i) => (
-              <CombinedLevelRow key={i} label={r.tier} value={r.strike} tone="bear" first={i === 0} />
-            ))}
-          </div>
-          <div className="rounded-md border border-emerald-500/30 bg-emerald-500/[0.05]">
-            {md.supports.length === 0 && (
-              <div className="px-2 py-2 text-center text-[10px] text-white/45">No support data</div>
-            )}
-            {md.supports.map((r, i) => (
-              <CombinedLevelRow key={i} label={r.tier} value={r.strike} tone="bull" first={i === 0} />
-            ))}
-          </div>
+        <div className="overflow-hidden rounded-md border border-white/[0.08]">
+          {/* Resistance rows â€” closest first (Immediate at top) */}
+          {md.resistances.length === 0 && (
+            <div className="px-2 py-2 text-center text-[10px] text-white/45">No resistance data</div>
+          )}
+          {md.resistances.map((r, i) => (
+            <ExcelLevelRow
+              key={`r-${i}`}
+              tier={r.tier}
+              strike={r.strike}
+              side="resistance"
+              first={i === 0}
+              tierFirst
+            />
+          ))}
+          {/* Support rows â€” closest first (Immediate at top) */}
+          {md.supports.map((r, i) => (
+            <ExcelLevelRow
+              key={`s-${i}`}
+              tier={r.tier}
+              strike={r.strike}
+              side="support"
+              first={false}
+              tierFirst={false}
+            />
+          ))}
         </div>
       </div>
 
@@ -220,13 +240,81 @@ function CombinedLevelRow({
   const t = V2_TONE[tone];
   return (
     <div
-      className={`flex items-center justify-between px-2.5 py-1 text-[12px] ${!first ? "border-t border-white/[0.04]" : ""
+      className={`flex items-center justify-between px-3 py-2 text-[13px] ${!first ? "border-t border-white/[0.04]" : ""
         }`}
     >
-      <span className="text-white/75">{label}</span>
-      <span className="font-mono text-[13px] font-bold tabular-nums" style={{ color: t.color }}>
+      <span className="text-white/80">{label}</span>
+      <span className="font-mono text-[15px] font-bold tabular-nums" style={{ color: t.color }}>
         {value.toLocaleString()}
       </span>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * Excel-style mirrored ladder row used inside the Intraday Levels block.
+ * Three columns: [LEFT label] [CENTER strike] [RIGHT label].
+ *   • Resistance rows  → label on LEFT (light-green tint), strike CENTER (with CE tag)
+ *   • Support rows     → strike CENTER (with PE tag), label on RIGHT (light-red tint)
+ * Compact, light-tone styling.
+ * ───────────────────────────────────────────────────────────────────── */
+function ExcelLevelRow({
+  tier, strike, side, first, tierFirst,
+}: {
+  tier: string;
+  strike: number;
+  side: "resistance" | "support";
+  first: boolean;
+  tierFirst: boolean;
+}) {
+  const isRes = side === "resistance";
+  // Light tones — softened from the previous solid backgrounds.
+  const labelBg = isRes ? "rgba(34,197,94,0.18)"  : "rgba(239,68,68,0.18)";
+  const labelColor = isRes ? "#86efac" : "#fda4af";
+  const strikeBg = isRes ? "rgba(34,197,94,0.06)"  : "rgba(239,68,68,0.06)";
+  const strikeColor = isRes ? "#86efac" : "#fda4af";
+  const tag = isRes ? "CE" : "PE";
+  return (
+    <div
+      className={`grid grid-cols-[1fr_104px_1fr] items-center text-[11px] ${first ? "" : "border-t border-white/[0.04]"
+        }`}
+    >
+      {/* LEFT cell — only filled for resistance rows */}
+      {tierFirst ? (
+        <div
+          className="flex items-center px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide"
+          style={{ background: labelBg, color: labelColor }}
+        >
+          {tier}
+        </div>
+      ) : (
+        <div className="px-2.5 py-1" />
+      )}
+
+      {/* CENTER strike + side tag */}
+      <div
+        className="flex items-center justify-center gap-1 px-2 py-1"
+        style={{ background: strikeBg }}
+      >
+        <span className="font-mono text-[12px] font-bold tabular-nums" style={{ color: strikeColor }}>
+          {strike.toLocaleString()}
+        </span>
+        <span className="text-[8px] font-bold uppercase tracking-wider opacity-65" style={{ color: strikeColor }}>
+          {tag}
+        </span>
+      </div>
+
+      {/* RIGHT cell — only filled for support rows */}
+      {!tierFirst ? (
+        <div
+          className="flex items-center px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide"
+          style={{ background: labelBg, color: labelColor }}
+        >
+          {tier}
+        </div>
+      ) : (
+        <div className="px-2.5 py-1" />
+      )}
     </div>
   );
 }
@@ -479,7 +567,8 @@ function CombinedTargetTile({
 // build, with a 7-segment strength bar and a writer-activity footer.
 function WritingPressure({ data }: { data: IntelV2Snapshot | null }) {
   const ana = data?.dashboard?.oiBuildupAnalysis;
-  if (!ana) {
+  const atm = data?.options?.atm;
+  if (!ana || !atm) {
     return (
       <V2Card title="2.2 Writing Pressure (Resistance & Support)">
         <div className="flex h-full items-center justify-center text-[12px] text-white/40">
@@ -488,19 +577,23 @@ function WritingPressure({ data }: { data: IntelV2Snapshot | null }) {
       </V2Card>
     );
   }
-  const spot = ana.spot.price;
+  // 100-step + ATM ± 6 filter — same rule as CombinedWritingPressureBody.
+  const anchor = Math.round(atm / 100) * 100;
+  const lo = anchor - 6 * 100;
+  const hi = anchor + 6 * 100;
+  const isClean = (k: number) => k % 100 === 0 && k >= lo && k <= hi;
 
-  // Pick top-5 CE strikes ABOVE spot ranked by |Î”OI| (resistance ladder).
-  // Pick top-5 PE strikes BELOW spot ranked by |Î”OI| (support ladder).
+  // Pick top-6 CE strikes ABOVE/AT ATM ranked by |Î”OI| (resistance ladder).
+  // Pick top-6 PE strikes BELOW/AT ATM ranked by |Î”OI| (support ladder).
   const ceStrikes = [...ana.ceTable]
-    .filter(r => r.strike >= spot - 50) // include ATM and above
+    .filter(r => isClean(r.strike) && r.strike >= anchor)
     .sort((a, b) => Math.abs(b.oiChange) - Math.abs(a.oiChange))
-    .slice(0, 5)
+    .slice(0, 6)
     .sort((a, b) => b.strike - a.strike);
   const peStrikes = [...ana.peTable]
-    .filter(r => r.strike <= spot + 50) // include ATM and below
+    .filter(r => isClean(r.strike) && r.strike <= anchor)
     .sort((a, b) => Math.abs(b.oiChange) - Math.abs(a.oiChange))
-    .slice(0, 5)
+    .slice(0, 6)
     .sort((a, b) => b.strike - a.strike);
 
   // CE writer activity score â€” sum of % build across the top resistance strikes.

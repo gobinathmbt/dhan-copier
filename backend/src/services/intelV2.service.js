@@ -920,7 +920,7 @@ function _oiHistogram(strikes, atm, range = 4, displayStep = 100, ctx = {}) {
  * yesterday is reconstructed as `today - oiChange` per leg — matches the
  * Sensibull/IIFL convention.
  */
-function _oiBuildupAnalysis(strikes, atm, spotPrice, displayStep = 100, range = 4) {
+function _oiBuildupAnalysis(strikes, atm, spotPrice, displayStep = 100, range = 6) {
   if (!Array.isArray(strikes) || !atm) {
     return null;
   }
@@ -2082,9 +2082,17 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
   const marketDirection = (() => {
     const sortedStrikes = [...strikes].sort((a, b) => a.strike - b.strike);
 
-    // CE side — strikes >= ATM, ranked by OI desc, take top 3
+    // Restrict resistance/support ladders to clean 100-step strikes within
+    // ATM ± 6. Prevents non-round 50-step strikes (e.g. 23950) from showing
+    // in the Intraday Levels block.
+    const anchor = Math.round(atm / 100) * 100;
+    const winLo = anchor - 6 * 100;
+    const winHi = anchor + 6 * 100;
+    const isClean = (k) => k % 100 === 0 && k >= winLo && k <= winHi;
+
+    // CE side — clean 100-step strikes >= anchor, ranked by OI desc, take top 3
     const ceCandidates = sortedStrikes
-      .filter(s => Number(s.strike) >= atm)
+      .filter(s => isClean(Number(s.strike)) && Number(s.strike) >= anchor)
       .map(s => ({
         strike: Number(s.strike),
         oi: _safe(s.call?.oi ?? s.ce?.oi),
@@ -2092,12 +2100,12 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
       }))
       .filter(r => r.oi > 0)
       .sort((a, b) => b.oi - a.oi)
-      .slice(0, 3)
+      .slice(0, 6)
       .sort((a, b) => a.strike - b.strike);  // ascending by strike for ladder
 
-    // PE side — strikes <= ATM, ranked by OI desc, take top 3
+    // PE side — clean 100-step strikes <= anchor, ranked by OI desc, take top 6
     const peCandidates = sortedStrikes
-      .filter(s => Number(s.strike) <= atm)
+      .filter(s => isClean(Number(s.strike)) && Number(s.strike) <= anchor)
       .map(s => ({
         strike: Number(s.strike),
         oi: _safe(s.put?.oi ?? s.pe?.oi),
@@ -2105,12 +2113,19 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
       }))
       .filter(r => r.oi > 0)
       .sort((a, b) => b.oi - a.oi)
-      .slice(0, 3)
+      .slice(0, 6)
       .sort((a, b) => b.strike - a.strike); // descending so closest is at top
 
-    // Tier labels (closest to spot = "Immediate", farthest = "Extreme")
-    const ceTiers = ['Immediate Resistance', 'Strong Resistance', 'Extreme Resistance'];
-    const peTiers = ['Immediate Support', 'Major Support', 'Critical Support'];
+    // Tier labels — closest to spot = "Immediate", farthest = "Extreme/Critical".
+    // Six-tier ladder so we can show ATM ± 6 levels in the Intraday Levels card.
+    const ceTiers = [
+      'Immediate Resistance', 'Strong Resistance', 'Extreme Resistance',
+      'R4 (Major)', 'R5 (Heavy)', 'R6 (Wall)',
+    ];
+    const peTiers = [
+      'Immediate Support', 'Major Support', 'Critical Support',
+      'S4 (Deep)', 'S5 (Floor)', 'S6 (Bedrock)',
+    ];
     const resistances = ceCandidates.map((c, i) => ({
       tier: ceTiers[i] || 'Resistance',
       strike: c.strike,
@@ -2171,7 +2186,9 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
   const oiHistogram = _oiHistogram(strikes, atm, 4, 100, { spot: spotPrice });
   const oiShiftBias = _oiShiftBias(oiHistogram);
   // 2.3 OI Buildup Analysis — top stats + per-side tables + bar charts
-  const oiBuildupAnalysis = _oiBuildupAnalysis(strikes, atm, spotPrice, 100, 4);
+  // (range=6 → ATM ± 6 strikes on each side, 100-spaced; feeds the Writing
+  //  Pressure ladders and downstream readers.)
+  const oiBuildupAnalysis = _oiBuildupAnalysis(strikes, atm, spotPrice, 100, 6);
 
   const ivRank = _ivRank(atmBlk.atmIv);
   const ivTrendSeries = (() => {
