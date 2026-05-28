@@ -31,7 +31,8 @@ export function Row1bTradeBoard({ data }: { data: IntelV2Snapshot | null }) {
       </div>
       <div className="col-span-4 min-h-0">
         {/* Buyers vs Sellers donut moved INTO 2.5 FRVP Institutional Map.
-            This slot now hosts the Execution Context tile. */}
+            Smart Money Flow card moved to its own full-width row below.
+            This slot now hosts the Execution Context tile back. */}
         <ExecutionContextCard ctx={tb.executionContext} />
       </div>
     </div>

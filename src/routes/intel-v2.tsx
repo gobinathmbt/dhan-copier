@@ -8,9 +8,11 @@ import { TopHeaderV2 } from "@/components/intelv2/dash/TopHeader";
 import { Row1MasterDecision } from "@/components/intelv2/dash/Row1MasterDecision";
 import { Row1bTradeBoard } from "@/components/intelv2/dash/Row1bTradeBoard";
 import { HeroZeroCard } from "@/components/intelv2/dash/HeroZeroCard";
+import { ExecutionEngineCard } from "@/components/intelv2/dash/ExecutionEngineCard";
 import { PremiumMomentumCard } from "@/components/intelv2/dash/PremiumMomentumCard";
 import { TradeStrategyCard } from "@/components/intelv2/dash/TradeStrategyCard";
 import { MarketStoryCard } from "@/components/intelv2/dash/MarketStoryCard";
+import { FiiDiiCard } from "@/components/intelv2/dash/FiiDiiCard";
 import { Row2InstitutionalFlow } from "@/components/intelv2/dash/Row2InstitutionalFlow";
 import { Row3ConfirmationLayer } from "@/components/intelv2/dash/Row3ConfirmationLayer";
 import { Row4StructureContext } from "@/components/intelv2/dash/Row4StructureContext";
@@ -65,7 +67,9 @@ function IntelV2Page() {
 
       <main className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto p-2.5">
         <Row1MasterDecision data={data} />
-        {/* Hero/Zero (40%) + Premium Momentum (30%) + Trade Strategy (30%) */}
+        {/* AI Execution Engine — final decision brain (single source of truth) */}
+        <div className="h-[230px]"><ExecutionEngineCard data={data} /></div>
+        {/* Hero/Zero (40%) + Premium Momentum (30%) + Trade Strategy (30%) â€” supporting layer */}
         <div className="grid h-[260px] grid-cols-10 gap-2">
           <div className="col-span-4 min-h-0"><HeroZeroCard data={data} /></div>
           <div className="col-span-3 min-h-0"><PremiumMomentumCard data={data} /></div>
@@ -77,7 +81,9 @@ function IntelV2Page() {
         <Row4StructureContext data={data} />
         <Row5NoTradeEngine data={data} />
         <div className="min-h-[280px]"><MarketStoryCard data={data} /></div>
-        {/* Sections below Row 5 are commented out per dashboard simplification.
+        {/* Full-width Smart Money Flow — FII/DII/PRO/CLIENT institutional positioning (BOTTOM ROW) */}
+        <div className="h-[700px] flex-shrink-0"><FiiDiiCard data={data} /></div>
+        {/* Sections below are commented out per dashboard simplification.
             Auction panel + bottom panel remain implemented but hidden. */}
         {/* <Row7AuctionPanel data={data} /> */}
         {/* <Row6BottomPanel data={data} /> */}

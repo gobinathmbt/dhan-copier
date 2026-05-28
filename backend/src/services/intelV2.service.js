@@ -3258,6 +3258,309 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
     };
   })();
 
+  // ── FINAL EXECUTION ENGINE ──────────────────────────────────────────
+  // The single decision brain.  Synthesises HeroZero + TradeStrategy +
+  // BestTradePick + MasterVerdict + MarketRegime + TimeOfDay + LateEntry
+  // filter + No-Trade score into ONE clear output:
+  //
+  //   FINAL ACTION:  BUY CE | BUY PE | WAIT
+  //   MODE:          HERO  | NORMAL | AVOID
+  //   ENTRY TYPE:    Breakout | Buy Dip | Sell Rise | Reversal | None
+  //   CONFIDENCE:    0..100
+  //   WHY:           top-4 supportive reasons
+  //   WHY NOT:       penalties / blockers (if any)
+  //
+  // Drives the new top-of-dashboard "AI Execution Engine" card.
+  const executionEngine = (() => {
+    // ─── Time-of-day phase ────────────────────────────────────────────
+    const istNow = new Date(Date.now() + 5.5 * 3600 * 1000);
+    const hh = istNow.getUTCHours();
+    const mm = istNow.getUTCMinutes();
+    const minutesIst = hh * 60 + mm;
+    const phase = (() => {
+      if (minutesIst < 9 * 60 + 15)                     return 'PRE_MARKET';
+      if (minutesIst < 10 * 60)                          return 'OPEN_DRIVE';      // 09:15–10:00
+      if (minutesIst < 11 * 60 + 30)                     return 'MORNING_TREND';   // 10:00–11:30
+      if (minutesIst < 13 * 60 + 30)                     return 'MIDDAY_CHOP';     // 11:30–13:30
+      if (minutesIst < 14 * 60 + 15)                     return 'AFTERNOON_BUILD'; // 13:30–14:15
+      if (minutesIst < 15 * 60)                          return 'POWER_HOUR';      // 14:15–15:00
+      if (minutesIst < 15 * 60 + 30)                     return 'CLOSING_DRIFT';   // 15:00–15:30
+      return 'POST_MARKET';
+    })();
+    const phaseLabel = {
+      PRE_MARKET: 'PRE-MARKET',
+      OPEN_DRIVE: 'OPEN DRIVE',
+      MORNING_TREND: 'MORNING TREND',
+      MIDDAY_CHOP: 'MIDDAY CHOP',
+      AFTERNOON_BUILD: 'AFTERNOON BUILD',
+      POWER_HOUR: 'POWER HOUR',
+      CLOSING_DRIFT: 'CLOSING DRIFT',
+      POST_MARKET: 'POST-MARKET',
+    }[phase];
+
+    // ─── Market regime detection ─────────────────────────────────────
+    // Classifies the day into one of 7 regimes used to adapt weights.
+    const fEngine = frvpInstitutional?.engine;
+    const fAccept = fEngine?.acceptance;
+    const fDom    = fEngine?.dominance;
+    const fDelta  = fEngine?.delta;
+    const fPrem   = fEngine?.advanced?.premiumVel;
+
+    const aboveVAH = vp?.vah != null && Number.isFinite(spotPrice) && spotPrice > vp.vah;
+    const belowVAL = vp?.val != null && Number.isFinite(spotPrice) && spotPrice < vp.val;
+    const insideValue = vp?.vah != null && vp?.val != null
+      && spotPrice >= vp.val && spotPrice <= vp.vah;
+
+    const trendStrength = regimeBlk.trendStrength;
+    const volatility = regimeBlk.volatility;
+    const dayType = regimeBlk.dayType;
+
+    // Expiry detection — Thu/Tue (NIFTY/BANKNIFTY weekly)
+    const dow = istNow.getUTCDay();
+    const isExpiryDay = (sym.key === 'NIFTY_50' && dow === 4)        // Thursday
+                     || (sym.key === 'BANKNIFTY' && dow === 4)
+                     || (sym.key === 'SENSEX'   && dow === 2);       // Tuesday
+
+    // Gap detection — open vs prior close
+    const sessionOpen = c1m[0]?.open ?? null;
+    const gapPct = (sessionOpen != null && priorClose) ? ((sessionOpen - priorClose) / priorClose) * 100 : 0;
+    const isGapDay = Math.abs(gapPct) >= 0.4;
+
+    let regime;
+    if (isExpiryDay && phase === 'AFTERNOON_BUILD' || isExpiryDay && phase === 'POWER_HOUR') {
+      regime = 'EXPIRY_CHAOS';
+    } else if (isExpiryDay) {
+      regime = 'EXPIRY_DECAY';
+    } else if (isGapDay && Math.abs(spotPrice - sessionOpen) < Math.abs(gapPct * priorClose / 100) * 0.4) {
+      regime = 'GAP_FILL_DAY';
+    } else if (volatility === 'HIGH' && dayType === 'TREND DAY') {
+      regime = 'VOLATILE_TREND';
+    } else if (dayType === 'TREND DAY') {
+      regime = 'TREND_DAY';
+    } else if (atmBlk.ceUnwinding && fDelta?.bias === 'bullish') {
+      regime = 'SHORT_COVERING';
+    } else if (atmBlk.peUnwinding && fDelta?.bias === 'bearish') {
+      regime = 'LONG_UNWINDING';
+    } else if (insideValue && fDom?.dominantSide === 'BALANCED') {
+      regime = 'RANGE_DAY';
+    } else {
+      regime = 'MEAN_REVERSION';
+    }
+
+    // ─── Dynamic weight tuning by regime ─────────────────────────────
+    // These multipliers tilt downstream scoring depending on regime.
+    const weightBoost = {
+      TREND_DAY:        { vwap: 1.3, frvp: 1.2, premium: 1.0, delta: 1.0, support: 0.8 },
+      VOLATILE_TREND:   { vwap: 1.2, frvp: 1.1, premium: 1.3, delta: 1.3, support: 0.7 },
+      RANGE_DAY:        { vwap: 0.7, frvp: 0.8, premium: 0.9, delta: 0.9, support: 1.4 },
+      SHORT_COVERING:   { vwap: 1.0, frvp: 1.1, premium: 1.2, delta: 1.2, support: 0.9 },
+      LONG_UNWINDING:   { vwap: 1.0, frvp: 1.1, premium: 1.2, delta: 1.2, support: 0.9 },
+      EXPIRY_CHAOS:     { vwap: 0.6, frvp: 0.6, premium: 1.5, delta: 1.5, support: 0.5 },
+      EXPIRY_DECAY:     { vwap: 0.8, frvp: 0.8, premium: 1.4, delta: 1.4, support: 0.7 },
+      GAP_FILL_DAY:     { vwap: 1.2, frvp: 1.0, premium: 1.0, delta: 1.0, support: 1.1 },
+      MEAN_REVERSION:   { vwap: 0.9, frvp: 1.0, premium: 1.0, delta: 1.0, support: 1.2 },
+    }[regime] || { vwap: 1, frvp: 1, premium: 1, delta: 1, support: 1 };
+
+    // ─── No-Trade score (0..100) ─────────────────────────────────────
+    // Higher = stronger reason to wait.  Above 60 forces WAIT.
+    let noTradeScore = 0;
+    const noTradeReasons = [];
+    if (insideValue)                           { noTradeScore += 20; noTradeReasons.push('Inside value area'); }
+    if (atmBlk.atmIv < 8)                      { noTradeScore += 18; noTradeReasons.push('Premium dead (IV<8)'); }
+    if (Math.abs(fDelta?.deltaPct ?? 0) < 4)   { noTradeScore += 12; noTradeReasons.push('Delta neutral'); }
+    if (fDom?.dominantSide === 'BALANCED')     { noTradeScore += 10; noTradeReasons.push('Two-sided flow'); }
+    if (fAccept?.rejectedAboveVAH)             { noTradeScore += 15; noTradeReasons.push('Bull-trap rejection'); }
+    if (fAccept?.rejectedBelowVAL)             { noTradeScore += 15; noTradeReasons.push('Bear-trap rejection'); }
+    if (phase === 'MIDDAY_CHOP')               { noTradeScore += 12; noTradeReasons.push('Lunchtime chop'); }
+    if (phase === 'CLOSING_DRIFT')             { noTradeScore += 8;  noTradeReasons.push('Closing drift'); }
+    if (regime === 'EXPIRY_CHAOS')             { noTradeScore += 14; noTradeReasons.push('Expiry chaos'); }
+    if ((trapBlk?.score ?? 0) >= 60)           { noTradeScore += 18; noTradeReasons.push('Trap risk high'); }
+
+    // ─── Late-entry filter ───────────────────────────────────────────
+    // Penalises chasing — if spot has run too far from VWAP/EMA9/POC.
+    const distVwapPct  = vwap     != null && spotPrice ? Math.abs(spotPrice - vwap)     / vwap     * 100 : 0;
+    const distEma9Pct  = ema9     != null && spotPrice ? Math.abs(spotPrice - ema9)     / ema9     * 100 : 0;
+    const distPocPct   = vp?.poc  != null && spotPrice ? Math.abs(spotPrice - vp.poc)   / vp.poc   * 100 : 0;
+    const stretched    = distVwapPct > 0.50 || distEma9Pct > 0.35 || distPocPct > 0.45;
+    const veryStretched= distVwapPct > 0.80 || distEma9Pct > 0.60 || distPocPct > 0.70;
+    let lateEntryPenalty = 0;
+    if (veryStretched)        lateEntryPenalty = 25;
+    else if (stretched)       lateEntryPenalty = 12;
+
+    // ─── Aggregate the inputs from existing engines ──────────────────
+    const hzVerdict = heroZero?.verdict;
+    const tsKey     = tradeStrategy?.key;
+    const pickPrimary = bestTradePick?.primary;        // CE | PE | NEUTRAL
+    const pickPick = pickPrimary === 'CE' ? bestTradePick?.ce
+                   : pickPrimary === 'PE' ? bestTradePick?.pe
+                   : null;
+    const verdictSide = verdict.cePct >= 60 ? 'CE'
+                      : verdict.pePct >= 60 ? 'PE' : 'NEUTRAL';
+
+    // ─── Final action voting ─────────────────────────────────────────
+    // Each engine casts a CE / PE / WAIT vote with a weight.
+    const votes = { CE: 0, PE: 0, WAIT: 0 };
+    const reasons = [];
+    const blockers = [];
+
+    // Vote 1: HeroZero (weight 30 if HERO, 10 if ZERO)
+    if (hzVerdict === 'HERO_CE')      { votes.CE += 30 * weightBoost.premium;  reasons.push(`HERO CE @ ${heroZero.strike}`); }
+    else if (hzVerdict === 'HERO_PE') { votes.PE += 30 * weightBoost.premium;  reasons.push(`HERO PE @ ${heroZero.strike}`); }
+    else                              { votes.WAIT += 10; }
+
+    // Vote 2: TradeStrategy (weight 25)
+    const strategyVote = {
+      BUY_ON_DIP_CE:    { side: 'CE', w: 25, label: 'Buy-on-dip setup' },
+      SELL_ON_RISE_PE:  { side: 'PE', w: 25, label: 'Sell-on-rise setup' },
+      BREAKOUT_CE_BUY:  { side: 'CE', w: 28, label: 'Breakout CE setup' },
+      BREAKDOWN_PE_BUY: { side: 'PE', w: 28, label: 'Breakdown PE setup' },
+      RANGE_MARKET:     { side: 'WAIT', w: 18, label: 'Range market' },
+    }[tsKey];
+    if (strategyVote) {
+      const wt = strategyVote.w * (
+        strategyVote.side === 'CE' || strategyVote.side === 'PE' ? weightBoost.frvp : 1
+      );
+      votes[strategyVote.side] += wt;
+      reasons.push(strategyVote.label);
+    }
+
+    // Vote 3: BestTradePick (weight 20)
+    if (pickPick && pickPrimary !== 'NEUTRAL') {
+      votes[pickPrimary] += 20;
+      reasons.push(`Pick ${pickPick.label} ${pickPick.probability}%`);
+    } else {
+      votes.WAIT += 8;
+    }
+
+    // Vote 4: MasterVerdict (weight 15 × vwap-boost)
+    if (verdictSide !== 'NEUTRAL') {
+      votes[verdictSide] += 15 * weightBoost.vwap;
+      reasons.push(`Master verdict ${verdictSide} ${Math.max(verdict.cePct, verdict.pePct).toFixed(0)}%`);
+    } else {
+      votes.WAIT += 5;
+    }
+
+    // Vote 5: Delta bias (weight 10 × delta-boost)
+    if (fDelta?.bias === 'bullish') votes.CE += 10 * weightBoost.delta;
+    else if (fDelta?.bias === 'bearish') votes.PE += 10 * weightBoost.delta;
+    else                                 votes.WAIT += 5;
+
+    // ─── Penalties ───────────────────────────────────────────────────
+    votes.WAIT += noTradeScore * 0.6;     // every no-trade pt becomes 0.6 wait pts
+    if (lateEntryPenalty > 0) {
+      blockers.push(veryStretched ? 'Move very stretched — chase risk' : 'Move stretched — late entry');
+    }
+    if (noTradeScore >= 60) {
+      blockers.push('No-trade score elevated — wait for clarity');
+    }
+
+    // ─── Pick the winning action ─────────────────────────────────────
+    let action = 'WAIT';
+    if (votes.CE > votes.PE && votes.CE > votes.WAIT && votes.CE >= 35) action = 'BUY CE';
+    else if (votes.PE > votes.CE && votes.PE > votes.WAIT && votes.PE >= 35) action = 'BUY PE';
+
+    // Hard veto: if NoTrade ≥ 60 → WAIT regardless of votes.
+    if (noTradeScore >= 60) action = 'WAIT';
+
+    // ─── Mode classification ─────────────────────────────────────────
+    let mode;
+    if (action === 'WAIT') mode = noTradeScore >= 60 ? 'AVOID' : 'NORMAL';
+    else if (hzVerdict === 'HERO_CE' && action === 'BUY CE') mode = 'HERO';
+    else if (hzVerdict === 'HERO_PE' && action === 'BUY PE') mode = 'HERO';
+    else mode = 'NORMAL';
+
+    // ─── Entry type ──────────────────────────────────────────────────
+    let entryType;
+    if (action === 'WAIT') entryType = 'None';
+    else {
+      const t = tsKey;
+      if (t === 'BREAKOUT_CE_BUY' || t === 'BREAKDOWN_PE_BUY') entryType = 'Breakout';
+      else if (t === 'BUY_ON_DIP_CE') entryType = 'Buy Dip';
+      else if (t === 'SELL_ON_RISE_PE') entryType = 'Sell Rise';
+      else if (fAccept?.rejectedAboveVAH || fAccept?.rejectedBelowVAL) entryType = 'Reversal';
+      else entryType = 'Continuation';
+    }
+
+    // ─── Target strike ───────────────────────────────────────────────
+    const STEP = 100;
+    const ceTarget = Math.round((spotPrice + STEP) / STEP) * STEP;
+    const peTarget = Math.round((spotPrice - STEP) / STEP) * STEP;
+    let targetStrike = null;
+    let targetSide = null;
+    if (action === 'BUY CE') {
+      targetStrike = heroZero?.strike ?? bestTradePick?.ce?.strike ?? tradeStrategy?.strike ?? ceTarget;
+      targetSide = 'CE';
+    } else if (action === 'BUY PE') {
+      targetStrike = heroZero?.strike ?? bestTradePick?.pe?.strike ?? tradeStrategy?.strike ?? peTarget;
+      targetSide = 'PE';
+    }
+
+    // ─── Confidence calculation ──────────────────────────────────────
+    // base = top vote / total votes × 100, with bonuses for HERO mode and
+    // edge over runner-up; minus late-entry and no-trade penalties.
+    const totalVotes = votes.CE + votes.PE + votes.WAIT || 1;
+    const winningVote = action === 'BUY CE' ? votes.CE
+                      : action === 'BUY PE' ? votes.PE
+                      : votes.WAIT;
+    const runnerUp = action === 'WAIT' ? Math.max(votes.CE, votes.PE)
+                   : Math.max(votes.WAIT, action === 'BUY CE' ? votes.PE : votes.CE);
+    const edge = winningVote - runnerUp;
+    let confidence = Math.round((winningVote / totalVotes) * 100);
+    if (mode === 'HERO') confidence += 8;
+    confidence += Math.min(15, Math.max(0, edge * 0.3));
+    confidence -= lateEntryPenalty;
+    confidence = Math.max(20, Math.min(95, Math.round(confidence)));
+
+    // ─── Build top-4 supportive reasons ──────────────────────────────
+    const topReasons = reasons.slice(0, 4);
+    if (topReasons.length === 0) topReasons.push(...noTradeReasons.slice(0, 4));
+
+    // ─── Why-not / blockers ──────────────────────────────────────────
+    if (action === 'WAIT' && noTradeReasons.length) {
+      blockers.push(...noTradeReasons.slice(0, 2));
+    }
+
+    // ─── Trade lifecycle phase ───────────────────────────────────────
+    let lifecyclePhase;
+    if (action === 'WAIT') lifecyclePhase = 'STANDBY';
+    else if (mode === 'HERO' && !stretched) lifecyclePhase = 'ENTRY';
+    else if (stretched && !veryStretched) lifecyclePhase = 'MOMENTUM';
+    else if (veryStretched) lifecyclePhase = 'EXHAUSTION';
+    else lifecyclePhase = 'ENTRY';
+
+    return {
+      action,                                      // BUY CE | BUY PE | WAIT
+      mode,                                        // HERO | NORMAL | AVOID
+      entryType,                                   // Breakout / Buy Dip / Sell Rise / Reversal / Continuation / None
+      targetSide,                                  // CE | PE | null
+      targetStrike,                                // round 100-step strike
+      confidence,                                  // 0..100
+      tone: action === 'BUY CE' ? 'bull'
+          : action === 'BUY PE' ? 'bear' : 'warn',
+      lifecyclePhase,                              // STANDBY | ENTRY | MOMENTUM | EXHAUSTION
+      regime,                                      // TREND_DAY | RANGE_DAY | EXPIRY_CHAOS etc.
+      regimeLabel: {
+        TREND_DAY: 'TREND DAY', VOLATILE_TREND: 'VOLATILE TREND',
+        RANGE_DAY: 'RANGE DAY', SHORT_COVERING: 'SHORT COVERING',
+        LONG_UNWINDING: 'LONG UNWINDING', EXPIRY_CHAOS: 'EXPIRY CHAOS',
+        EXPIRY_DECAY: 'EXPIRY DECAY', GAP_FILL_DAY: 'GAP FILL DAY',
+        MEAN_REVERSION: 'MEAN REVERSION',
+      }[regime],
+      phase, phaseLabel,
+      noTradeScore,
+      stretched,
+      veryStretched,
+      reasons: topReasons,
+      blockers,
+      votes: {
+        ce: Math.round(votes.CE),
+        pe: Math.round(votes.PE),
+        wait: Math.round(votes.WAIT),
+      },
+      weights: weightBoost,
+    };
+  })();
+
   // ── AI MARKET STORY ENGINE ──────────────────────────────────────────
   // Synthesises ALL the engines into one human-readable paragraph.
   // Reads: heroZero, frvpInstitutional.engine, atmBlk, supportResistance,
@@ -3619,6 +3922,7 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
       heroZero,
       premiumMomentum,
       tradeStrategy,
+      executionEngine,
       marketStory,
       supportResistance,
       riskManagement,

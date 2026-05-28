@@ -100,6 +100,24 @@ export function SupportResistanceCardV2({ data }: { data: IntelV2Snapshot | null
               </span>
             </div>
             <div className="absolute top-0 h-full w-px bg-white/30" style={{ left: "50%" }} />
+            {/* Strike-aligned tick marks — 13 positions matching the ladder below.
+                Each tick is a thin vertical line; ATM (idx=6) gets a brighter stroke. */}
+            {Array.from({ length: 13 }).map((_, i) => {
+              const pct = (i / 12) * 100;
+              const isAtm = i === 6;
+              return (
+                <div
+                  key={i}
+                  className="pointer-events-none absolute top-0 h-full"
+                  style={{
+                    left: `${pct}%`,
+                    width: isAtm ? "1px" : "1px",
+                    background: isAtm ? "rgba(56,189,248,0.55)" : "rgba(255,255,255,0.16)",
+                    transform: "translateX(-50%)",
+                  }}
+                />
+              );
+            })}
             {/* Needle â€” pulled to the side that dominates.
                 tilt = support pct (0..100). When tilt=70 → bullish → needle should
                 sit at 70% (toward right/PE side). */}
@@ -130,10 +148,20 @@ export function SupportResistanceCardV2({ data }: { data: IntelV2Snapshot | null
           <div className="mt-1.5 flex items-center justify-between text-[11px] text-white/55">
             <span>Strength {resistanceStrength.toLocaleString()}</span>
             <span className="text-white/70">
-              spot {spotPrice != null ? spotPrice.toFixed(2) : "â€”"}
+              spot {spotPrice != null ? spotPrice.toFixed(2) : "—"}
             </span>
             <span>Strength {supportStrength.toLocaleString()}</span>
           </div>
+
+          {/* Strike ladder — primary strike (ATM) ± 6 strikes (100-step).
+              LEFT side = resistance = strikes ABOVE ATM.
+              RIGHT side = support = strikes BELOW ATM. ATM highlighted sky. */}
+          <StrikeLadder
+            atm={Number.isFinite(sr.atmStrike) ? sr.atmStrike : null}
+            spot={spotPrice}
+            resistances={resistances}
+            supports={supports}
+          />
         </div>
 
         {/* Walls side-by-side — CE (resistances) on the LEFT, PE (supports) on the RIGHT */}
@@ -151,11 +179,11 @@ export function SupportResistanceCardV2({ data }: { data: IntelV2Snapshot | null
         </div> */}
 
         {/* Bottom meter — which side dominates + percentage */}
-        <SupportResistanceMeter
+        {/* <SupportResistanceMeter
           supportStrength={supportStrength}
           resistanceStrength={resistanceStrength}
           tilt={tilt}
-        />
+        /> */}
       </div>
     </V2Card>
   );
@@ -281,5 +309,111 @@ function WallList({
         )}
       </div>
     </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * StrikeLadder — primary strike (ATM) ± 6 strikes, 100-step grid.
+ * Left side = strikes ABOVE ATM (resistance / CE walls).
+ * Right side = strikes BELOW ATM (support / PE walls).
+ * ATM highlighted in sky. Strikes that match a top resistance/support
+ * row light up red/green respectively.
+ * ───────────────────────────────────────────────────────────────────── */
+function StrikeLadder({
+  atm,
+  spot,
+  resistances,
+  supports,
+}: {
+  atm: number | null;
+  spot: number | null;
+  resistances: NonNullable<IntelV2Snapshot["dashboard"]>["supportResistance"]["resistances"];
+  supports: NonNullable<IntelV2Snapshot["dashboard"]>["supportResistance"]["supports"];
+}) {
+  if (atm == null || !Number.isFinite(atm)) return null;
+  const STEP = 100;
+  const baseAtm = Math.round(atm / STEP) * STEP;
+
+  // Wall maps
+  const resMap = new Map<number, true>();
+  resistances.forEach((r) => resMap.set(Math.round(r.strike / STEP) * STEP, true));
+  const supMap = new Map<number, true>();
+  supports.forEach((r) => supMap.set(Math.round(r.strike / STEP) * STEP, true));
+
+  // 13 positions, idx 0..12.
+  // Bar layout: LEFT = resistance (red, strikes ABOVE ATM, drawn farthest-on-left → ATM in middle)
+  //             RIGHT = support   (green, strikes BELOW ATM, ATM in middle → farthest on right)
+  // So: idx 0 = ATM+6, idx 6 = ATM, idx 12 = ATM-6.
+  const strikes: { strike: number; tone: "bull" | "bear" | "atm" | "neutral"; active: boolean }[] = [];
+  for (let i = 0; i <= 12; i++) {
+    const offset = 6 - i;            // +6 .. 0 .. -6
+    const s = baseAtm + offset * STEP;
+    if (offset === 0) {
+      strikes.push({ strike: s, tone: "atm", active: true });
+    } else if (offset > 0) {
+      const isWall = resMap.has(s);
+      strikes.push({ strike: s, tone: isWall ? "bear" : "neutral", active: isWall });
+    } else {
+      const isWall = supMap.has(s);
+      strikes.push({ strike: s, tone: isWall ? "bull" : "neutral", active: isWall });
+    }
+  }
+
+  return (
+    <div className="relative mt-2 h-9">
+      {strikes.map((s, i) => {
+        const pct = (i / 12) * 100;
+        return (
+          <div
+            key={s.strike}
+            className="absolute top-0"
+            style={{ left: `${pct}%`, transform: "translateX(-50%)" }}
+          >
+            <StrikeChip strike={s.strike} tone={s.tone} active={s.active} />
+          </div>
+        );
+      })}
+      {spot != null ? (
+        <span
+          className="absolute font-mono text-[9px] text-white/45"
+          style={{ left: "50%", transform: "translateX(-50%)", top: "24px" }}
+        >
+          spot {spot.toFixed(2)}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function StrikeChip({
+  strike,
+  tone,
+  active,
+}: {
+  strike: number;
+  tone: "bull" | "bear" | "atm" | "neutral";
+  active?: boolean;
+}) {
+  const palette = {
+    bull: { color: "#10b981", bg: "rgba(16,185,129,0.12)", border: "rgba(16,185,129,0.40)" },
+    bear: { color: "#ef4444", bg: "rgba(239,68,68,0.12)",  border: "rgba(239,68,68,0.40)"  },
+    atm:  { color: "#38bdf8", bg: "rgba(56,189,248,0.18)", border: "rgba(56,189,248,0.60)" },
+    neutral: {
+      color: "rgba(255,255,255,0.55)",
+      bg: "rgba(255,255,255,0.03)",
+      border: "rgba(255,255,255,0.10)",
+    },
+  } as const;
+  const p = palette[tone];
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center justify-center rounded-sm border font-mono tabular-nums transition-colors",
+        active ? "px-2 py-0.5 text-[11px] font-bold" : "px-1.5 py-0.5 text-[10px] font-semibold",
+      )}
+      style={{ background: p.bg, borderColor: p.border, color: p.color }}
+    >
+      {strike}
+    </span>
   );
 }

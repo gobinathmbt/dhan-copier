@@ -251,8 +251,20 @@ export interface IntelV2Snapshot {
     fiiDii?: {
       date: string;
       cash: {
-        fii: { buy_sell_difference: number; net_action: string };
-        dii: { buy_sell_difference: number; net_action: string };
+        fii: { buy_sell_difference: number; net_action: string; buy?: number; sell?: number; net_view?: string; net_view_strength?: string };
+        dii: { buy_sell_difference: number; net_action: string; buy?: number; sell?: number; net_view?: string; net_view_strength?: string };
+      };
+      future?: {
+        fii?: Record<string, unknown>;
+        dii?: Record<string, unknown>;
+        pro?: Record<string, unknown>;
+        client?: Record<string, unknown>;
+      };
+      option?: {
+        fii?: Record<string, unknown>;
+        dii?: Record<string, unknown>;
+        pro?: Record<string, unknown>;
+        client?: Record<string, unknown>;
       };
     } | null;
   };
@@ -653,6 +665,34 @@ export interface IntelV2Snapshot {
       scores: Record<string, number>;
       edge: number;
       ranked: Array<{ key: string; score: number }>;
+    };
+    executionEngine: {
+      action: "BUY CE" | "BUY PE" | "WAIT";
+      mode: "HERO" | "NORMAL" | "AVOID";
+      entryType: "Breakout" | "Buy Dip" | "Sell Rise" | "Reversal" | "Continuation" | "None";
+      targetSide: "CE" | "PE" | null;
+      targetStrike: number | null;
+      confidence: number;
+      tone: "bull" | "bear" | "warn";
+      lifecyclePhase: "STANDBY" | "ENTRY" | "MOMENTUM" | "EXHAUSTION";
+      regime:
+        | "TREND_DAY" | "VOLATILE_TREND" | "RANGE_DAY"
+        | "SHORT_COVERING" | "LONG_UNWINDING"
+        | "EXPIRY_CHAOS" | "EXPIRY_DECAY"
+        | "GAP_FILL_DAY" | "MEAN_REVERSION";
+      regimeLabel: string;
+      phase:
+        | "PRE_MARKET" | "OPEN_DRIVE" | "MORNING_TREND"
+        | "MIDDAY_CHOP" | "AFTERNOON_BUILD" | "POWER_HOUR"
+        | "CLOSING_DRIFT" | "POST_MARKET";
+      phaseLabel: string;
+      noTradeScore: number;
+      stretched: boolean;
+      veryStretched: boolean;
+      reasons: string[];
+      blockers: string[];
+      votes: { ce: number; pe: number; wait: number };
+      weights: { vwap: number; frvp: number; premium: number; delta: number; support: number };
     };
     premiumMomentum: {
       topState: string;

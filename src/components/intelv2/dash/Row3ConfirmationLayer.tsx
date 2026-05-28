@@ -1,14 +1,15 @@
 import type { IntelV2Snapshot } from "@/lib/intelV2Types";
 import { V2Card, V2Pill, v2Fmt, v2FmtSigned, v2FmtSignedCompact, V2_TONE, V2Hint } from "./common";
+import { FiiDiiCard } from "./FiiDiiCard";
 
 export function Row3ConfirmationLayer({ data }: { data: IntelV2Snapshot | null }) {
   return (
     <div className="grid h-[360px] grid-cols-12 gap-2">
-      <div className="col-span-2 min-h-0"><DeltaVolume data={data} /></div>
-      <div className="col-span-2 min-h-0"><MarketBreadth data={data} /></div>
+      <div className="col-span-3 min-h-0"><DeltaVolume data={data} /></div>
+      <div className="col-span-3 min-h-0"><MarketBreadth data={data} /></div>
       <div className="col-span-3 min-h-0"><Heavyweights data={data} /></div>
-      <div className="col-span-2 min-h-0"><IvVix data={data} /></div>
-      <div className="col-span-3 min-h-0"><FiiDii data={data} /></div>
+      <div className="col-span-3 min-h-0"><IvVix data={data} /></div>
+      {/* <div className="col-span-3 min-h-0"><FiiDiiCard data={data} /></div> */}
     </div>
   );
 }
