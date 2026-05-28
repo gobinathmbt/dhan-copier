@@ -2090,31 +2090,30 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
     const winHi = anchor + 6 * 100;
     const isClean = (k) => k % 100 === 0 && k >= winLo && k <= winHi;
 
-    // CE side — clean 100-step strikes >= anchor, ranked by OI desc, take top 3
+    // CE side — the 6 100-step strikes IMMEDIATELY ABOVE anchor
+    // (anchor+100 .. anchor+600). Always a contiguous 6-strike window so
+    // the ladder is fully populated regardless of OI distribution.
     const ceCandidates = sortedStrikes
-      .filter(s => isClean(Number(s.strike)) && Number(s.strike) >= anchor)
+      .filter(s => isClean(Number(s.strike)) && Number(s.strike) > anchor)
       .map(s => ({
         strike: Number(s.strike),
         oi: _safe(s.call?.oi ?? s.ce?.oi),
         oiChange: _safe(s.call?.oiChange ?? s.ce?.oiChg ?? s.ce?.oiChange),
       }))
-      .filter(r => r.oi > 0)
-      .sort((a, b) => b.oi - a.oi)
-      .slice(0, 6)
-      .sort((a, b) => a.strike - b.strike);  // ascending by strike for ladder
+      .sort((a, b) => a.strike - b.strike)   // closest to anchor first
+      .slice(0, 6);                           // anchor+100 .. anchor+600
 
-    // PE side — clean 100-step strikes <= anchor, ranked by OI desc, take top 6
+    // PE side — the 6 100-step strikes IMMEDIATELY BELOW anchor
+    // (anchor-100 .. anchor-600). Always a contiguous 6-strike window.
     const peCandidates = sortedStrikes
-      .filter(s => isClean(Number(s.strike)) && Number(s.strike) <= anchor)
+      .filter(s => isClean(Number(s.strike)) && Number(s.strike) < anchor)
       .map(s => ({
         strike: Number(s.strike),
         oi: _safe(s.put?.oi ?? s.pe?.oi),
         oiChange: _safe(s.put?.oiChange ?? s.pe?.oiChg ?? s.pe?.oiChange),
       }))
-      .filter(r => r.oi > 0)
-      .sort((a, b) => b.oi - a.oi)
-      .slice(0, 6)
-      .sort((a, b) => b.strike - a.strike); // descending so closest is at top
+      .sort((a, b) => b.strike - a.strike)   // closest to anchor first
+      .slice(0, 6);                           // anchor-100 .. anchor-600
 
     // Tier labels — closest to spot = "Immediate", farthest = "Extreme/Critical".
     // Six-tier ladder so we can show ATM ± 6 levels in the Intraday Levels card.

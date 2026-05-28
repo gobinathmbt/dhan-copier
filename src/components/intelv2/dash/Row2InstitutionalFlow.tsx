@@ -10,9 +10,10 @@ import { SupportResistanceCardV2 } from "./SupportResistanceCard";
 export function Row2InstitutionalFlow({ data }: { data: IntelV2Snapshot | null }) {
   return (
     <div className="flex flex-col gap-2">
-      {/* Single tall row â€” 2.2 Combined (Writing Pressure + Market Direction) (60%) +
-          2.5 FRVP Institutional Map (40%) */}
-      <div className="grid h-[760px] grid-cols-10 gap-2">
+      {/* 2.2 Market Direction (60%) + 2.5 FRVP Institutional Map (40%) â€”
+          height reduced since the Writing Pressure top tables were merged
+          into the Intraday Levels block. */}
+      <div className="grid h-[600px] grid-cols-10 gap-2">
         <div className="col-span-6 min-h-0">
           <CombinedWritingMarketCard data={data} />
         </div>
@@ -44,21 +45,17 @@ function CombinedWritingMarketCard({ data }: { data: IntelV2Snapshot | null }) {
     <V2Card
       title={
         <span className="flex items-center gap-2">
-          2.2 Writing Pressure + Market Direction
+          2.2 Market Direction
           <span className="text-[9px] font-normal text-white/45">
-            (Combined â€” Walls + Direction Meter + OI Move)
+            (Direction Meter + Intraday Levels + OI Move)
           </span>
         </span>
       }
     >
       <div className="-m-1.5 flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-1.5 pr-2">
-        {/* TOP HALF — Writing Pressure (CE Walls + PE Walls) */}
-        <CombinedWritingPressureBody data={data} />
-
-        {/* DIVIDER */}
-        <div className="my-1 h-px w-full bg-gradient-to-r from-transparent via-white/15 to-transparent" />
-
-        {/* BOTTOM HALF — Market Direction body */}
+        {/* Writing Pressure top tables removed â€” all info merged into the
+            Intraday Levels table inside CombinedMarketDirectionBody. */}
+        {/* <CombinedWritingPressureBody data={data} /> */}
         <CombinedMarketDirectionBody data={data} />
       </div>
     </V2Card>
@@ -175,39 +172,93 @@ function CombinedMarketDirectionBody({ data }: { data: IntelV2Snapshot | null })
       </div>
 
       {/* 2. Intraday Levels (Important) â€” Excel-style mirrored ladder.
-          Resistances: label LEFT, strike CENTER (rose).
-          Supports:    strike CENTER (emerald), label RIGHT.
-          Up to 6 of each side (ATM Â± 6, 100-step strikes only). */}
+          Single continuous ladder sorted by strike DESC. Resistances render
+          with label LEFT + strike CENTER; supports flip to strike CENTER +
+          label RIGHT. ATM is intentionally excluded â€” it's neither a
+          resistance nor a support. */}
       <div className="flex flex-col gap-1">
         <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-white/85">
-          Intraday Levels <span className="text-white/45">(Important)</span>
+          Intraday Levels <span className="text-white/45">(CE Walls left Â· ATM center Â· PE Walls right)</span>
         </span>
         <div className="overflow-hidden rounded-md border border-white/[0.08]">
-          {/* Resistance rows â€” closest first (Immediate at top) */}
-          {md.resistances.length === 0 && (
-            <div className="px-2 py-2 text-center text-[10px] text-white/45">No resistance data</div>
-          )}
-          {md.resistances.map((r, i) => (
-            <ExcelLevelRow
-              key={`r-${i}`}
-              tier={r.tier}
-              strike={r.strike}
-              side="resistance"
-              first={i === 0}
-              tierFirst
-            />
-          ))}
-          {/* Support rows â€” closest first (Immediate at top) */}
-          {md.supports.map((r, i) => (
-            <ExcelLevelRow
-              key={`s-${i}`}
-              tier={r.tier}
-              strike={r.strike}
-              side="support"
-              first={false}
-              tierFirst={false}
-            />
-          ))}
+          {/* Mirror header — same 6 columns rendered on both halves */}
+          <div className="grid grid-cols-2 items-center gap-2 border-b border-white/[0.08] bg-white/[0.03] px-2 py-1">
+            <LevelHeader />
+            <LevelHeader />
+          </div>
+          {(() => {
+            type Row = {
+              strike: number;
+              tier: string;
+              side: "resistance" | "support" | "atm";
+              oi: number;
+              oiChange: number;
+              oiChangePct: number;
+              interpretation: string;
+            };
+            const atmStrike = data?.options?.atm ?? null;
+            const anchor = atmStrike != null ? Math.round(atmStrike / 100) * 100 : null;
+            const ana = data?.dashboard?.oiBuildupAnalysis;
+
+            // Index ceTable / peTable by strike for O(1) lookup of OI/buildup data
+            const ceByStrike = new Map<number, { oi: number; oiChange: number; oiChangePct: number; interpretation: string }>();
+            const peByStrike = new Map<number, { oi: number; oiChange: number; oiChangePct: number; interpretation: string }>();
+            for (const r of ana?.ceTable || []) {
+              ceByStrike.set(r.strike, {
+                oi: r.oiToday, oiChange: r.oiChange,
+                oiChangePct: r.oiChangePct, interpretation: r.interpretation,
+              });
+            }
+            for (const r of ana?.peTable || []) {
+              peByStrike.set(r.strike, {
+                oi: r.oiToday, oiChange: r.oiChange,
+                oiChangePct: r.oiChangePct, interpretation: r.interpretation,
+              });
+            }
+
+            const byStrike = new Map<number, Row>();
+            const lookup = (strike: number, side: "resistance" | "support" | "atm") => {
+              // Resistance / ATM-from-CE side → use ce data; Support → use pe data.
+              const src = side === "support" ? peByStrike.get(strike) : ceByStrike.get(strike);
+              return {
+                oi: src?.oi ?? 0,
+                oiChange: src?.oiChange ?? 0,
+                oiChangePct: src?.oiChangePct ?? 0,
+                interpretation: src?.interpretation ?? "â€”",
+              };
+            };
+
+            for (const r of md.resistances) {
+              if (anchor != null && r.strike === anchor) continue;
+              byStrike.set(r.strike, { strike: r.strike, tier: r.tier, side: "resistance", ...lookup(r.strike, "resistance") });
+            }
+            for (const r of md.supports) {
+              if (anchor != null && r.strike === anchor) continue;
+              if (byStrike.has(r.strike)) continue;
+              byStrike.set(r.strike, { strike: r.strike, tier: r.tier, side: "support", ...lookup(r.strike, "support") });
+            }
+            if (anchor != null) {
+              byStrike.set(anchor, { strike: anchor, tier: "ATM", side: "atm", ...lookup(anchor, "atm") });
+            }
+
+            const rows = [...byStrike.values()].sort((a, b) => b.strike - a.strike);
+            if (rows.length === 0) {
+              return <div className="px-2 py-2 text-center text-[10px] text-white/45">No level data</div>;
+            }
+            return rows.map((r, i) => (
+              <ExcelLevelRow
+                key={r.strike}
+                tier={r.tier}
+                strike={r.strike}
+                side={r.side}
+                first={i === 0}
+                oi={r.oi}
+                oiChange={r.oiChange}
+                oiChangePct={r.oiChangePct}
+                interpretation={r.interpretation}
+              />
+            ));
+          })()}
         </div>
       </div>
 
@@ -252,69 +303,138 @@ function CombinedLevelRow({
 }
 
 /* ─────────────────────────────────────────────────────────────────────
- * Excel-style mirrored ladder row used inside the Intraday Levels block.
- * Three columns: [LEFT label] [CENTER strike] [RIGHT label].
- *   • Resistance rows  → label on LEFT (light-green tint), strike CENTER (with CE tag)
- *   • Support rows     → strike CENTER (with PE tag), label on RIGHT (light-red tint)
- * Compact, light-tone styling.
+ * Mirrored Intraday Levels row.
+ *   • Resistance rows  → ALL content on LEFT half (green tones, "CE" tag)
+ *   • ATM row          → centered, blue tones, just strike + "ATM" tag
+ *   • Support rows     → ALL content on RIGHT half (red tones, "PE" tag)
+ *
+ * Each side packs: Tier · Strike · OI · Δ% · Strength bar · Interpretation
  * ───────────────────────────────────────────────────────────────────── */
+
+// Header row — matches the 6 inner columns of the metric strip
+function LevelHeader() {
+  return (
+    <div className="grid grid-cols-[1.4fr_72px_44px_46px_60px_1fr] items-center gap-1.5 px-2 text-[8px] font-bold uppercase tracking-wider text-white/45">
+      <span>Tier</span>
+      <span className="text-right">Strike</span>
+      <span className="text-right">OI Build</span>
+      <span className="text-right">Change</span>
+      <span className="text-center">Strength</span>
+      <span className="text-right">Interpretation</span>
+    </div>
+  );
+}
+
 function ExcelLevelRow({
-  tier, strike, side, first, tierFirst,
+  tier, strike, side, first,
+  oi = 0, oiChange = 0, oiChangePct = 0, interpretation = "—",
 }: {
   tier: string;
   strike: number;
-  side: "resistance" | "support";
+  side: "resistance" | "support" | "atm";
   first: boolean;
-  tierFirst: boolean;
+  oi?: number;
+  oiChange?: number;
+  oiChangePct?: number;
+  interpretation?: string;
 }) {
   const isRes = side === "resistance";
-  // Light tones — softened from the previous solid backgrounds.
-  const labelBg = isRes ? "rgba(34,197,94,0.18)"  : "rgba(239,68,68,0.18)";
-  const labelColor = isRes ? "#86efac" : "#fda4af";
-  const strikeBg = isRes ? "rgba(34,197,94,0.06)"  : "rgba(239,68,68,0.06)";
-  const strikeColor = isRes ? "#86efac" : "#fda4af";
-  const tag = isRes ? "CE" : "PE";
-  return (
-    <div
-      className={`grid grid-cols-[1fr_104px_1fr] items-center text-[11px] ${first ? "" : "border-t border-white/[0.04]"
-        }`}
-    >
-      {/* LEFT cell — only filled for resistance rows */}
-      {tierFirst ? (
-        <div
-          className="flex items-center px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide"
-          style={{ background: labelBg, color: labelColor }}
-        >
-          {tier}
-        </div>
-      ) : (
-        <div className="px-2.5 py-1" />
-      )}
+  const isAtm = side === "atm";
 
-      {/* CENTER strike + side tag */}
-      <div
-        className="flex items-center justify-center gap-1 px-2 py-1"
-        style={{ background: strikeBg }}
-      >
-        <span className="font-mono text-[12px] font-bold tabular-nums" style={{ color: strikeColor }}>
+  // Tones
+  const accent = isAtm ? "#38bdf8" : isRes ? "#86efac" : "#fda4af";
+  const sideBg = isAtm ? "rgba(56,189,248,0.10)"
+    : isRes ? "rgba(34,197,94,0.08)" : "rgba(239,68,68,0.08)";
+  const sideBorder = isAtm ? "rgba(56,189,248,0.30)"
+    : isRes ? "rgba(34,197,94,0.25)" : "rgba(239,68,68,0.25)";
+
+  // Strength bar — 7 segments scaled by |oiChangePct|
+  const pctClamped = Math.min(100, Math.max(0, Math.abs(oiChangePct)));
+  const filled = Math.round((pctClamped / 100) * 7);
+  const pctSign = oiChangePct >= 0 ? "+" : "";
+
+  // Inner content (used for both CE-left and PE-right sides — aligned 6-column metric table)
+  const InnerStrip = (
+    <div
+      className="grid grid-cols-[1.4fr_72px_44px_46px_60px_1fr] items-center gap-1.5 rounded-sm px-2 py-1 text-[10px]"
+      style={{ background: sideBg, border: `1px solid ${sideBorder}` }}
+    >
+      {/* Tier */}
+      <span className="truncate text-[9px] font-bold uppercase tracking-wide" style={{ color: accent }}>
+        {tier}
+      </span>
+      {/* Strike + tag */}
+      <span className="flex items-baseline justify-end gap-1">
+        <span className="font-mono text-[12px] font-bold tabular-nums" style={{ color: accent }}>
           {strike.toLocaleString()}
         </span>
-        <span className="text-[8px] font-bold uppercase tracking-wider opacity-65" style={{ color: strikeColor }}>
-          {tag}
+        <span className="text-[8px] font-bold uppercase opacity-75" style={{ color: accent }}>
+          {isAtm ? "ATM" : isRes ? "CE" : "PE"}
         </span>
-      </div>
+      </span>
+      {/* OI in lakhs */}
+      <span className="text-right font-mono tabular-nums text-white/80">
+        {oi > 0 ? `${(oi / 1e5).toFixed(1)}L` : "—"}
+      </span>
+      {/* Δ% */}
+      <span
+        className="text-right font-mono font-bold tabular-nums"
+        style={{ color: oiChangePct >= 0 ? accent : "#fda4af" }}
+      >
+        {oiChangePct === 0 ? "—" : `${pctSign}${oiChangePct.toFixed(1)}%`}
+      </span>
+      {/* Strength bar */}
+      <span className="flex items-center justify-center gap-[2px]">
+        {Array.from({ length: 7 }).map((_, idx) => (
+          <span
+            key={idx}
+            className="block h-2 w-1.5 rounded-[1px]"
+            style={{
+              background: idx < filled ? accent : "rgba(255,255,255,0.10)",
+            }}
+          />
+        ))}
+      </span>
+      {/* Interpretation */}
+      <span className="truncate text-right" style={{ color: accent, opacity: 0.85 }}>
+        {interpretation}
+      </span>
+    </div>
+  );
 
-      {/* RIGHT cell — only filled for support rows */}
-      {!tierFirst ? (
+  // ATM row — centered single strip
+  if (isAtm) {
+    return (
+      <div
+        className={`grid grid-cols-[1fr_auto_1fr] items-center gap-2 px-2 py-1 ${first ? "" : "border-t border-white/[0.04]"
+          }`}
+      >
+        <div />
         <div
-          className="flex items-center px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide"
-          style={{ background: labelBg, color: labelColor }}
+          className="flex items-baseline gap-1.5 rounded-sm border px-3 py-1"
+          style={{ background: sideBg, borderColor: sideBorder }}
         >
-          {tier}
+          <span className="font-mono text-[14px] font-bold tabular-nums" style={{ color: accent }}>
+            {strike.toLocaleString()}
+          </span>
+          <span className="text-[9px] font-bold uppercase tracking-wider opacity-80" style={{ color: accent }}>
+            ATM
+          </span>
         </div>
-      ) : (
-        <div className="px-2.5 py-1" />
-      )}
+        <div />
+      </div>
+    );
+  }
+
+  // Resistance — content on LEFT, empty on RIGHT
+  // Support    — empty on LEFT, content on RIGHT
+  return (
+    <div
+      className={`grid grid-cols-2 items-center gap-2 px-2 py-1 ${first ? "" : "border-t border-white/[0.04]"
+        }`}
+    >
+      {isRes ? InnerStrip : <div />}
+      {!isRes ? InnerStrip : <div />}
     </div>
   );
 }
@@ -873,22 +993,39 @@ function WritingPanel({
           const filledSegments = Math.round((pctClamped / 100) * 7);
           const interpretation = interpretFor(r.oiChangePct, i);
           const isDominant = r.strike === dominantStrike;
+          const isAtmRow = r.isAtm;
           // Lakh formatting â€” divide by 1e5
           const oiInLakh = (r.oiChange / 1e5);
           const oiSign = oiInLakh >= 0 ? "+" : "";
           const pctSign = r.oiChangePct >= 0 ? "+" : "";
+          // ATM gets a sky-blue tone overriding the side accent.
+          const ATM_BLUE = "#38bdf8";
+          const ATM_BLUE_SOFT = "rgba(56,189,248,0.10)";
+          const ATM_BLUE_BORDER = "rgba(56,189,248,0.55)";
+          const rowBorder = isAtmRow ? ATM_BLUE_BORDER : isDominant ? accent : "transparent";
+          const rowBg = isAtmRow ? ATM_BLUE_SOFT : isDominant ? accentSoft : "transparent";
           return (
             <div
               key={r.strike}
               className="grid grid-cols-[64px_72px_56px_88px_1fr] items-center gap-2 rounded-sm px-1 py-1 text-[12px]"
               style={{
-                border: isDominant ? `1px solid ${accent}` : "1px solid transparent",
-                background: isDominant ? accentSoft : "transparent",
+                border: `1px solid ${rowBorder}`,
+                background: rowBg,
               }}
             >
-              <span className="font-mono font-bold tabular-nums text-white/90">
+              <span
+                className="font-mono font-bold tabular-nums"
+                style={{ color: isAtmRow ? ATM_BLUE : "rgba(255,255,255,0.9)" }}
+              >
                 {r.strike.toLocaleString()}
-                {r.isAtm ? <span className="ml-1 text-[8px] text-sky-300">ATM</span> : null}
+                {isAtmRow ? (
+                  <span
+                    className="ml-1 rounded-sm px-1 text-[8px] font-bold"
+                    style={{ background: "rgba(56,189,248,0.20)", color: ATM_BLUE }}
+                  >
+                    ATM
+                  </span>
+                ) : null}
               </span>
               <span className="font-mono tabular-nums text-white/85">
                 {oiSign}{oiInLakh.toFixed(2)} L

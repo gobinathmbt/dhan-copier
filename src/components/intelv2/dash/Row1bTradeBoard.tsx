@@ -22,7 +22,7 @@ export function Row1bTradeBoard({ data }: { data: IntelV2Snapshot | null }) {
     );
   }
   return (
-    <div className="grid h-[230px] grid-cols-12 gap-2">
+    <div className="grid h-[290px] grid-cols-12 gap-2">
       <div className="col-span-4 min-h-0">
         <SetupCard title="Best Option Buy" subtitle="(High Probability)" icon="🎯" data={tb.bestOptionBuy} />
       </div>
@@ -73,7 +73,7 @@ function SetupCard({
       }
       accent={accent}
     >
-      <div className="-m-1.5 flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto p-1.5">
+      <div className="-m-1.5 flex min-h-0 flex-1 flex-col gap-1.5 overflow-hidden p-1.5">
         {/* Reversal hint (alternate only) */}
         {data.reversalCondition ? (
           <div className="rounded-sm bg-white/[0.04] px-2 py-1 text-[9px] uppercase tracking-wider text-white/65">
@@ -234,7 +234,7 @@ function RiskGaugeCard({ gauge }: { gauge: NonNullable<NonNullable<IntelV2Snapsh
 function ExecutionContextCard({ ctx }: { ctx: NonNullable<NonNullable<IntelV2Snapshot["dashboard"]["tradeBoard"]>["executionContext"]> }) {
   return (
     <V2Card title={<span>🎮 Execution Context</span>}>
-      <div className="-m-1.5 flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto p-1.5">
+      <div className="-m-1.5 flex min-h-0 flex-1 flex-col gap-1 overflow-hidden p-1.5">
         {/* Preferred action banner */}
         <div
           className="rounded-md border px-2 py-1 text-center"
