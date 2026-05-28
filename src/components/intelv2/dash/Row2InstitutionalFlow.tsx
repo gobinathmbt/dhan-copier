@@ -4,8 +4,8 @@ import { V2Card, V2Pill, v2Fmt, v2FmtSigned, v2FmtSignedCompact, V2_TONE, V2Hint
 export function Row2InstitutionalFlow({ data }: { data: IntelV2Snapshot | null }) {
   return (
     <div className="grid h-[360px] grid-cols-12 gap-2">
-      <div className="col-span-3 min-h-0"><SpotVsFutures data={data} /></div>
-      <div className="col-span-2 min-h-0"><OiShift data={data} /></div>
+      <div className="col-span-2 min-h-0"><SpotVsFutures data={data} /></div>
+      <div className="col-span-3 min-h-0"><OiShift data={data} /></div>
       <div className="col-span-2 min-h-0"><OiBuildup data={data} /></div>
       <div className="col-span-2 min-h-0"><PremiumVelocity data={data} /></div>
       <div className="col-span-3 min-h-0"><FrvpInstitutional data={data} /></div>
@@ -13,7 +13,7 @@ export function Row2InstitutionalFlow({ data }: { data: IntelV2Snapshot | null }
   );
 }
 
-// 2.1 SPOT vs FUTURES
+// 2.1 SPOT vs FUTURES (compact — col-span-2)
 function SpotVsFutures({ data }: { data: IntelV2Snapshot | null }) {
   const spot = data?.spot.ltp ?? null;
   const fut  = data?.futures.ltp ?? null;
@@ -23,31 +23,27 @@ function SpotVsFutures({ data }: { data: IntelV2Snapshot | null }) {
   const hint = data?.dashboard?.hints?.spotFut;
   return (
     <V2Card title="2.1 Spot vs Futures">
-      <div className="grid grid-cols-2 gap-3 text-[12px]">
-        <div className="flex flex-col">
+      <div className="flex flex-col gap-1.5">
+        <div className="flex flex-col rounded-sm bg-white/[0.03] px-2 py-1">
           <span className="text-[10px] uppercase tracking-wide text-white/45">Spot</span>
-          <span className="font-mono text-[18px] font-bold text-white">{v2Fmt(spot, 2)}</span>
-          <span className="mt-1 text-[10px] text-emerald-400">Futures Premium</span>
+          <span className="font-mono text-[15px] font-bold text-white">{v2Fmt(spot, 2)}</span>
         </div>
-        <div className="flex flex-col">
+        <div className="flex flex-col rounded-sm bg-white/[0.03] px-2 py-1">
           <span className="text-[10px] uppercase tracking-wide text-white/45">Futures</span>
-          <span className="font-mono text-[18px] font-bold text-white">{v2Fmt(fut, 2)}</span>
-          <span className="mt-1 text-[10px] text-emerald-400">Premium</span>
+          <span className="font-mono text-[15px] font-bold text-white">{v2Fmt(fut, 2)}</span>
         </div>
-      </div>
-      <div className="mt-2.5 flex items-center justify-between rounded-sm bg-white/[0.03] px-2.5 py-2">
-        <span className="text-[10px] uppercase tracking-wide text-white/55">Basis</span>
-        <span className="font-mono text-[14px] font-bold" style={{ color: V2_TONE[tone].color }}>
-          {v2FmtSigned(basis ?? 0, 2)}
-        </span>
-      </div>
-      <div className="mt-1.5 flex items-center justify-between rounded-sm bg-white/[0.03] px-2.5 py-2">
-        <span className="text-[10px] uppercase tracking-wide text-white/55">Basis %</span>
-        <span className="font-mono text-[14px] font-bold" style={{ color: V2_TONE[tone].color }}>
-          {basisPct != null ? `${basisPct >= 0 ? "+" : ""}${basisPct.toFixed(2)}%` : "—"}
-        </span>
-      </div>
-      <div className="mt-2.5 flex items-center gap-2">
+        <div className="flex items-center justify-between rounded-sm bg-white/[0.03] px-2 py-1">
+          <span className="text-[10px] uppercase tracking-wide text-white/55">Basis</span>
+          <span className="font-mono text-[12px] font-bold" style={{ color: V2_TONE[tone].color }}>
+            {v2FmtSigned(basis ?? 0, 2)}
+          </span>
+        </div>
+        <div className="flex items-center justify-between rounded-sm bg-white/[0.03] px-2 py-1">
+          <span className="text-[10px] uppercase tracking-wide text-white/55">Basis %</span>
+          <span className="font-mono text-[12px] font-bold" style={{ color: V2_TONE[tone].color }}>
+            {basisPct != null ? `${basisPct >= 0 ? "+" : ""}${basisPct.toFixed(2)}%` : "—"}
+          </span>
+        </div>
         <V2Pill
           label={basis == null ? "—" : basis >= 0 ? "Premium" : "Discount"}
           tone={tone as "bull" | "bear" | "neutral"}
@@ -61,27 +57,39 @@ function SpotVsFutures({ data }: { data: IntelV2Snapshot | null }) {
 
 // 2.2 OI SHIFT (Active strikes)
 function OiShift({ data }: { data: IntelV2Snapshot | null }) {
-  const rows = data?.dashboard?.oiHistogram?.slice(0, 6) || [];
-  const hint = data?.dashboard?.hints?.oiShift;
-  // pick shift label per row: "CE Build" / "PE Build" / "Balanced"
+  // ATM ± 4 strikes, 100-spaced (backend already filters)
+  const rows = data?.dashboard?.oiHistogram || [];
+  const bias = data?.dashboard?.oiShiftBias;
+
+  // Migration tag per row: PE Build / CE Build / Balanced
   const migrationLabel = (ce: number, pe: number) => {
     if (Math.abs(ce) < 1e3 && Math.abs(pe) < 1e3) return { label: "—", tone: "neutral" as const };
-    if (ce > 0 && pe < 0) return { label: "CE Build",  tone: "bear" as const };
-    if (pe > 0 && ce < 0) return { label: "PE Build",  tone: "bull" as const };
-    if (ce > pe && ce > 0) return { label: "CE Build", tone: "bear" as const };
     if (pe > ce && pe > 0) return { label: "PE Build", tone: "bull" as const };
+    if (ce > pe && ce > 0) return { label: "CE Build", tone: "bear" as const };
+    if (ce < 0 && pe > 0) return { label: "PE Build", tone: "bull" as const };
+    if (pe < 0 && ce > 0) return { label: "CE Build", tone: "bear" as const };
     return { label: "Balanced", tone: "neutral" as const };
   };
+
+  // Bias bar colors
+  const biasTone = bias?.side === "CALL" ? "bull"
+    : bias?.side === "PUT" ? "bear" : "warn";
+  const sideLabel = bias?.side === "CALL" ? "CALL FAVOURED"
+    : bias?.side === "PUT" ? "PUT FAVOURED" : "BALANCED";
+  const sideColor = V2_TONE[biasTone].color;
+  const bullPct = bias?.bullishPct ?? 50;
+  const bearPct = bias?.bearishPct ?? 50;
+
   return (
     <V2Card title="2.2 OI Shift (Active Strikes)">
       <div className="grid grid-cols-4 px-1 pb-1 text-[10px] font-bold uppercase tracking-wider text-white/45">
         <span>Strike</span>
-        <span className="text-right">CE Δ</span>
-        <span className="text-right">PE Δ</span>
+        <span className="text-center">CE</span>
+        <span className="text-center">PE</span>
         <span className="text-right">Migration</span>
       </div>
       <div className="flex flex-col gap-1">
-        {rows.map((r) => {
+        {[...rows].sort((a, b) => b.strike - a.strike).map((r) => {
           const ceTone = r.ceOiChg >= 0 ? "bear" : "bull";
           const peTone = r.peOiChg >= 0 ? "bull" : "bear";
           const mig = migrationLabel(r.ceOiChg, r.peOiChg);
@@ -94,10 +102,10 @@ function OiShift({ data }: { data: IntelV2Snapshot | null }) {
               <span className="font-mono font-bold text-white/90">
                 {r.strike}{r.isAtm ? <span className="ml-1 text-[9px] text-sky-300">ATM</span> : null}
               </span>
-              <span className="text-right font-mono" style={{ color: V2_TONE[ceTone].color }}>
+              <span className="text-center font-mono" style={{ color: V2_TONE[ceTone].color }}>
                 {v2FmtSignedCompact(r.ceOiChg)}
               </span>
-              <span className="text-right font-mono" style={{ color: V2_TONE[peTone].color }}>
+              <span className="text-center font-mono" style={{ color: V2_TONE[peTone].color }}>
                 {v2FmtSignedCompact(r.peOiChg)}
               </span>
               <span className="text-right">
@@ -110,7 +118,89 @@ function OiShift({ data }: { data: IntelV2Snapshot | null }) {
           <div className="px-1 py-3 text-center text-[12px] text-white/45">No data</div>
         ) : null}
       </div>
-      <V2Hint label="Shift Bias" text={hint || "Balanced"} tone="info" />
+
+      {/* Bias verdict — which side favours + % */}
+      <div className="mt-2 flex flex-col gap-1.5 rounded-sm border border-white/[0.06] bg-white/[0.03] px-2.5 py-2">
+        <div className="flex items-center justify-between text-[11px]">
+          <span className="font-bold uppercase tracking-wider" style={{ color: sideColor }}>
+            {sideLabel}
+          </span>
+          <span className="font-mono font-bold tabular-nums" style={{ color: sideColor }}>
+            {bias?.pctFavour ?? 0}%
+          </span>
+        </div>
+        {/* Two-segment bar — green (bullish flow) vs red (bearish flow) */}
+        <div className="flex h-2 overflow-hidden rounded-full bg-white/[0.06]">
+          <div className="h-full bg-emerald-500/80" style={{ width: `${bullPct}%` }} />
+          <div className="h-full bg-rose-500/80" style={{ width: `${bearPct}%` }} />
+        </div>
+        <div className="flex items-center justify-between text-[10px]">
+          <span className="text-emerald-400">Bullish {bullPct}%</span>
+          <span className="text-rose-400">Bearish {bearPct}%</span>
+        </div>
+      </div>
+
+      {/* Trend block — direction, strength, dominant strike, build counts */}
+      {bias?.trend ? (() => {
+        const t = bias.trend;
+        const dirTone = t.direction === "BULLISH" ? "bull"
+          : t.direction === "BEARISH" ? "bear" : "warn";
+        const dirColor = V2_TONE[dirTone].color;
+        const dirArrow = t.direction === "BULLISH" ? "▲"
+          : t.direction === "BEARISH" ? "▼" : "▬";
+        const strengthTone = t.strength === "STRONG" ? "bull"
+          : t.strength === "MODERATE" ? "warn" : "neutral";
+        return (
+          <div className="mt-1.5 flex flex-col gap-1 rounded-sm border border-white/[0.06] bg-white/[0.025] px-2.5 py-1.5">
+            <div className="flex items-center justify-between">
+              <span className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider"
+                    style={{ color: dirColor }}>
+                <span className="text-[14px] leading-none">{dirArrow}</span>
+                {t.direction} TREND
+              </span>
+              <V2Pill label={t.strength} tone={strengthTone as "bull" | "warn" | "neutral"} size="xs" />
+            </div>
+            {/* Momentum bar 0..100 */}
+            <div className="relative h-1 w-full overflow-hidden rounded-full bg-white/[0.06]">
+              <div
+                className="absolute inset-y-0 left-0"
+                style={{ width: `${Math.min(100, t.momentum)}%`, background: dirColor }}
+              />
+            </div>
+            <div className="flex items-center justify-between text-[10px] text-white/65">
+              <span>Momentum</span>
+              <span className="font-mono font-bold" style={{ color: dirColor }}>
+                {t.momentum}%
+              </span>
+            </div>
+            {t.dominantStrike != null ? (
+              <div className="flex items-center justify-between text-[10px]">
+                <span className="text-white/55">Dominant</span>
+                <span className="font-mono font-bold text-white/85">
+                  {t.dominantStrike}{" "}
+                  <span style={{
+                    color: t.dominantBuild?.startsWith("PE") ? "#22c55e" : "#ef4444",
+                  }}>
+                    {t.dominantBuild}
+                  </span>
+                </span>
+              </div>
+            ) : null}
+            <div className="flex items-center justify-between text-[10px] text-white/55">
+              <span className="text-emerald-400">PE Build × {t.putBuildCount}</span>
+              <span className="text-rose-400">CE Build × {t.callBuildCount}</span>
+            </div>
+          </div>
+        );
+      })() : null}
+
+      <V2Hint
+        label={bias?.trend?.direction === "BULLISH" ? "Bullish Trend"
+              : bias?.trend?.direction === "BEARISH" ? "Bearish Trend"
+              : "Trend"}
+        text={bias?.trend?.label || bias?.label || "Balanced"}
+        tone={biasTone as "bull" | "bear" | "warn"}
+      />
     </V2Card>
   );
 }

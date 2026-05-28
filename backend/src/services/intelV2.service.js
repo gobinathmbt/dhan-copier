@@ -792,22 +792,151 @@ function _atmBlocks(strikes, atm) {
   };
 }
 
-/** Per-strike OI change histogram around ATM. */
-function _oiHistogram(strikes, atm, range = 6) {
+/**
+ * Per-strike OI change histogram around ATM, restricted to strike values
+ * that are multiples of `displayStep` (default 100). For NIFTY this drops
+ * the half-step strikes (23650, 23750, …) so the card shows clean
+ * 100-spaced strikes — ATM rounded to the nearest 100, ± `range` strikes.
+ *
+ * Returns up to (range*2+1) rows. If the option chain doesn't carry an
+ * exact 100-multiple strike (rare, mostly far-OTM dust), the row is skipped.
+ */
+function _oiHistogram(strikes, atm, range = 4, displayStep = 100) {
   if (!Array.isArray(strikes) || !atm) return [];
-  const sorted = [...strikes].sort((a, b) => a.strike - b.strike);
-  const idx = sorted.findIndex(s => s.strike === atm);
-  if (idx < 0) return [];
-  const start = Math.max(0, idx - range);
-  const end = Math.min(sorted.length, idx + range + 1);
-  return sorted.slice(start, end).map(s => ({
-    strike: s.strike,
-    isAtm: s.strike === atm,
-    ceOiChg: _safe(s.call?.oiChange ?? s.ce?.oiChg ?? s.ce?.oiChange),
-    peOiChg: _safe(s.put?.oiChange  ?? s.pe?.oiChg ?? s.pe?.oiChange),
-    ceOi: _safe(s.call?.oi ?? s.ce?.oi),
-    peOi: _safe(s.put?.oi  ?? s.pe?.oi),
-  }));
+  // Map<strike, row> for O(1) lookup
+  const byStrike = new Map();
+  for (const s of strikes) byStrike.set(Number(s.strike), s);
+
+  // Anchor on the nearest 100-multiple to the ATM. If ATM itself is a
+  // multiple of displayStep keep it; else round-down so the marker still
+  // sits inside the visible band.
+  const anchor = Math.round(atm / displayStep) * displayStep;
+
+  const out = [];
+  for (let i = -range; i <= range; i++) {
+    const strikeVal = anchor + i * displayStep;
+    const s = byStrike.get(strikeVal);
+    if (!s) continue;
+    out.push({
+      strike: strikeVal,
+      isAtm: strikeVal === atm,
+      ceOiChg: _safe(s.call?.oiChange ?? s.ce?.oiChg ?? s.ce?.oiChange),
+      peOiChg: _safe(s.put?.oiChange  ?? s.pe?.oiChg ?? s.pe?.oiChange),
+      ceOi: _safe(s.call?.oi ?? s.ce?.oi),
+      peOi: _safe(s.put?.oi  ?? s.pe?.oi),
+    });
+  }
+  return out;
+}
+
+/**
+ * Summarise an OI-shift histogram into a single bias verdict + a percentage,
+ * and a rich trend block showing direction, strength, dominant side, and
+ * the strike with the heaviest writer activity.
+ *
+ * Returns:
+ *   { bullishPct, bearishPct, side: 'CALL'|'PUT'|'BALANCED',
+ *     pctFavour: 0..100, label: 'Bullish (PE Buyers)'|...
+ *     trend: { direction, strength, momentum, dominantSide,
+ *              dominantStrike, dominantBuild, dominantValue,
+ *              callBuildCount, putBuildCount, label } }
+ */
+function _oiShiftBias(rows) {
+  if (!Array.isArray(rows) || !rows.length) {
+    return {
+      bullishPct: 50, bearishPct: 50, side: 'BALANCED', pctFavour: 0,
+      label: 'No data',
+      trend: {
+        direction: 'NEUTRAL', strength: 'WEAK', momentum: 0,
+        dominantSide: null, dominantStrike: null,
+        dominantBuild: null, dominantValue: 0,
+        callBuildCount: 0, putBuildCount: 0,
+        label: 'No data',
+      },
+    };
+  }
+  let bullish = 0, bearish = 0;
+  let callBuildCount = 0, putBuildCount = 0;
+  let dominant = { side: null, strike: null, value: 0, build: null };
+  for (const r of rows) {
+    const ceChg = Number(r.ceOiChg) || 0;
+    const peChg = Number(r.peOiChg) || 0;
+    if (peChg > 0) { bullish += peChg; putBuildCount++; }
+    else           { bearish += -peChg; }
+    if (ceChg > 0) { bearish += ceChg; callBuildCount++; }
+    else           { bullish += -ceChg; }
+    // Track absolute heaviest single ΔOI move across both sides
+    if (Math.abs(ceChg) > Math.abs(dominant.value)) {
+      dominant = {
+        side: ceChg >= 0 ? 'CE' : 'CE_UNWIND',
+        strike: r.strike,
+        value: ceChg,
+        build: ceChg >= 0 ? 'CE Build' : 'CE Unwind',
+      };
+    }
+    if (Math.abs(peChg) > Math.abs(dominant.value)) {
+      dominant = {
+        side: peChg >= 0 ? 'PE' : 'PE_UNWIND',
+        strike: r.strike,
+        value: peChg,
+        build: peChg >= 0 ? 'PE Build' : 'PE Unwind',
+      };
+    }
+  }
+  const total = bullish + bearish || 1;
+  const bullishPct = Math.round((bullish / total) * 100);
+  const bearishPct = 100 - bullishPct;
+  let side = 'BALANCED';
+  let pctFavour = 0;
+  if (bullishPct >= 60) { side = 'CALL'; pctFavour = bullishPct; }
+  else if (bearishPct >= 60) { side = 'PUT'; pctFavour = bearishPct; }
+  else { pctFavour = Math.max(bullishPct, bearishPct); }
+
+  // ── Trend block ─────────────────────────────────────────────────────
+  // Direction: BULLISH if PE-side build dominates; BEARISH if CE-side does.
+  // Strength: by margin of bullishPct vs bearishPct (>30 strong, 15-30 moderate, <15 mild).
+  // Momentum: signed value 0..100, reflects how lopsided the flow is.
+  const margin = Math.abs(bullishPct - bearishPct);
+  const direction = bullishPct >= 55 ? 'BULLISH'
+    : bearishPct >= 55 ? 'BEARISH' : 'NEUTRAL';
+  const strength = margin >= 30 ? 'STRONG'
+    : margin >= 15 ? 'MODERATE'
+    : 'MILD';
+  const momentum = Math.round(margin);
+  const dominantSide = dominant.side === 'PE' ? 'PE Writers (Support)'
+    : dominant.side === 'CE' ? 'CE Writers (Resistance)'
+    : dominant.side === 'PE_UNWIND' ? 'PE Unwinding (Support Erosion)'
+    : dominant.side === 'CE_UNWIND' ? 'CE Unwinding (Short Cover)'
+    : null;
+  const trendLabel = direction === 'BULLISH'
+    ? `${strength} Bullish — PE Build dominates (${bullishPct}%)`
+    : direction === 'BEARISH'
+      ? `${strength} Bearish — CE Build dominates (${bearishPct}%)`
+      : `Mixed — ${bullishPct}% bull / ${bearishPct}% bear`;
+
+  return {
+    bullishPct,
+    bearishPct,
+    side,
+    pctFavour,
+    label: side === 'CALL'
+      ? `Bullish — favours CALLS (${pctFavour}%)`
+      : side === 'PUT'
+        ? `Bearish — favours PUTS (${pctFavour}%)`
+        : `Balanced (${bullishPct}% / ${bearishPct}%)`,
+    trend: {
+      direction,
+      strength,
+      momentum,
+      dominantSide,
+      dominantStrike: dominant.strike,
+      dominantBuild: dominant.build,
+      dominantValue: dominant.value,
+      callBuildCount,
+      putBuildCount,
+      label: trendLabel,
+    },
+  };
 }
 
 /** Volume buckets for FRVP — POC / VAH / VAL using close-volume profile. */
@@ -1506,7 +1635,11 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
 
   const supportResistance = _supportResistance(strikes, atm, spotPrice);
   const topStrikeSelections = _topStrikeSelections(ladder, atm, verdict, atmBlk);
-  const oiHistogram = _oiHistogram(strikes, atm, 6);
+  // OI Shift card — ATM ± 4 strikes spaced in 100s (e.g. 23800, 23900, ATM,
+  // …). The bias summary turns the table into a single side+% verdict shown
+  // under the table.
+  const oiHistogram = _oiHistogram(strikes, atm, 4, 100);
+  const oiShiftBias = _oiShiftBias(oiHistogram);
 
   const ivRank = _ivRank(atmBlk.atmIv);
   const ivTrendSeries = (() => {
@@ -2033,6 +2166,7 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
           : 'Futures data unavailable.',
       },
       oiHistogram,
+      oiShiftBias,
       cvdSeries,
       delta: {
         totalBuyVol: delta.totalBuy, totalSellVol: delta.totalSell,
@@ -2101,7 +2235,7 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
         spotFut:    futPremium != null
           ? (futPremium >= 0 ? 'Futures premium healthy. Positive structure.' : 'Futures discount — bearish bias.')
           : 'Sync watch.',
-        oiShift:    `Shift Bias: ${(buildUp.shiftBias || 'Balanced')}`,
+        oiShift:    oiShiftBias?.label || `Shift Bias: ${(buildUp.shiftBias || 'Balanced')}`,
         oiBuildup:  buildUp.interpretation,
         premiumVel: atmBlk.atmIv >= 12 && atmBlk.atmIv <= 30
           ? `ATM Premium Move +${_round(atmBlk.atmIv * 0.6, 2)}% • Premium Efficiency HIGH • Spot vs Premium: HEALTHY`

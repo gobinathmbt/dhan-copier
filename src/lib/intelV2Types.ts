@@ -354,6 +354,25 @@ export interface IntelV2Snapshot {
       interpretation?: string;
     };
     oiHistogram: OiHistogramRow[];
+    oiShiftBias: {
+      bullishPct: number;
+      bearishPct: number;
+      side: "CALL" | "PUT" | "BALANCED";
+      pctFavour: number;
+      label: string;
+      trend: {
+        direction: "BULLISH" | "BEARISH" | "NEUTRAL";
+        strength: "STRONG" | "MODERATE" | "MILD" | "WEAK";
+        momentum: number;
+        dominantSide: string | null;
+        dominantStrike: number | null;
+        dominantBuild: string | null;
+        dominantValue: number;
+        callBuildCount: number;
+        putBuildCount: number;
+        label: string;
+      };
+    };
     cvdSeries: Array<{ t: number; cvd: number; lastLtp: number | null }>;
     delta: {
       totalBuyVol: number; totalSellVol: number;
