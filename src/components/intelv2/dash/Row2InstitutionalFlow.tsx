@@ -253,32 +253,53 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
     );
   }
   const markerLeft = `${100 - f.markerPct}%`; // markerPct=0 → at top/right (bullish)
+
+  // Buyer vs Seller dominance — averaged across both legs
+  const buyersScore  = (f.buyers.entering + (100 - f.sellers.entering)) / 2;
+  const sellersScore = 100 - buyersScore;
+  const dominantSide = buyersScore >= 60 ? "BUYERS"
+    : sellersScore >= 60 ? "SELLERS"
+    : "BALANCED";
+  const domTone = dominantSide === "BUYERS" ? "bull"
+    : dominantSide === "SELLERS" ? "bear"
+    : "warn";
+  const domColor = V2_TONE[domTone].color;
+  const domPct = Math.max(buyersScore, sellersScore);
+
   return (
     <V2Card title="2.5 FRVP (Institutional Map)">
-      {/* TOP — VAH/POC/VAL on left, gradient bar with marker, Price/InsideValue/OutsideValue on right */}
+      {/* TOP — VAH/POC/VAL on left, gradient bar with CE/PE labels, Price block on right */}
       <div className="grid grid-cols-[auto_1fr_auto] items-center gap-3">
         <div className="flex flex-col gap-1 text-[11px]">
           <Row label="VAH" value={v2Fmt(f.vah, 0)} mono color="#9ca3af" />
           <Row label="POC" value={v2Fmt(f.poc, 0)} mono color="#facc15" highlight />
           <Row label="VAL" value={v2Fmt(f.val, 0)} mono color="#9ca3af" />
         </div>
-        <div className="relative flex h-12 items-center overflow-visible">
+        <div className="relative flex h-14 flex-col items-stretch justify-center">
+          {/* CE / PE side labels above the bar */}
+          <div className="mb-1 flex items-center justify-between text-[10px] font-bold uppercase tracking-[0.16em]">
+            <span className="text-emerald-400">CE Zone</span>
+            <span className="text-white/55">Auction</span>
+            <span className="text-rose-400">PE Zone</span>
+          </div>
           {/* gradient bar: green → red */}
-          <div
-            className="h-1.5 w-full overflow-hidden rounded-full"
-            style={{
-              background: "linear-gradient(90deg, rgba(34,197,94,0.45) 0%, rgba(34,197,94,0.18) 50%, rgba(239,68,68,0.18) 50%, rgba(239,68,68,0.45) 100%)",
-            }}
-          />
-          {/* marker (white dot + line) */}
-          <div
-            className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2"
-            style={{ left: markerLeft }}
-          >
-            <div className="flex flex-col items-center">
-              <div className="h-4 w-0.5 bg-white/85" />
-              <div className="h-3 w-3 rounded-full border border-white bg-white shadow" />
-              <div className="h-4 w-0.5 bg-white/85" />
+          <div className="relative">
+            <div
+              className="h-2 w-full overflow-hidden rounded-full"
+              style={{
+                background: "linear-gradient(90deg, rgba(34,197,94,0.45) 0%, rgba(34,197,94,0.18) 50%, rgba(239,68,68,0.18) 50%, rgba(239,68,68,0.45) 100%)",
+              }}
+            />
+            {/* marker (white dot + line) */}
+            <div
+              className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2"
+              style={{ left: markerLeft }}
+            >
+              <div className="flex flex-col items-center">
+                <div className="h-4 w-0.5 bg-white/85" />
+                <div className="h-3 w-3 rounded-full border border-white bg-white shadow" />
+                <div className="h-4 w-0.5 bg-white/85" />
+              </div>
             </div>
           </div>
         </div>
@@ -289,26 +310,48 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
         </div>
       </div>
 
-      {/* BUYERS / SELLERS / PARTICIPATION grid */}
+      {/* BUYERS / SELLERS / PARTICIPATION grid — compact: label + value side-by-side */}
       <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
-        <div>
+        <div className="rounded-sm border border-emerald-500/20 bg-emerald-500/[0.04] px-2 py-1.5">
           <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-emerald-400">BUYERS</div>
-          <RowCompact label="Entering" value={`${f.buyers.entering}%`} valueColor="#22c55e" />
-          <RowCompact label="Leaving"  value={`${f.buyers.leaving}%`}  valueColor="#22c55e" />
+          <CompactPair label="Entering" value={`${f.buyers.entering}%`} valueColor="#22c55e" />
+          <CompactPair label="Leaving"  value={`${f.buyers.leaving}%`}  valueColor="#22c55e" />
         </div>
-        <div>
+        <div className="rounded-sm border border-rose-500/20 bg-rose-500/[0.04] px-2 py-1.5">
           <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-rose-400">SELLERS</div>
-          <RowCompact label="Entering" value={`${f.sellers.entering}%`} valueColor="#ef4444" />
-          <RowCompact label="Leaving"  value={`${f.sellers.leaving}%`}  valueColor="#ef4444" />
+          <CompactPair label="Entering" value={`${f.sellers.entering}%`} valueColor="#ef4444" />
+          <CompactPair label="Leaving"  value={`${f.sellers.leaving}%`}  valueColor="#ef4444" />
         </div>
-        <div>
-          <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-emerald-400">PARTICIPATION</div>
-          <RowCompact label="Strike" value={f.participationStrike?.toString() || "—"} valueColor="#fff" />
-          <RowCompact label="Level"  value={f.participationLevel || aux?.label?.split(" ")?.[0] || "—"} valueColor={f.participationLevel === "High" ? "#22c55e" : f.participationLevel === "Low" ? "#ef4444" : "#facc15"} />
+        <div className="rounded-sm border border-sky-500/20 bg-sky-500/[0.04] px-2 py-1.5">
+          <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-sky-300">PARTICIPATION</div>
+          <CompactPair label="Strike" value={f.participationStrike?.toString() || "—"} valueColor="#fff" />
+          <CompactPair label="Level"  value={f.participationLevel || aux?.label?.split(" ")?.[0] || "—"} valueColor={f.participationLevel === "High" ? "#22c55e" : f.participationLevel === "Low" ? "#ef4444" : "#facc15"} />
         </div>
       </div>
 
-      <V2Hint label="Interpretation" text={f.interpretation} tone="bull" />
+      {/* DOMINANCE METER — buyers vs sellers */}
+      <div className="mt-2 flex flex-col gap-1.5 rounded-sm border border-white/[0.06] bg-white/[0.03] px-2.5 py-2">
+        <div className="flex items-center justify-between text-[11px]">
+          <span className="font-bold uppercase tracking-wider" style={{ color: domColor }}>
+            {dominantSide === "BUYERS" ? "BUYERS DOMINATING"
+             : dominantSide === "SELLERS" ? "SELLERS DOMINATING"
+             : "BALANCED FLOW"}
+          </span>
+          <span className="font-mono font-bold tabular-nums" style={{ color: domColor }}>
+            {Math.round(domPct)}%
+          </span>
+        </div>
+        <div className="flex h-2 overflow-hidden rounded-full bg-white/[0.06]">
+          <div className="h-full bg-emerald-500/80" style={{ width: `${buyersScore}%` }} />
+          <div className="h-full bg-rose-500/80" style={{ width: `${sellersScore}%` }} />
+        </div>
+        <div className="flex items-center justify-between text-[10px]">
+          <span className="text-emerald-400">Buyers {Math.round(buyersScore)}%</span>
+          <span className="text-rose-400">Sellers {Math.round(sellersScore)}%</span>
+        </div>
+      </div>
+
+      <V2Hint label="Interpretation" text={f.interpretation} tone={domTone as "bull" | "bear" | "warn"} />
     </V2Card>
   );
 }
@@ -345,6 +388,16 @@ function RowCompact({ label, value, valueColor }: { label: string; value: string
     <div className="flex items-center justify-between py-0.5 text-[11px]">
       <span className="text-white/55">{label}</span>
       <span className="font-mono font-bold tabular-nums" style={{ color: valueColor || "#fff" }}>{value}</span>
+    </div>
+  );
+}
+
+// Compact label+value pair — tighter horizontal spacing for FRVP grid
+function CompactPair({ label, value, valueColor }: { label: string; value: string; valueColor?: string }) {
+  return (
+    <div className="flex items-baseline gap-1.5 py-0.5 text-[11px]">
+      <span className="text-white/55">{label}</span>
+      <span className="ml-auto font-mono font-bold tabular-nums" style={{ color: valueColor || "#fff" }}>{value}</span>
     </div>
   );
 }

@@ -5,11 +5,10 @@ export function Row4StructureContext({ data }: { data: IntelV2Snapshot | null })
   return (
     <div className="grid h-[300px] grid-cols-12 gap-2">
       <div className="col-span-2 min-h-0"><Vwap data={data} /></div>
-      <div className="col-span-2 min-h-0"><EmaStack data={data} /></div>
+      <div className="col-span-3 min-h-0"><EmaStack data={data} /></div>
       <div className="col-span-2 min-h-0"><CprDaily data={data} /></div>
       <div className="col-span-2 min-h-0"><MaxPain data={data} /></div>
-      <div className="col-span-2 min-h-0"><PcrHidden data={data} /></div>
-      <div className="col-span-2 min-h-0"><GiftNifty data={data} /></div>
+      <div className="col-span-3 min-h-0"><GiftNifty data={data} /></div>
     </div>
   );
 }
@@ -105,29 +104,10 @@ function MaxPain({ data }: { data: IntelV2Snapshot | null }) {
   );
 }
 
-function PcrHidden({ data }: { data: IntelV2Snapshot | null }) {
-  const pcr = data?.flow?.oi?.pcr ?? 0;
-  const tone = pcr >= 1.05 ? "bull" : pcr <= 0.95 ? "bear" : "warn";
-  return (
-    <V2Card title="4.5 PCR (Hidden)">
-      <div className="flex flex-col gap-1.5 text-[12px]">
-        <Row label="PCR (Total)" value={v2Fmt(pcr, 2)} />
-        <Row
-          label="PCR (Bias)"
-          value={pcr >= 1.05 ? "Bullish" : pcr <= 0.95 ? "Bearish" : "Neutral"}
-        />
-        <div className="mt-1 flex items-center justify-between rounded-sm bg-white/[0.03] px-2.5 py-1.5">
-          <span className="text-[11px] uppercase tracking-wider text-white/55">Sentiment</span>
-          <V2Pill
-            label={tone === "bull" ? "Buy PE Writers" : tone === "bear" ? "Buy CE Writers" : "Neutral"}
-            tone={tone as "bull" | "bear" | "warn"}
-            size="sm"
-          />
-        </div>
-      </div>
-      <V2Hint label="Sentiment" text={data?.dashboard?.hints?.pcr || ""} tone={tone as "bull" | "bear" | "warn"} />
-    </V2Card>
-  );
+function PcrHidden(_props: { data: IntelV2Snapshot | null }) {
+  // 4.5 PCR (Hidden) removed per user request — PCR is already shown in
+  // the OI Buildup Analysis card (Row 2.3) under "CE/PE OI Ratio".
+  return null;
 }
 
 function GiftNifty({ data }: { data: IntelV2Snapshot | null }) {

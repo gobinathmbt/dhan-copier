@@ -131,21 +131,80 @@ export function SupportResistanceCardV2({ data }: { data: IntelV2Snapshot | null
           </div>
         </div>
 
-        {/* Walls side-by-side */}
+        {/* Walls side-by-side — CE (resistances) on the LEFT, PE (supports) on the RIGHT */}
         <div className="grid min-h-0 flex-1 grid-cols-2 gap-3 overflow-hidden">
-          <WallList
-            title="Top Supports (PE)"
-            tone="bull"
-            rows={supports}
-          />
           <WallList
             title="Top Resistances (CE)"
             tone="bear"
             rows={resistances}
           />
+          <WallList
+            title="Top Supports (PE)"
+            tone="bull"
+            rows={supports}
+          />
         </div>
+
+        {/* Bottom meter — which side dominates + percentage */}
+        <SupportResistanceMeter
+          supportStrength={supportStrength}
+          resistanceStrength={resistanceStrength}
+          tilt={tilt}
+        />
       </div>
     </V2Card>
+  );
+}
+
+function SupportResistanceMeter({
+  supportStrength,
+  resistanceStrength,
+  tilt,
+}: {
+  supportStrength: number;
+  resistanceStrength: number;
+  tilt: number;
+}) {
+  // tilt 0..100 — higher = more support pressure (bullish)
+  // CE (resistance) on left, PE (support) on right to mirror the wall layout above
+  const cePct = Math.max(0, Math.min(100, 100 - tilt));   // resistance dominance
+  const pePct = Math.max(0, Math.min(100, tilt));         // support dominance
+  const dominantSide = cePct >= 60 ? "RESISTANCE FAVOURED (Buy PE)"
+    : pePct >= 60 ? "SUPPORT FAVOURED (Buy CE)"
+    : "BALANCED";
+  const tone = cePct >= 60 ? "bear" : pePct >= 60 ? "bull" : "warn";
+  const toneColor = tone === "bear" ? "#ef4444"
+    : tone === "bull" ? "#10b981"
+    : "#f59e0b";
+  return (
+    <div
+      className="flex shrink-0 flex-col gap-1.5 rounded-md border px-3 py-2"
+      style={{
+        borderColor: `${toneColor}40`,
+        background: `${toneColor}10`,
+      }}
+    >
+      <div className="flex items-center justify-between text-[11px]">
+        <span className="font-bold uppercase tracking-wider" style={{ color: toneColor }}>
+          {dominantSide}
+        </span>
+        <span className="font-mono font-bold tabular-nums" style={{ color: toneColor }}>
+          {Math.max(cePct, pePct)}%
+        </span>
+      </div>
+      {/* Two-segment bar — red CE on left, green PE on right */}
+      <div className="flex h-2 overflow-hidden rounded-full bg-white/[0.06]">
+        <div className="h-full bg-rose-500/80" style={{ width: `${cePct}%` }} />
+        <div className="h-full bg-emerald-500/80" style={{ width: `${pePct}%` }} />
+      </div>
+      <div className="flex items-center justify-between text-[10px]">
+        <span className="text-rose-400">CE Wall {Math.round(cePct)}%</span>
+        <span className="text-white/55 font-mono">
+          R {resistanceStrength.toLocaleString()} | S {supportStrength.toLocaleString()}
+        </span>
+        <span className="text-emerald-400">PE Wall {Math.round(pePct)}%</span>
+      </div>
+    </div>
   );
 }
 
