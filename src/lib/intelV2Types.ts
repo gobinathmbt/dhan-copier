@@ -543,6 +543,40 @@ export interface IntelV2Snapshot {
     };
     optionChainSnapshot: OptionChainRow[];
     topStrikeSelections: { ce: TopStrike[]; pe: TopStrike[]; all: TopStrike[] };
+    bestTradePick: null | {
+      ce: null | {
+        side: "CE";
+        strike: number;
+        ltp: number;
+        oi: number;
+        delta: number;
+        iv: number;
+        health: { state: string; score: number };
+        moneyness: string;
+        probability: number;
+        action: "STRONG BUY" | "BUY" | "CAUTIOUS BUY" | "WAIT" | "AVOID";
+        label: string;
+        reasoning: string;
+        factors: Record<string, number>;
+      };
+      pe: null | {
+        side: "PE";
+        strike: number;
+        ltp: number;
+        oi: number;
+        delta: number;
+        iv: number;
+        health: { state: string; score: number };
+        moneyness: string;
+        probability: number;
+        action: "STRONG BUY" | "BUY" | "CAUTIOUS BUY" | "WAIT" | "AVOID";
+        label: string;
+        reasoning: string;
+        factors: Record<string, number>;
+      };
+      primary: "CE" | "PE" | "NEUTRAL";
+      spread: number;
+    };
     supportResistance: {
       supports: SupportResistanceRow[];
       resistances: SupportResistanceRow[];

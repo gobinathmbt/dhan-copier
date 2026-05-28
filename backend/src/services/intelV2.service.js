@@ -1316,6 +1316,178 @@ function _pickBestStrike(side, ladder, atm) {
   return candidates[0] || null;
 }
 
+/**
+ * Best Trade Picks (CE + PE side-by-side)
+ * =======================================
+ * Independent CE and PE strike picks with confluence-based win probability.
+ *
+ * Probability is built from 7 confluence factors (each contributes points):
+ *   1. Verdict alignment       (verdict.cePct/pePct)              max 25
+ *   2. FRVP directional bias   (engine.directionalBias.side+strength) max 20
+ *   3. Acceptance/Rejection    (engine.acceptance flags)           max 15
+ *   4. Smart money (delta)     (delta.bias)                        max 10
+ *   5. Strike health           (leg.health.score)                  max 10
+ *   6. OI structure            (CE/PE writing pattern)             max 10
+ *   7. Trap risk penalty       (trap.score subtraction)            max 10
+ *
+ * Final = base 35% + sum of weighted contributions, clamped to [25, 92].
+ *
+ * Returns:
+ *   { ce: { ...pickStrike, probability, label, factors, reasoning, action },
+ *     pe: { ... },
+ *     primary: 'CE' | 'PE' | 'NEUTRAL',
+ *     spread: number  // probability gap between primary and secondary
+ *   }
+ */
+function _bestTradePicks({
+  ladder, atm, verdict, frvpEngine, deltaBias, acceptance, trapScore, atmBlk,
+}) {
+  if (!Array.isArray(ladder) || !atm) return null;
+
+  const buildPick = (side) => {
+    const pick = _pickBestStrike(side, ladder, atm);
+    if (!pick) return null;
+    const factors = {};
+    let prob = 35; // base
+
+    // 1. Verdict alignment
+    const sidePct = side === 'CE' ? verdict.cePct : verdict.pePct;
+    const vAlign = Math.max(0, sidePct - 50) * 0.5;  // up to 25
+    factors.verdict = _round(vAlign, 1);
+    prob += vAlign;
+
+    // 2. FRVP directional bias
+    let frvpBoost = 0;
+    if (frvpEngine?.directionalBias) {
+      const b = frvpEngine.directionalBias;
+      if (b.side === side) {
+        frvpBoost = b.strength === 'STRONG' ? 20
+                  : b.strength === 'MODERATE' ? 12
+                  : 6;
+      } else if (b.side !== 'NEUTRAL') {
+        frvpBoost = -10;  // FRVP says other side
+      }
+    }
+    factors.frvp = frvpBoost;
+    prob += frvpBoost;
+
+    // 3. Acceptance / rejection alignment
+    let accBoost = 0;
+    if (acceptance) {
+      if (side === 'CE') {
+        if (acceptance.acceptedAboveVAH) accBoost += 12;
+        if (acceptance.rejectedBelowVAL) accBoost += 8;   // bear trap → CE setup
+        if (acceptance.acceptedBelowVAL) accBoost -= 12;
+        if (acceptance.rejectedAboveVAH) accBoost -= 8;
+      } else {
+        if (acceptance.acceptedBelowVAL) accBoost += 12;
+        if (acceptance.rejectedAboveVAH) accBoost += 8;   // bull trap → PE setup
+        if (acceptance.acceptedAboveVAH) accBoost -= 12;
+        if (acceptance.rejectedBelowVAL) accBoost -= 8;
+      }
+    }
+    factors.acceptance = accBoost;
+    prob += accBoost;
+
+    // 4. Smart money (delta) alignment
+    let dBoost = 0;
+    if (deltaBias === 'bullish') dBoost = side === 'CE' ? 10 : -8;
+    else if (deltaBias === 'bearish') dBoost = side === 'PE' ? 10 : -8;
+    factors.delta = dBoost;
+    prob += dBoost;
+
+    // 5. Strike health
+    const healthScore = pick.leg?.health?.score ?? 50;
+    const hBoost = (healthScore - 50) * 0.2;  // ±10
+    factors.health = _round(hBoost, 1);
+    prob += hBoost;
+
+    // 6. OI structure
+    let oiBoost = 0;
+    if (atmBlk) {
+      if (side === 'CE') {
+        if (atmBlk.peWriting) oiBoost += 6;     // PE writing = bullish for CE buy
+        if (atmBlk.ceUnwinding) oiBoost += 4;
+        if (atmBlk.ceWriting) oiBoost -= 6;
+      } else {
+        if (atmBlk.ceWriting) oiBoost += 6;
+        if (atmBlk.peUnwinding) oiBoost += 4;
+        if (atmBlk.peWriting) oiBoost -= 6;
+      }
+    }
+    factors.oi = oiBoost;
+    prob += oiBoost;
+
+    // 7. Trap penalty
+    const tPenalty = (trapScore || 0) * -0.5;  // up to -10
+    factors.trap = _round(tPenalty, 1);
+    prob += tPenalty;
+
+    // Clamp probability
+    prob = Math.max(25, Math.min(92, Math.round(prob)));
+
+    // Action label
+    const action =
+      prob >= 70 ? 'STRONG BUY'
+      : prob >= 60 ? 'BUY'
+      : prob >= 50 ? 'CAUTIOUS BUY'
+      : prob >= 40 ? 'WAIT'
+      : 'AVOID';
+
+    // Reasoning string — 2 strongest factors
+    const sortedFactors = Object.entries(factors)
+      .map(([k, v]) => ({ k, v }))
+      .filter(f => Math.abs(f.v) >= 4)
+      .sort((a, b) => Math.abs(b.v) - Math.abs(a.v));
+    const top = sortedFactors.slice(0, 2);
+    const reasonMap = {
+      verdict: 'verdict',
+      frvp: 'FRVP bias',
+      acceptance: 'price acceptance',
+      delta: 'delta flow',
+      health: 'strike health',
+      oi: 'OI structure',
+      trap: 'trap risk',
+    };
+    const reasoning = top.length
+      ? top.map(f => `${f.v >= 0 ? '+' : ''}${f.v.toFixed(0)} ${reasonMap[f.k]}`).join(' · ')
+      : 'no clear edge';
+
+    return {
+      side,
+      strike: pick.row.strike,
+      ltp: _round(pick.leg.ltp, 2),
+      oi: pick.leg.oi,
+      delta: _round(pick.leg.delta, 3),
+      iv: _round(pick.leg.iv, 1),
+      health: pick.leg.health,
+      moneyness: pick.moneyness === 0 ? 'ATM'
+        : pick.moneyness > 0 ? `OTM+${pick.moneyness}` : `ITM${pick.moneyness}`,
+      probability: prob,
+      action,
+      label: `BUY ${side} ${pick.row.strike}`,
+      reasoning,
+      factors,
+    };
+  };
+
+  const ce = buildPick('CE');
+  const pe = buildPick('PE');
+  if (!ce && !pe) return null;
+
+  // Primary side — whichever has the higher probability AND >= 50.
+  let primary = 'NEUTRAL';
+  let spread = 0;
+  if (ce && pe) {
+    spread = Math.abs(ce.probability - pe.probability);
+    if (ce.probability > pe.probability && ce.probability >= 50) primary = 'CE';
+    else if (pe.probability > ce.probability && pe.probability >= 50) primary = 'PE';
+  } else if (ce && ce.probability >= 50) primary = 'CE';
+  else if (pe && pe.probability >= 50) primary = 'PE';
+
+  return { ce, pe, primary, spread };
+}
+
 function _tradePlan(verdict, ladder, atm, marketOpen) {
   const pickSide = verdict.side === 'CE' || verdict.side === 'PE'
     ? verdict.side
@@ -2225,6 +2397,20 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
   // Risk management for the picked strike
   const lotSize = settings.lotSize || sym.lotSize || 65;
   const positionLots = settings.minLots || 1;
+
+  // Best Trade Picks — independent CE & PE strike picks with confluence-based
+  // probability fused from verdict, FRVP bias, acceptance, delta, health, OI,
+  // and trap penalty. Drives the new "Best Trade Pick" footer strip on the
+  // WritingPressure card.
+  const bestTradePick = _bestTradePicks({
+    ladder, atm, verdict,
+    frvpEngine: frvpInstitutional?.engine,
+    deltaBias: delta.bias,
+    acceptance: frvpInstitutional?.engine?.acceptance,
+    trapScore: trapBlk?.score,
+    atmBlk,
+  });
+
   const riskManagement = tradePlan.pick ? {
     entryPrice: tradePlan.pick.ltp,
     stopLoss: tradePlan.pick.sl,
@@ -2476,6 +2662,7 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
       },
       optionChainSnapshot,
       topStrikeSelections,
+      bestTradePick,
       supportResistance,
       riskManagement,
       keyLevels,
