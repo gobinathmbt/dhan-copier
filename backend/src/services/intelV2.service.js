@@ -801,7 +801,7 @@ function _atmBlocks(strikes, atm) {
  * Returns up to (range*2+1) rows. If the option chain doesn't carry an
  * exact 100-multiple strike (rare, mostly far-OTM dust), the row is skipped.
  */
-function _oiHistogram(strikes, atm, range = 4, displayStep = 100) {
+function _oiHistogram(strikes, atm, range = 4, displayStep = 100, ctx = {}) {
   if (!Array.isArray(strikes) || !atm) return [];
   // Map<strike, row> for O(1) lookup
   const byStrike = new Map();
@@ -811,19 +811,93 @@ function _oiHistogram(strikes, atm, range = 4, displayStep = 100) {
   // multiple of displayStep keep it; else round-down so the marker still
   // sits inside the visible band.
   const anchor = Math.round(atm / displayStep) * displayStep;
+  const spot = Number(ctx.spot) || atm;
 
   const out = [];
   for (let i = -range; i <= range; i++) {
     const strikeVal = anchor + i * displayStep;
     const s = byStrike.get(strikeVal);
     if (!s) continue;
+    const ce = s.call || s.ce || {};
+    const pe = s.put  || s.pe || {};
+    const ceG = ce.greeks || ce;
+    const peG = pe.greeks || pe;
+    const ceOi    = _safe(ce.oi);
+    const peOi    = _safe(pe.oi);
+    const ceOiChg = _safe(ce.oiChange ?? ce.oiChg);
+    const peOiChg = _safe(pe.oiChange ?? pe.oiChg);
+    const ceLtp   = _safe(ce.ltp);
+    const peLtp   = _safe(pe.ltp);
+    const ceDelta = _safe(ceG.delta);
+    const peDelta = _safe(peG.delta);
+
+    // ── Buyer-favorability score per strike (0..100 each side) ─────────
+    // CE buyer wants: PE writers strong (support firming), spot ≥ strike,
+    //                 CE writers weak / unwinding, healthy delta band,
+    //                 non-dead premium.
+    // PE buyer wants: CE writers strong (resistance firming), spot ≤ strike,
+    //                 PE writers weak / unwinding, healthy delta band,
+    //                 non-dead premium.
+    let ceBuy = 0;
+    let peBuy = 0;
+
+    // Side dominance (0..40)
+    const writeMax = Math.max(Math.abs(ceOiChg), Math.abs(peOiChg), 1);
+    if (peOiChg > 0) ceBuy += Math.min(40, (peOiChg / writeMax) * 40);
+    if (peOiChg < 0) peBuy += Math.min(20, (Math.abs(peOiChg) / writeMax) * 20);
+    if (ceOiChg > 0) peBuy += Math.min(40, (ceOiChg / writeMax) * 40);
+    if (ceOiChg < 0) ceBuy += Math.min(20, (Math.abs(ceOiChg) / writeMax) * 20);
+
+    // Spot vs strike position (0..20)
+    if (Number.isFinite(spot)) {
+      if (spot >= strikeVal) ceBuy += 20 - Math.min(20, Math.abs(spot - strikeVal) / 10);
+      else                   peBuy += 20 - Math.min(20, Math.abs(spot - strikeVal) / 10);
+    }
+
+    // Delta band (0..15) — buyers want 0.30..0.55 for cheap gamma
+    const ceAbs = Math.abs(ceDelta);
+    const peAbs = Math.abs(peDelta);
+    if (ceAbs >= 0.30 && ceAbs <= 0.55) ceBuy += 15;
+    else if (ceAbs >= 0.20 && ceAbs <= 0.65) ceBuy += 8;
+    if (peAbs >= 0.30 && peAbs <= 0.55) peBuy += 15;
+    else if (peAbs >= 0.20 && peAbs <= 0.65) peBuy += 8;
+
+    // Premium liveness (0..15) — punish illiquid/dead premium
+    if (ceLtp >= 5 && ceLtp <= 250) ceBuy += 15;
+    else if (ceLtp >= 1) ceBuy += 5;
+    if (peLtp >= 5 && peLtp <= 250) peBuy += 15;
+    else if (peLtp >= 1) peBuy += 5;
+
+    // OI presence (0..10) — at least one side needs liquidity
+    if (ceOi >= 1_000_000) ceBuy += 10;
+    else if (ceOi >= 100_000) ceBuy += 5;
+    if (peOi >= 1_000_000) peBuy += 10;
+    else if (peOi >= 100_000) peBuy += 5;
+
+    ceBuy = Math.max(0, Math.min(100, Math.round(ceBuy)));
+    peBuy = Math.max(0, Math.min(100, Math.round(peBuy)));
+
+    // Normalise the two scores so the row's split bar adds to 100.
+    const total = ceBuy + peBuy || 1;
+    const ceFavorPct = Math.round((ceBuy / total) * 100);
+    const peFavorPct = 100 - ceFavorPct;
+    const favorSide = ceFavorPct >= 60 ? 'CE'
+      : peFavorPct >= 60 ? 'PE'
+      : 'NEUTRAL';
+    const favorPct = Math.max(ceFavorPct, peFavorPct);
+
     out.push({
       strike: strikeVal,
       isAtm: strikeVal === atm,
-      ceOiChg: _safe(s.call?.oiChange ?? s.ce?.oiChg ?? s.ce?.oiChange),
-      peOiChg: _safe(s.put?.oiChange  ?? s.pe?.oiChg ?? s.pe?.oiChange),
-      ceOi: _safe(s.call?.oi ?? s.ce?.oi),
-      peOi: _safe(s.put?.oi  ?? s.pe?.oi),
+      ceOiChg, peOiChg, ceOi, peOi,
+      ceLtp, peLtp,
+      ceDelta, peDelta,
+      ceBuyScore: ceBuy,
+      peBuyScore: peBuy,
+      ceFavorPct,
+      peFavorPct,
+      favorSide,
+      favorPct,
     });
   }
   return out;
@@ -1637,8 +1711,8 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
   const topStrikeSelections = _topStrikeSelections(ladder, atm, verdict, atmBlk);
   // OI Shift card — ATM ± 4 strikes spaced in 100s (e.g. 23800, 23900, ATM,
   // …). The bias summary turns the table into a single side+% verdict shown
-  // under the table.
-  const oiHistogram = _oiHistogram(strikes, atm, 4, 100);
+  // under the table. Each row also carries a per-strike buyer-favor split.
+  const oiHistogram = _oiHistogram(strikes, atm, 4, 100, { spot: spotPrice });
   const oiShiftBias = _oiShiftBias(oiHistogram);
 
   const ivRank = _ivRank(atmBlk.atmIv);

@@ -82,21 +82,28 @@ function OiShift({ data }: { data: IntelV2Snapshot | null }) {
 
   return (
     <V2Card title="2.2 OI Shift (Active Strikes)">
-      <div className="grid grid-cols-4 px-1 pb-1 text-[10px] font-bold uppercase tracking-wider text-white/45">
+      <div className="grid grid-cols-[58px_60px_60px_60px_1fr] items-center gap-1 px-1 pb-1 text-[10px] font-bold uppercase tracking-wider text-white/45">
         <span>Strike</span>
         <span className="text-center">CE</span>
         <span className="text-center">PE</span>
         <span className="text-right">Migration</span>
+        <span className="pl-1 text-right">Buyer Favor</span>
       </div>
       <div className="flex flex-col gap-1">
         {[...rows].sort((a, b) => b.strike - a.strike).map((r) => {
           const ceTone = r.ceOiChg >= 0 ? "bear" : "bull";
           const peTone = r.peOiChg >= 0 ? "bull" : "bear";
           const mig = migrationLabel(r.ceOiChg, r.peOiChg);
+          const cePct = r.ceFavorPct ?? 50;
+          const pePct = r.peFavorPct ?? 50;
+          const fav = r.favorSide || "NEUTRAL";
+          const favColor = fav === "CE" ? V2_TONE.bull.color
+                         : fav === "PE" ? V2_TONE.bear.color
+                         : V2_TONE.warn.color;
           return (
             <div
               key={r.strike}
-              className="grid grid-cols-4 items-center rounded-sm px-1.5 py-1 text-[12px]"
+              className="grid grid-cols-[58px_60px_60px_60px_1fr] items-center gap-1 rounded-sm px-1.5 py-1 text-[12px]"
               style={{ background: r.isAtm ? "rgba(59,130,246,0.10)" : "transparent" }}
             >
               <span className="font-mono font-bold text-white/90">
@@ -111,6 +118,20 @@ function OiShift({ data }: { data: IntelV2Snapshot | null }) {
               <span className="text-right">
                 <V2Pill label={mig.label} tone={mig.tone} size="xs" />
               </span>
+              {/* Buyer Favor meter — CE green vs PE red split */}
+              <div className="flex items-center gap-1.5 pl-1">
+                <div className="relative flex h-2 flex-1 overflow-hidden rounded-full bg-white/[0.06]">
+                  <div className="h-full bg-emerald-500/80" style={{ width: `${cePct}%` }} />
+                  <div className="h-full bg-rose-500/80" style={{ width: `${pePct}%` }} />
+                </div>
+                <span
+                  className="w-12 shrink-0 text-right font-mono text-[10px] font-bold tabular-nums"
+                  style={{ color: favColor }}
+                  title={`CE-buy ${r.ceBuyScore ?? 0}/100 vs PE-buy ${r.peBuyScore ?? 0}/100`}
+                >
+                  {fav === "NEUTRAL" ? "—" : `${fav} ${r.favorPct ?? 0}%`}
+                </span>
+              </div>
             </div>
           );
         })}

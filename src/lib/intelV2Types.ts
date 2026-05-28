@@ -46,6 +46,16 @@ export interface OiHistogramRow {
   peOiChg: number;
   ceOi: number;
   peOi: number;
+  ceLtp?: number;
+  peLtp?: number;
+  ceDelta?: number;
+  peDelta?: number;
+  ceBuyScore?: number;
+  peBuyScore?: number;
+  ceFavorPct?: number;
+  peFavorPct?: number;
+  favorSide?: "CE" | "PE" | "NEUTRAL";
+  favorPct?: number;
 }
 
 export interface OptionChainRow {
