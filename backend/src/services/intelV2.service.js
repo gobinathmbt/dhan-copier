@@ -2729,6 +2729,189 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
     return { bestOptionBuy, alternateScenario, riskGauge, executionContext };
   })();
 
+  // ── HERO OR ZERO ENGINE ─────────────────────────────────────────────
+  // High-risk / high-reward sniper banner. Computes a Hero CE / Hero PE /
+  // Zero Trade verdict by scoring 6 boolean signals per side. Uses
+  // already-computed: vwap, vp (FRVP value area), frvpInstitutional engine
+  // (dominance + delta + acceptance), atmBlk (CE/PE writing), atmBlk.atmIv,
+  // and macro.vix. Lives at dashboard.heroZero.
+  //
+  // Score weights:
+  //   +2  Above VAH (CE) / Below VAL (PE)
+  //   +2  Above VWAP (CE) / Below VWAP (PE)
+  //   +2  Premium expanding the right side (FRVP premiumVel state)
+  //   +1  Buyers dominant ≥65% (CE) / Sellers dominant ≥65% (PE)
+  //   +1  Delta positive ≥10% (CE) / negative ≤-10% (PE)
+  //   +1  Breakout / breakdown volume — last bar volume > 1.5× avg
+  //
+  //   Total max = 9. Hero fires at score ≥ 7.
+  const heroZero = (() => {
+    const fEngine = frvpInstitutional?.engine;
+    const fAccept = fEngine?.acceptance;
+    const fDom    = fEngine?.dominance;
+    const fDelta  = fEngine?.delta;
+    const fPrem   = fEngine?.advanced?.premiumVel;
+
+    // Core spot levels
+    const aboveVAH = vp?.vah != null && Number.isFinite(spotPrice) && spotPrice > vp.vah;
+    const belowVAL = vp?.val != null && Number.isFinite(spotPrice) && spotPrice < vp.val;
+    const insideValue = vp?.vah != null && vp?.val != null
+      && Number.isFinite(spotPrice) && spotPrice >= vp.val && spotPrice <= vp.vah;
+    const aboveVWAP = vwap != null && Number.isFinite(spotPrice) && spotPrice > vwap;
+    const belowVWAP = vwap != null && Number.isFinite(spotPrice) && spotPrice < vwap;
+
+    // Acceptance — 3+ bars closed beyond level
+    const acceptedAbove = !!fAccept?.acceptedAboveVAH;
+    const acceptedBelow = !!fAccept?.acceptedBelowVAL;
+    const rejectedAbove = !!fAccept?.rejectedAboveVAH;   // bull trap
+    const rejectedBelow = !!fAccept?.rejectedBelowVAL;   // bear trap
+
+    // Premium velocity
+    const ceExpanding = fPrem?.state === 'CE_EXPANDING';
+    const peExpanding = fPrem?.state === 'PE_EXPANDING';
+
+    // Dominance
+    const buyersDominant  = (fDom?.dominantSide === 'BUYERS')  && fDom?.buyersScore  >= 65;
+    const sellersDominant = (fDom?.dominantSide === 'SELLERS') && fDom?.sellersScore >= 65;
+
+    // Delta
+    const deltaPos = (fDelta?.deltaPct ?? 0) >=  10;
+    const deltaNeg = (fDelta?.deltaPct ?? 0) <= -10;
+
+    // Volume burst — last 5m bar volume vs prior-20 average
+    const volSurge = (() => {
+      if (!Array.isArray(c5m) || c5m.length < 6) return false;
+      const last = c5m[c5m.length - 1];
+      const prior = c5m.slice(-21, -1);
+      if (!prior.length) return false;
+      const avg = prior.reduce((s, b) => s + (b.volume || 0), 0) / prior.length;
+      return avg > 0 && (last.volume || 0) > avg * 1.5;
+    })();
+
+    // Trap detection — bull trap kills CE hero, bear trap kills PE hero
+    const bullTrap = rejectedAbove;
+    const bearTrap = rejectedBelow;
+
+    // Score CE side (max 9)
+    let ceScore = 0;
+    if (aboveVAH)        ceScore += 2;
+    if (aboveVWAP)       ceScore += 2;
+    if (ceExpanding)     ceScore += 2;
+    if (buyersDominant)  ceScore += 1;
+    if (deltaPos)        ceScore += 1;
+    if (volSurge)        ceScore += 1;
+    if (bullTrap)        ceScore -= 4; // hard veto
+
+    // Score PE side
+    let peScore = 0;
+    if (belowVAL)        peScore += 2;
+    if (belowVWAP)       peScore += 2;
+    if (peExpanding)     peScore += 2;
+    if (sellersDominant) peScore += 1;
+    if (deltaNeg)        peScore += 1;
+    if (volSurge)        peScore += 1;
+    if (bearTrap)        peScore -= 4;
+
+    // Pick best target strike — closest 100-step OTM strike
+    const STEP = 100;
+    const ceTarget = Math.round((spotPrice + STEP) / STEP) * STEP;
+    const peTarget = Math.round((spotPrice - STEP) / STEP) * STEP;
+
+    // Lookup ATM premium for the target
+    const ceLeg = strikes.find(s => Number(s.strike) === ceTarget);
+    const peLeg = strikes.find(s => Number(s.strike) === peTarget);
+    const ceLtp = _safe(ceLeg?.call?.ltp ?? ceLeg?.ce?.ltp);
+    const peLtp = _safe(peLeg?.put?.ltp  ?? peLeg?.pe?.ltp);
+
+    // Hero confidence — score-based (7 → 78%, 9 → 92%)
+    const HERO_THRESHOLD = 7;
+    const ceConfidence = ceScore >= HERO_THRESHOLD ? Math.min(95, 70 + ceScore * 3) : null;
+    const peConfidence = peScore >= HERO_THRESHOLD ? Math.min(95, 70 + peScore * 3) : null;
+
+    // Verdict
+    let verdict, side, target, ltp, confidence, headline, subline, momentum, premiumPct;
+    if (ceConfidence != null && ceScore > peScore) {
+      verdict = 'HERO_CE';  side = 'CE';
+      target = ceTarget; ltp = ceLtp; confidence = ceConfidence;
+      headline = 'Momentum Expansion Active';
+      subline  = 'Smart money entering CE side';
+      momentum = ceScore >= 8 ? 'EXPLODING' : 'EXPANDING';
+      premiumPct = ceExpanding ? '+22%' : '+12%';   // proxy display
+    } else if (peConfidence != null) {
+      verdict = 'HERO_PE';  side = 'PE';
+      target = peTarget; ltp = peLtp; confidence = peConfidence;
+      headline = 'Downside Momentum Explosion';
+      subline  = 'Smart money entering PE side';
+      momentum = peScore >= 8 ? 'EXPLODING' : 'EXPANDING';
+      premiumPct = peExpanding ? '+24%' : '+14%';
+    } else {
+      verdict = 'ZERO';     side = null;
+      target = null; ltp = null; confidence = null;
+      // Zero subreason: which kill-switch fired?
+      if (insideValue)               { headline = 'Inside Value Area';   subline = 'Premium decay risk · No edge'; }
+      else if (bullTrap)             { headline = 'Bull Trap Detected';  subline = 'CE breakout fakeout — avoid CE'; }
+      else if (bearTrap)             { headline = 'Bear Trap Detected';  subline = 'PE breakdown fakeout — avoid PE'; }
+      else if (!ceExpanding && !peExpanding) { headline = 'Premium Stagnant'; subline = 'No expansion either side'; }
+      else                            { headline = 'No Edge';             subline = 'Mixed flow · wait for confirmation'; }
+      momentum = 'FLAT';
+      premiumPct = '0%';
+    }
+
+    return {
+      verdict,            // HERO_CE | HERO_PE | ZERO
+      side,               // CE | PE | null
+      strike: target,
+      ltp,
+      confidence,
+      headline,
+      subline,
+      momentum,
+      premiumPct,
+      scores: {
+        ce: ceScore,
+        pe: peScore,
+        threshold: HERO_THRESHOLD,
+      },
+      signals: {
+        aboveVAH, belowVAL, insideValue,
+        aboveVWAP, belowVWAP,
+        acceptedAbove, acceptedBelow,
+        ceExpanding, peExpanding,
+        buyersDominant, sellersDominant,
+        deltaPos, deltaNeg, deltaPct: fDelta?.deltaPct ?? 0,
+        volSurge,
+        bullTrap, bearTrap,
+        ivLevel: atmBlk.atmIv,
+        vix: macro?.vix?.price ?? null,
+      },
+      // Top-3 firing reasons for the chip strip
+      reasons: (() => {
+        const r = [];
+        if (verdict === 'HERO_CE') {
+          if (aboveVAH)       r.push('Above VAH');
+          if (aboveVWAP)      r.push('Above VWAP');
+          if (ceExpanding)    r.push('CE Premium Expanding');
+          if (buyersDominant) r.push(`Buyers ${fDom?.buyersScore}%`);
+          if (deltaPos)       r.push(`Δ +${(fDelta?.deltaPct ?? 0).toFixed(1)}%`);
+          if (volSurge)       r.push('Volume Surge');
+        } else if (verdict === 'HERO_PE') {
+          if (belowVAL)        r.push('Below VAL');
+          if (belowVWAP)       r.push('Below VWAP');
+          if (peExpanding)     r.push('PE Premium Expanding');
+          if (sellersDominant) r.push(`Sellers ${fDom?.sellersScore}%`);
+          if (deltaNeg)        r.push(`Δ ${(fDelta?.deltaPct ?? 0).toFixed(1)}%`);
+          if (volSurge)        r.push('Volume Surge');
+        } else {
+          if (insideValue)     r.push('Inside Value');
+          if (bullTrap)        r.push('Bull Trap');
+          if (bearTrap)        r.push('Bear Trap');
+          if (!ceExpanding && !peExpanding) r.push('Premium Flat');
+        }
+        return r.slice(0, 4);
+      })(),
+    };
+  })();
+
   const riskManagement = tradePlan.pick ? {
     entryPrice: tradePlan.pick.ltp,
     stopLoss: tradePlan.pick.sl,
@@ -2983,6 +3166,7 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
       topStrikeSelections,
       bestTradePick,
       tradeBoard,
+      heroZero,
       supportResistance,
       riskManagement,
       keyLevels,

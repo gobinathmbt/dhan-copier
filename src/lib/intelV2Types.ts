@@ -606,6 +606,31 @@ export interface IntelV2Snapshot {
         keyLevels: Array<{ label: string; value: number | null }>;
       };
     };
+    heroZero: null | {
+      verdict: "HERO_CE" | "HERO_PE" | "ZERO";
+      side: "CE" | "PE" | null;
+      strike: number | null;
+      ltp: number | null;
+      confidence: number | null;
+      headline: string;
+      subline: string;
+      momentum: "EXPLODING" | "EXPANDING" | "FLAT";
+      premiumPct: string;
+      scores: { ce: number; pe: number; threshold: number };
+      signals: {
+        aboveVAH: boolean; belowVAL: boolean; insideValue: boolean;
+        aboveVWAP: boolean; belowVWAP: boolean;
+        acceptedAbove: boolean; acceptedBelow: boolean;
+        ceExpanding: boolean; peExpanding: boolean;
+        buyersDominant: boolean; sellersDominant: boolean;
+        deltaPos: boolean; deltaNeg: boolean; deltaPct: number;
+        volSurge: boolean;
+        bullTrap: boolean; bearTrap: boolean;
+        ivLevel: number;
+        vix: number | null;
+      };
+      reasons: string[];
+    };
     bestTradePick: null | {
       ce: null | {
         side: "CE";
