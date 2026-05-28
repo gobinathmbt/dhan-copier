@@ -84,6 +84,26 @@ export interface TopStrike {
   reason: string;
 }
 
+export interface TradeBoardSetup {
+  side: "CE" | "PE";
+  strike: number;
+  ltp: number;
+  oi: number;
+  delta: number;
+  iv: number;
+  moneyness: string;
+  probability: number;
+  action: "STRONG BUY" | "BUY" | "CAUTIOUS BUY" | "WAIT" | "AVOID";
+  setupTag: string;
+  setupTone: "bull" | "bear" | "warn" | "neutral";
+  label: string;
+  confirmChips: Array<{ label: string; value: string; tone: "bull" | "bear" | "warn" | "neutral" }>;
+  targets: { t1: number; t2: number; t3: number };
+  stopLoss: number;
+  reversalCondition: string | null;
+  reasoning: string;
+}
+
 export interface KeyLevel {
   label: string;
   value: number;
@@ -543,6 +563,31 @@ export interface IntelV2Snapshot {
     };
     optionChainSnapshot: OptionChainRow[];
     topStrikeSelections: { ce: TopStrike[]; pe: TopStrike[]; all: TopStrike[] };
+    tradeBoard: null | {
+      bestOptionBuy: TradeBoardSetup | null;
+      alternateScenario: TradeBoardSetup | null;
+      riskGauge: {
+        score: number;
+        label: "LOW" | "MODERATE" | "HIGH" | "CRITICAL";
+        tone: "bull" | "bear" | "warn" | "neutral";
+        trapScore: number;
+        confidence: number;
+        hint: string;
+        chips: Array<{ label: string; value: string; tone: "bull" | "bear" | "warn" | "neutral" }>;
+      };
+      executionContext: {
+        phase: string;
+        flowState: string;
+        flowTone: "bull" | "bear" | "warn" | "neutral";
+        nextLevel: number | null;
+        nextLevelLabel: string;
+        vwapState: string;
+        vwapTone: "bull" | "bear" | "warn" | "neutral";
+        preferredAction: string;
+        preferredTone: "bull" | "bear" | "warn" | "neutral";
+        keyLevels: Array<{ label: string; value: number | null }>;
+      };
+    };
     bestTradePick: null | {
       ce: null | {
         side: "CE";

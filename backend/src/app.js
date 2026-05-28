@@ -21,6 +21,7 @@ const nifty50OrdersRoutes = require('./routes/nifty50Orders.routes');
 const scalpingRoutes = require('./routes/scalping.routes');
 const intelRoutes = require('./routes/intel.routes');
 const intelV2Routes = require('./routes/intelV2.routes');
+const intelV3Routes = require('./routes/intelV3.routes');
 
 const app = express();
 
@@ -73,6 +74,7 @@ app.use('/api/nifty50-orders', nifty50OrdersRoutes);
 app.use('/api/scalping', scalpingRoutes);
 app.use('/api/intel', intelRoutes);
 app.use('/api/intel-v2', intelV2Routes);
+app.use('/api/intel-v3', intelV3Routes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

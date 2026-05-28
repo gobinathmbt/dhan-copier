@@ -2411,6 +2411,184 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
     atmBlk,
   });
 
+  // ── tradeBoard — 4 quick-glance cards rendered above Row1 ─────────
+  // 1. BEST OPTION BUY — primary recommendation (CE or PE)
+  // 2. ALTERNATE SCENARIO — opposite-side pick if primary fails
+  // 3. RISK GAUGE — overall trap risk + confidence
+  // 4. EXECUTION CONTEXT — preferred zones & next actionable level
+  const tradeBoard = (() => {
+    const primary = bestTradePick?.primary === 'CE'
+      ? bestTradePick.ce
+      : bestTradePick?.primary === 'PE'
+        ? bestTradePick.pe
+        : (bestTradePick?.ce?.probability ?? 0) >= (bestTradePick?.pe?.probability ?? 0)
+          ? bestTradePick?.ce : bestTradePick?.pe;
+    const alternate = bestTradePick && primary
+      ? (primary.side === 'CE' ? bestTradePick.pe : bestTradePick.ce)
+      : null;
+
+    const STEP = sym.step || 50;
+
+    function buildSetupCard(pick, isAlternate) {
+      if (!pick) return null;
+      const dir = pick.side === 'CE' ? 1 : -1;
+      const t1 = pick.strike + dir * STEP * 2;
+      const t2 = pick.strike + dir * STEP * 4;
+      const t3 = pick.strike + dir * STEP * 6;
+      const sl = pick.strike + (-dir) * STEP * 1.5;
+      // Setup tag based on probability
+      const setupTag =
+        pick.probability >= 75 ? 'Strong Setup'
+        : pick.probability >= 60 ? 'Solid Setup'
+        : pick.probability >= 50 ? 'Cautious Setup'
+        : 'Wait Setup';
+      // 4 quick-confirm chips for this side
+      const confirmChips = [];
+      if (pick.side === 'CE') {
+        confirmChips.push({ label: 'PE Writing',
+          value: atmBlk.peWriting ? 'Active' : 'Light',
+          tone: atmBlk.peWriting ? 'bull' : 'warn' });
+        confirmChips.push({ label: 'PCR',
+          value: `${atmBlk.pcr >= 1 ? '>' : '<'} 1 (${_round(atmBlk.pcr, 2)})`,
+          tone: atmBlk.pcr >= 1 ? 'bull' : 'bear' });
+        confirmChips.push({ label: 'Price',
+          value: vwap && spotPrice >= vwap ? 'Above VWAP' : 'Below VWAP',
+          tone: vwap && spotPrice >= vwap ? 'bull' : 'bear' });
+        const peWall = supportResistance?.supports?.[0];
+        confirmChips.push({ label: 'Support',
+          value: peWall ? `${peWall.strike}` : '—',
+          tone: 'bull' });
+      } else {
+        confirmChips.push({ label: 'CE Writing',
+          value: atmBlk.ceWriting ? 'Active' : 'Light',
+          tone: atmBlk.ceWriting ? 'bear' : 'warn' });
+        confirmChips.push({ label: 'PCR',
+          value: `${atmBlk.pcr >= 1 ? '>' : '<'} 1 (${_round(atmBlk.pcr, 2)})`,
+          tone: atmBlk.pcr >= 1 ? 'bull' : 'bear' });
+        confirmChips.push({ label: 'Price',
+          value: vwap && spotPrice < vwap ? 'Below VWAP' : 'Above VWAP',
+          tone: vwap && spotPrice < vwap ? 'bear' : 'bull' });
+        const ceWall = supportResistance?.resistances?.[0];
+        confirmChips.push({ label: 'Resistance',
+          value: ceWall ? `${ceWall.strike}` : '—',
+          tone: 'bear' });
+      }
+
+      // Reversal condition for alternate-scenario card
+      let reversalCondition = null;
+      if (isAlternate) {
+        const flipStrike = pick.side === 'CE'
+          ? Math.round((spotPrice + STEP * 2) / STEP) * STEP
+          : Math.round((spotPrice - STEP * 2) / STEP) * STEP;
+        reversalCondition = pick.side === 'CE'
+          ? `Spot Reclaims ${flipStrike} & CE Unwinding`
+          : `Spot Loses ${flipStrike} & PE Unwinding`;
+      }
+
+      return {
+        side: pick.side,
+        strike: pick.strike,
+        ltp: pick.ltp,
+        oi: pick.oi,
+        delta: pick.delta,
+        iv: pick.iv,
+        moneyness: pick.moneyness,
+        probability: pick.probability,
+        action: pick.action,
+        setupTag,
+        setupTone: pick.probability >= 60 ? 'bull' : 'warn',
+        label: `BUY ${pick.side}`,
+        confirmChips,
+        targets: { t1, t2, t3 },
+        stopLoss: sl,
+        reversalCondition,
+        reasoning: pick.reasoning,
+      };
+    }
+
+    // Card 1 — Best Option Buy
+    const bestOptionBuy = primary ? buildSetupCard(primary, false) : null;
+    // Card 2 — Alternate scenario
+    const alternateScenario = alternate ? buildSetupCard(alternate, true) : null;
+
+    // Card 3 — RISK GAUGE
+    //   Combines trap score + confidence + verdict gap into a single
+    //   "execution risk" gauge with verdict-aware hint.
+    const trapScore = trapBlk?.score ?? 0;
+    const confScore = confidence;            // already computed earlier
+    const riskScore = Math.max(0, Math.min(100,
+      Math.round(0.55 * trapScore + 0.25 * (100 - confScore) + 0.20 * (50 - Math.abs(verdict.cePct - verdict.pePct)))
+    ));
+    const riskLabel =
+      riskScore >= 70 ? 'CRITICAL'
+      : riskScore >= 50 ? 'HIGH'
+      : riskScore >= 30 ? 'MODERATE'
+      : 'LOW';
+    const riskTone =
+      riskScore >= 70 ? 'bear'
+      : riskScore >= 50 ? 'warn'
+      : riskScore >= 30 ? 'warn' : 'bull';
+    const riskGauge = {
+      score: riskScore,
+      label: riskLabel,
+      tone: riskTone,
+      trapScore,
+      confidence: confScore,
+      hint:
+        riskScore >= 70 ? 'Avoid new entries. Wait for clarity.'
+        : riskScore >= 50 ? 'Tighten size. Confirm with price action.'
+        : riskScore >= 30 ? 'Trade with normal size. Stay alert to flips.'
+        : 'Clean tape. Trade the playbook.',
+      chips: [
+        { label: 'TRAP', value: `${trapScore}%`, tone: trapScore >= 60 ? 'bear' : trapScore >= 40 ? 'warn' : 'bull' },
+        { label: 'CONF', value: `${confScore}%`, tone: confScore >= 65 ? 'bull' : confScore >= 50 ? 'warn' : 'bear' },
+        { label: 'BIAS', value: verdict.cePct >= verdict.pePct ? `CE ${verdict.cePct}%` : `PE ${verdict.pePct}%`,
+          tone: Math.abs(verdict.cePct - verdict.pePct) >= 20 ? 'bull' : 'warn' },
+      ],
+    };
+
+    // Card 4 — EXECUTION CONTEXT — actionable next-step plan
+    const nextLevel = primary && primary.side === 'CE'
+      ? (supportResistance?.resistances?.[0]?.strike ?? null)
+      : primary && primary.side === 'PE'
+        ? (supportResistance?.supports?.[0]?.strike ?? null)
+        : null;
+    const flowState = delta.bias === 'bullish' ? 'BUYING'
+      : delta.bias === 'bearish' ? 'SELLING' : 'BALANCED';
+    const auctionPhase = frvpInstitutional?.engine?.location?.side
+      || (frvpInstitutional?.insideValue === 'YES' ? 'inside_value' : 'unknown');
+    const phaseLabel =
+      auctionPhase === 'above_value' ? 'PROBE ABOVE'
+      : auctionPhase === 'below_value' ? 'PROBE BELOW'
+      : auctionPhase === 'inside_value' ? 'INSIDE VALUE'
+      : 'BALANCED';
+    const executionContext = {
+      phase: phaseLabel,
+      flowState,
+      flowTone: delta.bias === 'bullish' ? 'bull' : delta.bias === 'bearish' ? 'bear' : 'warn',
+      nextLevel,
+      nextLevelLabel: primary
+        ? (primary.side === 'CE' ? 'Next Resistance' : 'Next Support')
+        : 'Next Pivot',
+      vwapState: vwap && spotPrice >= vwap ? 'Above VWAP' : 'Below VWAP',
+      vwapTone: vwap && spotPrice >= vwap ? 'bull' : 'bear',
+      preferredAction: primary
+        ? (primary.probability >= 60 ? primary.label : `Wait — ${primary.action}`)
+        : 'No setup',
+      preferredTone: primary && primary.probability >= 60
+        ? (primary.side === 'CE' ? 'bull' : 'bear') : 'warn',
+      // Mini key levels for the execution card
+      keyLevels: [
+        { label: 'VWAP',   value: vwap != null ? _round(vwap, 2) : null },
+        { label: 'Pivot',  value: cpr?.pivot != null ? _round(cpr.pivot, 2) : null },
+        { label: 'Day H',  value: dayHigh != null ? _round(dayHigh, 2) : null },
+        { label: 'Day L',  value: dayLow  != null ? _round(dayLow,  2) : null },
+      ],
+    };
+
+    return { bestOptionBuy, alternateScenario, riskGauge, executionContext };
+  })();
+
   const riskManagement = tradePlan.pick ? {
     entryPrice: tradePlan.pick.ltp,
     stopLoss: tradePlan.pick.sl,
@@ -2663,6 +2841,7 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
       optionChainSnapshot,
       topStrikeSelections,
       bestTradePick,
+      tradeBoard,
       supportResistance,
       riskManagement,
       keyLevels,

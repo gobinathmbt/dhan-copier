@@ -6,6 +6,7 @@ import type { IntelV2Symbol } from "@/lib/intelV2Types";
 
 import { TopHeaderV2 } from "@/components/intelv2/dash/TopHeader";
 import { Row1MasterDecision } from "@/components/intelv2/dash/Row1MasterDecision";
+import { Row1bTradeBoard } from "@/components/intelv2/dash/Row1bTradeBoard";
 import { Row2InstitutionalFlow } from "@/components/intelv2/dash/Row2InstitutionalFlow";
 import { Row3ConfirmationLayer } from "@/components/intelv2/dash/Row3ConfirmationLayer";
 import { Row4StructureContext } from "@/components/intelv2/dash/Row4StructureContext";
@@ -59,6 +60,7 @@ function IntelV2Page() {
 
       <main className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto p-2.5">
         <Row1MasterDecision data={data} />
+        <Row1bTradeBoard data={data} />
         <Row2InstitutionalFlow data={data} />
         <Row3ConfirmationLayer data={data} />
         <Row4StructureContext data={data} />
