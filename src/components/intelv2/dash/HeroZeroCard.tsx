@@ -73,21 +73,21 @@ export function HeroZeroCard({ data }: { data: IntelV2Snapshot | null }) {
           </span>
         </div>
         {/* Score chips */}
-        <div className="flex items-center gap-1 text-[9px]">
+        <div className="flex items-center gap-1.5 text-[12px]">
           <span
-            className="rounded-sm px-1.5 py-0.5 font-mono font-bold"
+            className="rounded-sm px-2 py-1 font-mono font-bold"
             style={{
               background: ceScore >= threshold ? "rgba(34,197,94,0.20)" : "rgba(255,255,255,0.05)",
-              color: ceScore >= threshold ? "#22c55e" : "rgba(255,255,255,0.55)",
+              color: ceScore >= threshold ? "#22c55e" : "rgba(255,255,255,0.65)",
             }}
           >
             CE {ceScore}/9
           </span>
           <span
-            className="rounded-sm px-1.5 py-0.5 font-mono font-bold"
+            className="rounded-sm px-2 py-1 font-mono font-bold"
             style={{
               background: peScore >= threshold ? "rgba(239,68,68,0.20)" : "rgba(255,255,255,0.05)",
-              color: peScore >= threshold ? "#ef4444" : "rgba(255,255,255,0.55)",
+              color: peScore >= threshold ? "#ef4444" : "rgba(255,255,255,0.65)",
             }}
           >
             PE {peScore}/9
@@ -165,11 +165,11 @@ export function HeroZeroCard({ data }: { data: IntelV2Snapshot | null }) {
 function Tile({ label, value, accent }: { label: string; value: string; accent: string }) {
   return (
     <div
-      className="flex flex-col rounded-sm border px-1.5 py-0.5"
+      className="flex flex-col rounded-md border px-2.5 py-1.5"
       style={{ borderColor: accent + "44", background: accent + "08" }}
     >
-      <span className="text-[7px] font-bold uppercase tracking-wider text-white/55">{label}</span>
-      <span className="font-mono text-[10px] font-bold leading-none" style={{ color: accent }}>
+      <span className="text-[10px] font-bold uppercase tracking-wider text-white/65">{label}</span>
+      <span className="font-mono text-[14px] font-bold leading-tight" style={{ color: accent }}>
         {value}
       </span>
     </div>
