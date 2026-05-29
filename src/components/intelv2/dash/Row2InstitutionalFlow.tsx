@@ -482,6 +482,61 @@ function CombinedTargetTile({
   );
 }
 
+/* ─────────────────────────────────────────────────────────────────────
+ * FlowTile — Call/Put · Buyers/Sellers cell with raw weighted volume
+ * + percentage share of that side's total flow.
+ *   • flavour="bull" → green; flavour="bear" → red
+ *   • value is in raw volume units; auto-formatted to L / Cr
+ *   • pct is the side's share (CE buyers % of CE total, etc.)
+ * ───────────────────────────────────────────────────────────────────── */
+function FlowTile({
+  label, flavour, value, pct, hint,
+}: {
+  label: string;
+  flavour: "bull" | "bear";
+  value: number;
+  pct: number;
+  hint?: string;
+}) {
+  const t = V2_TONE[flavour];
+  const fmtVol = (v: number) => {
+    const a = Math.abs(v);
+    if (a >= 1e7) return `${(v / 1e7).toFixed(2)} Cr`;
+    if (a >= 1e5) return `${(v / 1e5).toFixed(2)} L`;
+    if (a >= 1e3) return `${(v / 1e3).toFixed(1)} K`;
+    return `${Math.round(v)}`;
+  };
+  const safePct = Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : 0;
+  return (
+    <div
+      className="flex flex-col gap-0.5 rounded-sm border px-2 py-1.5"
+      style={{ borderColor: t.border, background: t.soft }}
+    >
+      <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: t.color }}>
+        {label}
+      </span>
+      <div className="flex items-baseline justify-between gap-1">
+        <span className="font-mono text-[16px] font-black tabular-nums leading-none" style={{ color: t.color }}>
+          {safePct.toFixed(0)}%
+        </span>
+        <span className="font-mono text-[11px] font-bold tabular-nums text-white/85">
+          {fmtVol(value)}
+        </span>
+      </div>
+      {/* Mini bar */}
+      <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-white/[0.06]">
+        <div
+          className="h-full rounded-full"
+          style={{ width: `${safePct}%`, background: t.color }}
+        />
+      </div>
+      {hint ? (
+        <span className="text-[8px] uppercase tracking-wider text-white/45">{hint}</span>
+      ) : null}
+    </div>
+  );
+}
+
 // 2.1 SPOT vs FUTURES (compact â€” col-span-2)
 // function SpotVsFutures({ data }: { data: IntelV2Snapshot | null }) {
 //   const spot = data?.spot.ltp ?? null;
@@ -1276,6 +1331,44 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
             ) : null}
           </div>
         </div>
+
+        {/* ── CALL/PUT BUYERS vs SELLERS BREAKDOWN ───────────────────────
+            Shows the raw weighted flow volumes plus their percentages so
+            you can see who is doing what (CE buyers, CE sellers, PE buyers,
+            PE sellers) on every side independently before the donut tells
+            you the net directional read. */}
+        {e?.flow ? (
+          <div className="mt-2 grid grid-cols-4 gap-1.5 rounded-sm border border-white/[0.06] bg-white/[0.03] px-2.5 py-2">
+            <FlowTile
+              label="Call Buyers"
+              flavour="bull"
+              value={e.flow.ceBuy}
+              pct={e.flow.ceBuyersPct}
+              hint="Bullish · ITM-call demand"
+            />
+            <FlowTile
+              label="Call Sellers"
+              flavour="bear"
+              value={e.flow.ceSell}
+              pct={e.flow.ceSellersPct}
+              hint="Bearish · CE writers"
+            />
+            <FlowTile
+              label="Put Buyers"
+              flavour="bear"
+              value={e.flow.peBuy}
+              pct={e.flow.peBuyersPct}
+              hint="Bearish · downside hedges"
+            />
+            <FlowTile
+              label="Put Sellers"
+              flavour="bull"
+              value={e.flow.peSell}
+              pct={e.flow.peSellersPct}
+              hint="Bullish · PE writers"
+            />
+          </div>
+        ) : null}
 
         {/* â”€â”€ BUYERS VS SELLERS DONUT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             Replaces the legacy SELLERS DOMINATING bar.
