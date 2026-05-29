@@ -181,3 +181,78 @@ export function V2Hint({
     </div>
   );
 }
+
+/* ─────────────────────────────────────────────────────────────────────
+ * V2MiniPie — tiny donut chart for cards.
+ *  • value: percentage 0..100 of the dominant slice
+ *  • tone:  fill colour (uses V2_TONE palette)
+ *  • size:  px diameter (default 56)
+ *  • label: optional text rendered in the center
+ *  • showPct: whether to render the percentage in the center (default true)
+ *
+ * Renders a clean SVG donut — no chart library dep, just two arcs.
+ * Use anywhere: Delta, Breadth, Heavyweights, IV, VWAP, EMA, CPR, Max Pain.
+ * ───────────────────────────────────────────────────────────────────── */
+export function V2MiniPie({
+  value,
+  tone = "info",
+  size = 56,
+  label,
+  showPct = true,
+  trackTone = "neutral",
+}: {
+  value: number;
+  tone?: V2ToneKey;
+  size?: number;
+  label?: string;
+  showPct?: boolean;
+  trackTone?: V2ToneKey;
+}) {
+  const v = Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0));
+  const r = 36;
+  const c = 2 * Math.PI * r;
+  const arc = (v / 100) * c;
+  // Slimmer ring — gives inner text more breathing room.
+  // Was 0.18; now 0.10 (e.g. 110px pie → 11px stroke instead of 20px).
+  const stroke = Math.max(5, size * 0.10);
+  const fillColor = V2_TONE[tone].color;
+  const trackColor = V2_TONE[trackTone].soft;
+  return (
+    <div
+      className="relative shrink-0"
+      style={{ width: size, height: size }}
+    >
+      <svg viewBox="0 0 100 100" className="h-full w-full -rotate-90">
+        <circle cx="50" cy="50" r={r} fill="none" stroke={trackColor} strokeWidth={stroke} />
+        <circle
+          cx="50" cy="50" r={r}
+          fill="none"
+          stroke={fillColor}
+          strokeWidth={stroke}
+          strokeDasharray={`${arc} ${c}`}
+          strokeLinecap="butt"
+        />
+      </svg>
+      {(showPct || label) ? (
+        <div className="absolute inset-0 flex flex-col items-center justify-center">
+          {showPct ? (
+            <span
+              className="font-mono font-black leading-none tabular-nums"
+              style={{ color: fillColor, fontSize: size * 0.20 }}
+            >
+              {Math.round(v)}%
+            </span>
+          ) : null}
+          {label ? (
+            <span
+              className="mt-0.5 font-bold uppercase tracking-wider"
+              style={{ color: fillColor, fontSize: Math.max(7, size * 0.09) }}
+            >
+              {label}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}

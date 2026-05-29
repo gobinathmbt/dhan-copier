@@ -1,5 +1,5 @@
 import type { IntelV2Snapshot } from "@/lib/intelV2Types";
-import { V2Card, V2_TONE } from "./common";
+import { V2Card, V2_TONE, V2MiniPie } from "./common";
 import { ShieldCheck, ShieldX, AlertTriangle } from "lucide-react";
 
 const ICONS: Record<string, string> = {
@@ -56,27 +56,36 @@ export function Row5NoTradeEngine({ data }: { data: IntelV2Snapshot | null }) {
       </V2Card>
 
       <V2Card className="col-span-3" title="Result" accent={tone as "bull" | "bear" | "warn"}>
-        <div className="flex h-full flex-col items-center justify-center">
-          {result === "SAFE TO TRADE" ? (
-            <ShieldCheck size={34} className="text-emerald-400" />
-          ) : result === "CAUTION" ? (
-            <AlertTriangle size={34} className="text-amber-400" />
-          ) : (
-            <ShieldX size={34} className="text-rose-400" />
-          )}
-          <span
-            className="mt-1.5 text-[22px] font-black tracking-tight"
-            style={{ color: V2_TONE[tone].color }}
-          >
-            {result}
-          </span>
-          <span className="text-[11px] text-white/55 text-center px-2 mt-1">
-            {result === "SAFE TO TRADE"
-              ? "High quality setup. Institutions aligned."
-              : result === "CAUTION"
-                ? "Mixed conditions. Reduce size."
-                : "Wait for cleaner signals."}
-          </span>
+        <div className="flex h-full items-center justify-center gap-3">
+          <V2MiniPie
+            value={nt ? Math.round(((nt.flagged ?? 0) / Math.max(1, nt.conditions.length)) * 100) : 0}
+            tone={tone as "bull" | "bear" | "warn"}
+            size={90}
+            label={`${nt?.flagged ?? 0}/${nt?.conditions?.length ?? 0}`}
+            showPct={false}
+          />
+          <div className="flex flex-col items-start">
+            {result === "SAFE TO TRADE" ? (
+              <ShieldCheck size={22} className="text-emerald-400" />
+            ) : result === "CAUTION" ? (
+              <AlertTriangle size={22} className="text-amber-400" />
+            ) : (
+              <ShieldX size={22} className="text-rose-400" />
+            )}
+            <span
+              className="mt-1 text-[14px] font-black tracking-tight"
+              style={{ color: V2_TONE[tone].color }}
+            >
+              {result}
+            </span>
+            <span className="text-[10px] text-white/55 mt-0.5 leading-tight">
+              {result === "SAFE TO TRADE"
+                ? "High quality setup."
+                : result === "CAUTION"
+                  ? "Mixed — reduce size."
+                  : "Wait for cleaner signals."}
+            </span>
+          </div>
         </div>
       </V2Card>
     </div>
