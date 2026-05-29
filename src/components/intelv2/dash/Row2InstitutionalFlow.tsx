@@ -181,28 +181,35 @@ function CombinedMarketDirectionBody({ data }: { data: IntelV2Snapshot | null })
           Intraday Levels <span className="text-white/45">(CE Walls left Â· ATM center Â· PE Walls right)</span>
         </span>
         <div className="overflow-hidden rounded-md border border-white/[0.08]">
-          {/* Mirror header — same 6 columns rendered on both halves */}
-          <div className="grid grid-cols-2 items-center gap-2 border-b border-white/[0.08] bg-white/[0.03] px-2 py-1">
+          {/* Mirror header — same 6 columns rendered on both halves with strike pill in the center */}
+          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-white/[0.08] bg-white/[0.03] px-2 py-1">
             <LevelHeader />
+            <span style={{ minWidth: 84 }} className="text-center text-[8px] font-bold uppercase tracking-wider text-white/45">
+              Strike
+            </span>
             <LevelHeader />
           </div>
           {(() => {
-            type Row = {
-              strike: number;
-              tier: string;
-              side: "resistance" | "support" | "atm";
+            type SideMetric = {
               oi: number;
               oiChange: number;
               oiChangePct: number;
               interpretation: string;
+            };
+            type Row = {
+              strike: number;
+              tier: string;
+              side: "resistance" | "support" | "atm";
+              ce: SideMetric;
+              pe: SideMetric;
             };
             const atmStrike = data?.options?.atm ?? null;
             const anchor = atmStrike != null ? Math.round(atmStrike / 100) * 100 : null;
             const ana = data?.dashboard?.oiBuildupAnalysis;
 
             // Index ceTable / peTable by strike for O(1) lookup of OI/buildup data
-            const ceByStrike = new Map<number, { oi: number; oiChange: number; oiChangePct: number; interpretation: string }>();
-            const peByStrike = new Map<number, { oi: number; oiChange: number; oiChangePct: number; interpretation: string }>();
+            const ceByStrike = new Map<number, SideMetric>();
+            const peByStrike = new Map<number, SideMetric>();
             for (const r of ana?.ceTable || []) {
               ceByStrike.set(r.strike, {
                 oi: r.oiToday, oiChange: r.oiChange,
@@ -215,30 +222,42 @@ function CombinedMarketDirectionBody({ data }: { data: IntelV2Snapshot | null })
                 oiChangePct: r.oiChangePct, interpretation: r.interpretation,
               });
             }
+            // Fallback: if a strike isn't in ceTable/peTable, use raw chain row.
+            for (const oc of data?.dashboard?.optionChainSnapshot || []) {
+              if (!ceByStrike.has(oc.strike) && (oc.ce?.oi || 0) > 0) {
+                ceByStrike.set(oc.strike, {
+                  oi: oc.ce.oi, oiChange: oc.ce.oiChg,
+                  oiChangePct: oc.ce.oi ? (oc.ce.oiChg / oc.ce.oi) * 100 : 0,
+                  interpretation: "—",
+                });
+              }
+              if (!peByStrike.has(oc.strike) && (oc.pe?.oi || 0) > 0) {
+                peByStrike.set(oc.strike, {
+                  oi: oc.pe.oi, oiChange: oc.pe.oiChg,
+                  oiChangePct: oc.pe.oi ? (oc.pe.oiChg / oc.pe.oi) * 100 : 0,
+                  interpretation: "—",
+                });
+              }
+            }
+
+            const blank: SideMetric = { oi: 0, oiChange: 0, oiChangePct: 0, interpretation: "—" };
+            const lookup = (strike: number) => ({
+              ce: ceByStrike.get(strike) ?? blank,
+              pe: peByStrike.get(strike) ?? blank,
+            });
 
             const byStrike = new Map<number, Row>();
-            const lookup = (strike: number, side: "resistance" | "support" | "atm") => {
-              // Resistance / ATM-from-CE side → use ce data; Support → use pe data.
-              const src = side === "support" ? peByStrike.get(strike) : ceByStrike.get(strike);
-              return {
-                oi: src?.oi ?? 0,
-                oiChange: src?.oiChange ?? 0,
-                oiChangePct: src?.oiChangePct ?? 0,
-                interpretation: src?.interpretation ?? "â€”",
-              };
-            };
-
             for (const r of md.resistances) {
               if (anchor != null && r.strike === anchor) continue;
-              byStrike.set(r.strike, { strike: r.strike, tier: r.tier, side: "resistance", ...lookup(r.strike, "resistance") });
+              byStrike.set(r.strike, { strike: r.strike, tier: r.tier, side: "resistance", ...lookup(r.strike) });
             }
             for (const r of md.supports) {
               if (anchor != null && r.strike === anchor) continue;
               if (byStrike.has(r.strike)) continue;
-              byStrike.set(r.strike, { strike: r.strike, tier: r.tier, side: "support", ...lookup(r.strike, "support") });
+              byStrike.set(r.strike, { strike: r.strike, tier: r.tier, side: "support", ...lookup(r.strike) });
             }
             if (anchor != null) {
-              byStrike.set(anchor, { strike: anchor, tier: "ATM", side: "atm", ...lookup(anchor, "atm") });
+              byStrike.set(anchor, { strike: anchor, tier: "ATM", side: "atm", ...lookup(anchor) });
             }
 
             const rows = [...byStrike.values()].sort((a, b) => b.strike - a.strike);
@@ -252,10 +271,8 @@ function CombinedMarketDirectionBody({ data }: { data: IntelV2Snapshot | null })
                 strike={r.strike}
                 side={r.side}
                 first={i === 0}
-                oi={r.oi}
-                oiChange={r.oiChange}
-                oiChangePct={r.oiChangePct}
-                interpretation={r.interpretation}
+                ce={r.ce}
+                pe={r.pe}
               />
             ));
           })()}
@@ -327,114 +344,115 @@ function LevelHeader() {
 
 function ExcelLevelRow({
   tier, strike, side, first,
-  oi = 0, oiChange = 0, oiChangePct = 0, interpretation = "—",
+  ce = { oi: 0, oiChange: 0, oiChangePct: 0, interpretation: "—" },
+  pe = { oi: 0, oiChange: 0, oiChangePct: 0, interpretation: "—" },
 }: {
   tier: string;
   strike: number;
   side: "resistance" | "support" | "atm";
   first: boolean;
-  oi?: number;
-  oiChange?: number;
-  oiChangePct?: number;
-  interpretation?: string;
+  ce?: { oi: number; oiChange: number; oiChangePct: number; interpretation: string };
+  pe?: { oi: number; oiChange: number; oiChangePct: number; interpretation: string };
 }) {
-  const isRes = side === "resistance";
   const isAtm = side === "atm";
+  const sideAccent = isAtm ? "#38bdf8" : side === "resistance" ? "#86efac" : "#fda4af";
 
-  // Tones
-  const accent = isAtm ? "#38bdf8" : isRes ? "#86efac" : "#fda4af";
-  const sideBg = isAtm ? "rgba(56,189,248,0.10)"
-    : isRes ? "rgba(34,197,94,0.08)" : "rgba(239,68,68,0.08)";
-  const sideBorder = isAtm ? "rgba(56,189,248,0.30)"
-    : isRes ? "rgba(34,197,94,0.25)" : "rgba(239,68,68,0.25)";
-
-  // Strength bar — 7 segments scaled by |oiChangePct|
-  const pctClamped = Math.min(100, Math.max(0, Math.abs(oiChangePct)));
-  const filled = Math.round((pctClamped / 100) * 7);
-  const pctSign = oiChangePct >= 0 ? "+" : "";
-
-  // Inner content (used for both CE-left and PE-right sides — aligned 6-column metric table)
-  const InnerStrip = (
-    <div
-      className="grid grid-cols-[1.4fr_72px_44px_46px_60px_1fr] items-center gap-1.5 rounded-sm px-2 py-1 text-[10px]"
-      style={{ background: sideBg, border: `1px solid ${sideBorder}` }}
-    >
-      {/* Tier */}
-      <span className="truncate text-[9px] font-bold uppercase tracking-wide" style={{ color: accent }}>
-        {tier}
-      </span>
-      {/* Strike + tag */}
-      <span className="flex items-baseline justify-end gap-1">
-        <span className="font-mono text-[12px] font-bold tabular-nums" style={{ color: accent }}>
-          {strike.toLocaleString()}
-        </span>
-        <span className="text-[8px] font-bold uppercase opacity-75" style={{ color: accent }}>
-          {isAtm ? "ATM" : isRes ? "CE" : "PE"}
-        </span>
-      </span>
-      {/* OI in lakhs */}
-      <span className="text-right font-mono tabular-nums text-white/80">
-        {oi > 0 ? `${(oi / 1e5).toFixed(1)}L` : "—"}
-      </span>
-      {/* Δ% */}
-      <span
-        className="text-right font-mono font-bold tabular-nums"
-        style={{ color: oiChangePct >= 0 ? accent : "#fda4af" }}
-      >
-        {oiChangePct === 0 ? "—" : `${pctSign}${oiChangePct.toFixed(1)}%`}
-      </span>
-      {/* Strength bar */}
-      <span className="flex items-center justify-center gap-[2px]">
-        {Array.from({ length: 7 }).map((_, idx) => (
-          <span
-            key={idx}
-            className="block h-2 w-1.5 rounded-[1px]"
-            style={{
-              background: idx < filled ? accent : "rgba(255,255,255,0.10)",
-            }}
-          />
-        ))}
-      </span>
-      {/* Interpretation */}
-      <span className="truncate text-right" style={{ color: accent, opacity: 0.85 }}>
-        {interpretation}
-      </span>
-    </div>
-  );
-
-  // ATM row — centered single strip
-  if (isAtm) {
+  // Single-side strip (CE-flavoured or PE-flavoured) used twice per row.
+  const SideStrip = ({
+    flavour, m,
+  }: {
+    flavour: "CE" | "PE";
+    m: { oi: number; oiChange: number; oiChangePct: number; interpretation: string };
+  }) => {
+    const accent = flavour === "CE" ? "#86efac" : "#fda4af";
+    const bg = flavour === "CE" ? "rgba(34,197,94,0.08)" : "rgba(239,68,68,0.08)";
+    const border = flavour === "CE" ? "rgba(34,197,94,0.25)" : "rgba(239,68,68,0.25)";
+    const pct = m.oiChangePct;
+    const pctClamped = Math.min(100, Math.max(0, Math.abs(pct)));
+    const filled = Math.round((pctClamped / 100) * 7);
+    const pctSign = pct >= 0 ? "+" : "";
+    const sideTier = flavour === "CE" ? tier : tier;
     return (
       <div
-        className={`grid grid-cols-[1fr_auto_1fr] items-center gap-2 px-2 py-1 ${first ? "" : "border-t border-white/[0.04]"
-          }`}
+        className="grid grid-cols-[1.4fr_72px_44px_46px_60px_1fr] items-center gap-1.5 rounded-sm px-2 py-1 text-[10px]"
+        style={{ background: bg, border: `1px solid ${border}` }}
       >
-        <div />
-        <div
-          className="flex items-baseline gap-1.5 rounded-sm border px-3 py-1"
-          style={{ background: sideBg, borderColor: sideBorder }}
-        >
-          <span className="font-mono text-[14px] font-bold tabular-nums" style={{ color: accent }}>
+        {/* Tier */}
+        <span className="truncate text-[9px] font-bold uppercase tracking-wide" style={{ color: accent }}>
+          {sideTier}
+        </span>
+        {/* Strike + side tag */}
+        <span className="flex items-baseline justify-end gap-1">
+          <span className="font-mono text-[12px] font-bold tabular-nums" style={{ color: accent }}>
             {strike.toLocaleString()}
           </span>
-          <span className="text-[9px] font-bold uppercase tracking-wider opacity-80" style={{ color: accent }}>
-            ATM
+          <span className="text-[8px] font-bold uppercase opacity-75" style={{ color: accent }}>
+            {flavour}
           </span>
-        </div>
-        <div />
+        </span>
+        {/* OI in lakhs */}
+        <span className="text-right font-mono tabular-nums text-white/80">
+          {m.oi > 0 ? `${(m.oi / 1e5).toFixed(1)}L` : "—"}
+        </span>
+        {/* Δ% */}
+        <span
+          className="text-right font-mono font-bold tabular-nums"
+          style={{ color: pct >= 0 ? accent : "#fda4af" }}
+        >
+          {pct === 0 ? "—" : `${pctSign}${pct.toFixed(1)}%`}
+        </span>
+        {/* Strength bar */}
+        <span className="flex items-center justify-center gap-[2px]">
+          {Array.from({ length: 7 }).map((_, idx) => (
+            <span
+              key={idx}
+              className="block h-2 w-1.5 rounded-[1px]"
+              style={{
+                background: idx < filled ? accent : "rgba(255,255,255,0.10)",
+              }}
+            />
+          ))}
+        </span>
+        {/* Interpretation */}
+        <span className="truncate text-right" style={{ color: accent, opacity: 0.85 }}>
+          {m.interpretation || "—"}
+        </span>
       </div>
     );
-  }
+  };
 
-  // Resistance — content on LEFT, empty on RIGHT
-  // Support    — empty on LEFT, content on RIGHT
   return (
     <div
-      className={`grid grid-cols-2 items-center gap-2 px-2 py-1 ${first ? "" : "border-t border-white/[0.04]"
-        }`}
+      className={`grid grid-cols-[1fr_auto_1fr] items-center gap-2 px-2 py-1 ${
+        first ? "" : "border-t border-white/[0.04]"
+      }`}
     >
-      {isRes ? InnerStrip : <div />}
-      {!isRes ? InnerStrip : <div />}
+      {/* LEFT — CE strip */}
+      <SideStrip flavour="CE" m={ce} />
+      {/* CENTER — strike pill (highlights ATM) */}
+      <div
+        className="flex flex-col items-center rounded-sm border px-2 py-0.5"
+        style={{
+          borderColor: isAtm ? "rgba(56,189,248,0.45)" : "rgba(255,255,255,0.08)",
+          background: isAtm ? "rgba(56,189,248,0.12)" : "rgba(255,255,255,0.02)",
+          minWidth: 84,
+        }}
+      >
+        <span
+          className="font-mono text-[12px] font-bold tabular-nums"
+          style={{ color: sideAccent }}
+        >
+          {strike.toLocaleString()}
+        </span>
+        <span
+          className="text-[8px] font-bold uppercase tracking-wider"
+          style={{ color: sideAccent, opacity: 0.85 }}
+        >
+          {isAtm ? "ATM" : tier.replace(/\s*\([^)]*\)/, "")}
+        </span>
+      </div>
+      {/* RIGHT — PE strip */}
+      <SideStrip flavour="PE" m={pe} />
     </div>
   );
 }
@@ -1152,7 +1170,7 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
         <div className="grid grid-cols-[auto_1fr_auto] items-center gap-3">
           <div className="flex flex-col gap-1 text-[11px]">
             <Row label="VAH" value={v2Fmt(profile?.vah ?? f.vah, 0)} mono color="#9ca3af" />
-            <Row label="POC" value={v2Fmt(profile?.poc ?? f.poc, 0)} mono color="#facc15" highlight />
+            <Row label="POC" value={v2Fmt(profile?.poc ?? f.poc, 0)} mono color="#9ca3af" />
             <Row label="VAL" value={v2Fmt(profile?.val ?? f.val, 0)} mono color="#9ca3af" />
           </div>
           <div className="relative flex h-14 flex-col items-stretch justify-center">
@@ -1262,9 +1280,9 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
         {/* â”€â”€ BUYERS VS SELLERS DONUT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             Replaces the legacy SELLERS DOMINATING bar.
             Same dominance + delta data, just rendered as a donut chart. */}
-        <div className="mt-2 grid grid-cols-[auto_1fr] items-center gap-3 rounded-sm border border-white/[0.06] bg-white/[0.03] px-2.5 py-2">
+        <div className="mt-2 grid grid-cols-[auto_1fr] items-center gap-5 rounded-sm border border-white/[0.06] bg-white/[0.03] px-4 py-4">
           {/* Donut */}
-          <div className="relative h-[88px] w-[88px]">
+          <div className="relative h-[150px] w-[150px]">
             {(() => {
               const r = 36;
               const c = 2 * Math.PI * r;
@@ -1274,23 +1292,23 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
               return (
                 <>
                   <svg viewBox="0 0 100 100" className="h-full w-full -rotate-90">
-                    <circle cx="50" cy="50" r={r} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="11" />
+                    <circle cx="50" cy="50" r={r} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="13" />
                     <circle
                       cx="50" cy="50" r={r} fill="none"
-                      stroke="#22c55e" strokeWidth="11"
+                      stroke="#22c55e" strokeWidth="13"
                       strokeDasharray={`${buyersArc} ${c}`} strokeDashoffset={0}
                     />
                     <circle
                       cx="50" cy="50" r={r} fill="none"
-                      stroke="#ef4444" strokeWidth="11"
+                      stroke="#ef4444" strokeWidth="13"
                       strokeDasharray={`${sellersArc} ${c}`} strokeDashoffset={-buyersArc}
                     />
                   </svg>
                   <div className="absolute inset-0 flex flex-col items-center justify-center">
-                    <span className="font-mono text-[16px] font-black leading-none" style={{ color: domColor }}>
+                    <span className="font-mono text-[28px] font-black leading-none" style={{ color: domColor }}>
                       {dominantPct}%
                     </span>
-                    <span className="mt-0.5 text-[8px] font-bold uppercase tracking-wider" style={{ color: domColor }}>
+                    <span className="mt-1 text-[11px] font-bold uppercase tracking-wider" style={{ color: domColor }}>
                       {domSide}
                     </span>
                   </div>
@@ -1299,40 +1317,40 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
             })()}
           </div>
           {/* Right legend */}
-          <div className="flex flex-col gap-1 text-[10px]">
-            <div className="flex items-center gap-1.5">
-              <span className="h-2 w-2 rounded-full bg-rose-500" />
-              <span className="font-bold text-white/80">Sellers</span>
-              <span className="ml-auto font-mono font-bold tabular-nums text-rose-400">
+          <div className="flex flex-col gap-1.5 text-[13px]">
+            <div className="flex items-center gap-2">
+              <span className="h-2.5 w-2.5 rounded-full bg-rose-500" />
+              <span className="text-[13px] font-bold text-white/85">Sellers</span>
+              <span className="ml-auto font-mono text-[15px] font-bold tabular-nums text-rose-400">
                 {Math.round(sellersScore)}%
               </span>
             </div>
-            <span className="-mt-1 ml-3.5 text-[9px] text-white/55">
+            <span className="-mt-1 ml-4.5 text-[11px] text-white/60">
               - {sellersScore >= 60 ? "Dominating" : sellersScore >= 45 ? "Balanced" : "Weak"}
             </span>
-            <div className="flex items-center gap-1.5">
-              <span className="h-2 w-2 rounded-full bg-emerald-500" />
-              <span className="font-bold text-white/80">Buyers</span>
-              <span className="ml-auto font-mono font-bold tabular-nums text-emerald-400">
+            <div className="mt-1 flex items-center gap-2">
+              <span className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
+              <span className="text-[13px] font-bold text-white/85">Buyers</span>
+              <span className="ml-auto font-mono text-[15px] font-bold tabular-nums text-emerald-400">
                 {Math.round(buyersScore)}%
               </span>
             </div>
-            <span className="-mt-1 ml-3.5 text-[9px] text-white/55">
+            <span className="-mt-1 ml-4.5 text-[11px] text-white/60">
               - {buyersScore >= 60 ? "Dominating" : buyersScore >= 45 ? "Balanced" : "Weak"}
             </span>
             {/* Delta footer */}
             {e?.delta?.deltaPct != null ? (
-              <div className="mt-0.5 flex items-center justify-between border-t border-white/10 pt-1">
-                <span className="text-[8px] font-bold uppercase tracking-wider text-white/55">Delta</span>
+              <div className="mt-1.5 flex items-center justify-between border-t border-white/10 pt-1.5">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-white/60">Delta</span>
                 <span
-                  className="font-mono text-[12px] font-bold tabular-nums"
+                  className="font-mono text-[15px] font-bold tabular-nums"
                   style={{
                     color: e.delta.deltaPct > 8 ? "#22c55e"
                       : e.delta.deltaPct < -8 ? "#ef4444" : "#facc15",
                   }}
                 >
                   {e.delta.deltaPct >= 0 ? "+" : ""}{e.delta.deltaPct.toFixed(2)}
-                  <span className="ml-1 text-[9px] opacity-65">
+                  <span className="ml-1 text-[11px] opacity-70">
                     ({e.delta.bias === "bullish" ? "Positive"
                       : e.delta.bias === "bearish" ? "Negative" : "Neutral"})
                   </span>
@@ -1352,44 +1370,10 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
           </div>
         </div>
 
-        {/* â”€â”€ ADVANCED OVERLAYS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-        {advanced ? (
-          <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px]">
-            {advanced.gammaWall ? (
-              <Badge label="Gamma Wall" value={String(advanced.gammaWall.strike)} tone="purple" />
-            ) : null}
-            {advanced.premiumVel ? (
-              <Badge
-                label="Premium"
-                value={advanced.premiumVel.state.replace("_", " ")}
-                tone={advanced.premiumVel.state === "CE_EXPANDING" ? "bull"
-                  : advanced.premiumVel.state === "PE_EXPANDING" ? "bear" : "warn"}
-              />
-            ) : null}
-            {advanced.nakedPOC ? (
-              <Badge label="Naked POC" value={String(advanced.nakedPOC.price)} tone="info" />
-            ) : null}
-            {advanced.developingPOC && advanced.developingPOC.length >= 2 ? (
-              <Badge
-                label="POC Trail"
-                value={(() => {
-                  const arr = advanced.developingPOC;
-                  const start = arr[0].poc;
-                  const end = arr[arr.length - 1].poc;
-                  return end > start ? "â†‘ Migrating Up"
-                    : end < start ? "â†“ Migrating Down"
-                      : "â†’ Flat";
-                })()}
-                tone={(() => {
-                  const arr = advanced.developingPOC;
-                  const start = arr[0].poc;
-                  const end = arr[arr.length - 1].poc;
-                  return end > start ? "bull" : end < start ? "bear" : "neutral";
-                })()}
-              />
-            ) : null}
-          </div>
-        ) : null}
+        {/* ── ADVANCED OVERLAYS — REMOVED per user request ─────────────────
+            Gamma Wall / Premium / Naked POC / POC Trail badges have been
+            removed. The same data is now surfaced inline in the BUYERS-vs-
+            SELLERS donut legend (γ Wall row) and in the FRVP body verdict. */}
 
         <V2Hint
           label={e?.interpretation?.verdict?.replace(/_/g, " ") || "Interpretation"}

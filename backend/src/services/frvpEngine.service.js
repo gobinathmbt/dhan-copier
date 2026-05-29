@@ -331,7 +331,17 @@ function _aggregateFlow(selectedStrikes, spotChange) {
   const peTotal = peBuy + peSell || 1;
   const ceBuyersPct = (ceBuy / ceTotal) * 100;
   const peBuyersPct = (peBuy / peTotal) * 100;
-  const buyersEntering  = (ceBuyersPct + peBuyersPct) / 2;
+
+  // Directional aggregation:
+  //   Bullish flow = CE buyers + PE writers (both lean LONG)
+  //   Bearish flow = CE writers + PE buyers (both lean SHORT)
+  // Previous formula `(ceBuyersPct + peBuyersPct) / 2` was structurally wrong —
+  // CE-buy % and PE-buy % are opposite-direction signals so averaging them
+  // always collapsed to ~50%.
+  const bullishVol = ceBuy + peSell;
+  const bearishVol = ceSell + peBuy;
+  const totalDirectional = bullishVol + bearishVol || 1;
+  const buyersEntering  = (bullishVol / totalDirectional) * 100;
   const sellersEntering = 100 - buyersEntering;
 
   // Dominant strike per side (the strike that contributes the most
@@ -401,8 +411,11 @@ function _deltaPressure(candles) {
 // SECTION 8 — DOMINANCE ENGINE
 // ──────────────────────────────────────────────────────────────────────
 function _dominance(flow, delta) {
-  // Combine option-flow buyers % with delta-pressure bias for a final read
-  const buyersScore = (flow.buyersEntering + (100 - flow.sellersEntering)) / 2;
+  // Buyers entering is now a true directional read (bullishVol / totalVol).
+  // Just promote it directly into a buyersScore — no need for the legacy
+  // average against `(100 - sellersEntering)` which was redundant when
+  // buyers + sellers already sum to 100.
+  const buyersScore = flow.buyersEntering;
   const sellersScore = 100 - buyersScore;
   let dominantSide = 'BALANCED';
   if (buyersScore  >= 60) dominantSide = 'BUYERS';

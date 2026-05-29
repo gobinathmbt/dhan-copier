@@ -1996,9 +1996,11 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
   // ── Futures premium ──────────────────────────────────────────────────
   const futLast = f1m[f1m.length - 1];
   let futLtp = _safe(futLast?.close);
+  let futOi = 0;          // Live near-month futures Open Interest (lots)
+  let futOiPrevClose = 0; // Previous-day OI close (for OI change)
 
   // For NIFTY, prefer the live near-month futures tick over the last 1m
-  // candle close (same staleness fix as spot).
+  // candle close (same staleness fix as spot). Also pull live OI.
   if (marketOpen && sym.futuresUnderlying === 'NIFTY') {
     try {
       const niftyFut = require('./niftyFuturesProd.service');
@@ -2007,6 +2009,9 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
         if (ft && Number.isFinite(ft.ltp) && ft.ltp > 0) {
           const age = Date.now() - (ft.updatedAt || Date.now());
           if (age <= 5000) futLtp = _safe(ft.ltp);
+          if (Number.isFinite(ft.oi)) futOi = _safe(ft.oi);
+          if (Number.isFinite(ft.prevOi)) futOiPrevClose = _safe(ft.prevOi);
+          else if (Number.isFinite(ft.oiDayLow)) futOiPrevClose = _safe(ft.oiDayLow);
         }
       }
     } catch (_) {}
@@ -3850,7 +3855,9 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
       frvpAuction,
       frvpInstitutional,
       futuresInfo: {
-        oi: 0, oiChange: 0, volume: f1m.reduce((s, c) => s + (c.volume || 0), 0),
+        oi: futOi,
+        oiChange: futOiPrevClose ? futOi - futOiPrevClose : 0,
+        volume: f1m.reduce((s, c) => s + (c.volume || 0), 0),
         ltp: futLtp, premium: futPremium ?? 0,
         basis: futPremium ?? 0, basisTrend: futPremium == null ? 'unknown' : (futPremium >= 0 ? 'premium' : 'discount'),
         interpretation: futPremium != null
@@ -3865,7 +3872,15 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
       delta: {
         totalBuyVol: delta.totalBuy, totalSellVol: delta.totalSell,
         netDelta: delta.netDelta, deltaPct: delta.deltaPct,
-        bidAskImbalance: 0,
+        // Real bid/ask imbalance derived from option-chain delta totals.
+        // Range: −100 (all sellers) … +100 (all buyers). 0 = balanced.
+        bidAskImbalance: (() => {
+          const b = _safe(delta.totalBuy);
+          const s = _safe(delta.totalSell);
+          const tot = b + s;
+          if (tot <= 0) return 0;
+          return _round(((b - s) / tot) * 100, 2);
+        })(),
         interpretation:
           delta.bias === 'bullish' ? 'Real buying in options.'
           : delta.bias === 'bearish' ? 'Real selling pressure.'

@@ -96,7 +96,7 @@ function MaxPain({ data }: { data: IntelV2Snapshot | null }) {
     <V2Card title="4.4 Max Pain">
       <div className="flex flex-col gap-1.5 text-[12px]">
         <Row label="Max Pain" value={v2Fmt(mp, 0)} />
-        <Row label="Expiry"   value={expiry ? expiry.slice(0, 10) : "—"} />
+        <Row label="Expiry"   value={typeof expiry === "string" ? expiry.slice(0, 10) : "—"} />
         <Row label="Range"    value={`${v2Fmt(dl, 0)} – ${v2Fmt(dh, 0)}`} />
         <div className="mt-1 flex items-center justify-between rounded-sm bg-white/[0.03] px-2.5 py-1.5">
           <span className="text-[11px] uppercase tracking-wider text-white/55">Bias</span>
