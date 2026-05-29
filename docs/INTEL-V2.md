@@ -1,568 +1,755 @@
 # Intel V2 — Institutional Options Console
 
-A self-contained intraday options-flow dashboard. Single endpoint
-(`GET /api/intel-v2/snapshot?symbol=NIFTY_50&date=YYYY-MM-DD`) returns a
-fully-populated payload that drives every card on `/intel-v2`.
+End-to-end documentation of the `/intel-v2` dashboard. Covers every card, the
+exact computation behind each metric, the data sources the engine pulls from,
+and the way the cards are wired into a single coherent verdict.
 
-The whole stack reuses the live-feed folder (`backend/live-feed/<date>_<symbol>/`)
-and the production option-chain API — no v1 dependency.
+> **Endpoint:** `GET /api/intel-v2/snapshot?symbol=NIFTY_50|SENSEX|BANKNIFTY[&date=YYYY-MM-DD]`
+> **Live polling:** 3 s on the page · 800 ms cache window on the orchestrator
+> **Trading hours:** 09:15–15:30 IST · entry cutoff 15:00 IST
+> **Strike grid rule:** all option strike picks are forced to the nearest 100-step within ATM ± 6
 
 ---
 
 ## 1. Data sources
 
-| Source | What we read | When |
+| Source | What it provides | Cache |
 |---|---|---|
-| `live-feed/<date>_<symbol>/candles-{1m,5m,15m,30m}.jsonl` | Spot OHLCV per timeframe | always (preferred) |
-| `live-feed/<date>_<symbol>/futures-{1m,5m,15m,30m}.jsonl` | Index-futures OHLCV | always (preferred) |
-| `live-feed/<date>_<symbol>/option-chain.jsonl` | Latest snapshot of the chain | always |
-| `dhanProd.service` historical API | Spot/futures candles | fallback if folder empty |
-| `dhanLiveFeedProd.getTick()` | Real-time spot LTP | only when `marketOpen` |
-| `niftyFuturesProd.getLiveTick()` | Real-time futures LTP | only when `marketOpen` |
-| Yahoo `query1.finance.yahoo.com/v8/finance/chart` | VIX, Sensex, Gift Nifty, S&P/Nasdaq, DXY, Crude, Nikkei | every snapshot, 60s cache |
-| Sensibull `oxide.sensibull.com/v1/compute/cache/fii_dii_daily` | FII/DII cash + futures flows | every snapshot, 60s cache |
-| `marketInternals.service` | NIFTY 50 + Sensex 30 constituents from Yahoo | full breadth, 60s cache |
+| **Dhan v2 REST** (`getIntradayOHLC`) | 1m / 5m / 15m / 25m index candles + futures candles | 60 s historical · 800 ms live |
+| **Dhan v2 WebSocket** (`liveFeedProd`) | Live tick (LTP, OI, depth) — packets 4/5/8 | streaming |
+| **Dhan v2 Option Chain** (`/v2/optionchain`) | Full strike chain with greeks, OI, ΔOI, IV per leg | 800 ms |
+| **niftyFuturesProd** | Near + next NIFTY futures contract (sid, expiry, lot) + live tick (LTP, OI, prevOI) | 5 s scrip-master cache |
+| **Yahoo Finance** | India VIX, ^NSEI (GIFT proxy), ES=F, NQ=F, DX-Y.NYB, CL=F, ^N225, ^BSESN, all 50 NIFTY / 30 SENSEX constituents | 60 s |
+| **Sensibull** (`oxide.sensibull.com/v1/compute/cache/fii_dii_daily`) | FII/DII/PRO/CLIENT cash · futures · options breakdown | 5 min |
+| **`live-feed/<date>_<sym>/`** (recorder) | Persisted JSONL tick stream + synthesized 1m/5m/15m/30m/option-chain candles | disk |
 
-**Cache TTL**: live = 800 ms, historical = 60 s, macro/breadth = 60 s.
-
-**Sanitisation**: `_sanitiseCandles()` rejects any candle whose close lies outside the
-expected range for the symbol (NIFTY 10 000–40 000, SENSEX 40 000–120 000,
-BANKNIFTY 30 000–80 000) plus any individual outlier > ±30 % of the median close.
+The **production token + clientId** are required: `DHAN_ACCESS_TOKEN` carries
+the JWT (its payload contains `dhanClientId`), and `DHAN_CLIENT_ID` must be
+set explicitly in `backend/.env`. Without both, the live WebSocket never
+connects and `/v2/optionchain/expirylist` returns 401.
 
 ---
 
 ## 2. Pipeline at a glance
 
 ```
-  raw candles + option chain + macro + breadth + futures + tick
+                ┌──────────────────────────┐
+                │  Dhan REST + WebSocket   │
+                └─────────────┬────────────┘
+                              ▼
+                  candleSet  +  liveTick
                               │
                               ▼
-                     getSnapshot({symbol, date})
-                              │
-   ┌──────────────────────────┼──────────────────────────────┐
-   ▼                          ▼                              ▼
- indicator math       per-strike analytics              macro overlays
- (vwap, ema, atr,    (atmBlk, oiHistogram, FRVP,        (vix, gift, fiiDii,
-  rsi, cpr)          ladder, walls, premium velocity)    heavyweights, breadth)
-                              │
-                              ▼
-              ┌────── master verdict (0..100) ──────┐
-              ▼                                     ▼
-       directional engines                    overlay engines
-       (heroZero, tradeStrategy,              (trapDetection,
-        bestTradePicks, bestOptionBuy)         supportResistance,
-                                               marketDirection)
-                              │
-                              ▼
-                      narrator (marketStory)
-                              │
-                              ▼
-                       dashboard payload
+        ┌──────────  intelV2.service.js  ──────────┐
+        │                                          │
+        │   _loadCandles            _readChain     │
+        │   _atmAnalytics           _verdict       │
+        │   _delta + _vp            _supportResistance
+        │   _frvpInstitutional → frvpEngine.evaluate()
+        │   _heroZero  _premiumMomentum  _tradeStrategy
+        │   _executionEngine  _marketStory  _trapDetection
+        │   _macroContext (Yahoo + Sensibull)      │
+        │   _heavyweights + _fullBreadth (50/30)   │
+        │                                          │
+        └────────────┬─────────────────────────────┘
+                     ▼
+            JSON snapshot (~25 KB)
+                     │
+                     ▼
+        useIntelV2Snapshot()  →  intel-v2.tsx (rows 1-5)
 ```
 
-All numeric outputs are deterministic — same input ⇒ same output. The only
-non-deterministic surface is the live-tick freshness window.
+Every engine reads from the same `candleSet`, `strikes`, `atmBlk`, `vp`,
+`frvpInstitutional` blocks — no engine recomputes index-level state. This is
+why all engines now agree on direction (recent unification of `vaPrimary` —
+see §6).
 
 ---
 
 ## 3. Indicator math
 
-All indicators live in `intelV2.service.js` top-section helpers:
-
-| Indicator | Formula | Notes |
-|---|---|---|
-| **EMA(n)** | `EMA_t = α·close_t + (1−α)·EMA_{t-1}` with α = 2/(n+1) | Used at 9, 20, 50 periods |
-| **VWAP** | `Σ(typical·vol) / Σ(vol)` over the session | typical = `(H+L+C)/3` |
-| **AVWAP** | Same as VWAP but sum begins at an anchor index | Prior-day anchor + session anchor |
-| **ATR(14)** | Avg of true ranges; TR = `max(H−L, |H−prevC|, |L−prevC|)` | 14-period default |
-| **RSI(14)** | `100 − 100/(1+RS)`; RS = avg gain / avg loss over 14 closes | |
-| **CPR** | `pivot=(H+L+C)/3`, `bc=(H+L)/2`, `tc=2·pivot−bc` | Plus R1/R2/R3 + S1/S2/S3 |
+| Helper | Formula |
+|---|---|
+| `_ema(closes, n)` | classic exponential moving average, `α = 2/(n+1)` |
+| `_vwap(candles)` | `Σ(typical × volume) / Σ volume` over the last 200 1m bars |
+| `_anchoredVwap(candles, fromIdx)` | VWAP starting from a chosen index (session AVWAP from idx 0; prior-day AVWAP from `len-60`) |
+| `_atr(c5m, 14)` | true-range ATR on 5m candles |
+| `_rsi(closes, 14)` | Wilder's RSI |
+| `_cprFromOHLC(prior)` | Pivot = (H+L+C)/3, BC = (H+L)/2, TC = 2·Pivot − BC |
+| `_round(n, d)` | `Math.round(n*10^d)/10^d` (used everywhere to keep JSON terse) |
 
 ---
 
-## 4. Top quote ribbon (`Row1MasterDecision`)
+## 4. Top header (`TopHeader.tsx`)
 
-Eight tiles. No computation — just direct reads.
+The center of the header is built around 4 neon-style icon tiles, absolutely
+positioned so the cluster stays geometrically centered regardless of the
+left/right cluster widths:
 
-| Tile | Source |
-|---|---|
-| **NIFTY** | `data.spot.ltp` + `changePct` |
-| **NIFTY FUT** | `data.futures.ltp` + `premium` |
-| **SENSEX** | `data.macro.sensex` (Yahoo `^BSESN`) |
-| **GIFT NIFTY** | `data.macro.giftNifty` (Yahoo `^NSEI` proxy) |
-| **MAX PAIN** | `data.options.maxPain` |
-| **PCR** | `data.flow.oi.pcr` (total CE OI / total PE OI) |
-| **INDIA VIX** | `data.macro.vix` (Yahoo `^INDIAVIX`) |
-| **ATM IV** | `data.options.atmIv` (option-chain avg of ATM CE+PE IV) |
+| Tile | Tone | Logic |
+|---|---|---|
+| **DATE** | sky | `<input type="date">` with chevron prev/next bound to `availableDates`. Selecting today returns to live polling (`onDate(null)`). |
+| **STATUS** | green when `!date` else gray | `LIVE` button — clicking toggles auto-refresh on (clears the historical date). |
+| **STATE** | green when `data.market.isOpen` else red | derived from `marketHours.service`. Lock icon on closed, activity icon on open. |
+| **TIME** | purple | `Date.now()` re-rendered every 1s in IST locale. |
 
-PCR sentiment label: `≥1.15 Bullish`, `≥1.05 Mild Bull`, `≤0.85 Bearish`, `≤0.95 Mild Bear`, else `Neutral`.
-
-VIX state: `≥18 Elevated`, `≥14 Normal`, `>0 Low`.
-
-ATM IV state: `≥25 Expensive`, `≥18 Premium`, `≥10 Healthy`, `>0 Dead`.
+Left cluster keeps the INTEL V2 logo + NIFTY / SENSEX symbol toggle. Right
+cluster keeps the Refresh + last-updated indicator + AUTO-3s pill.
 
 ---
 
 ## 5. Master Verdict — `_masterVerdict()`
 
-Single 0–100 score that drives the bias of every downstream engine.
+Final bias score is computed as a weighted sum of 13 factors. Each factor is
+clipped to `[-100, +100]` and multiplied by its weight. Positive points push
+toward CE, negative toward PE.
 
-13 input factors, each clamped, then weighted:
+```
+verdict = Σ (factor_i × weight_i)
+cePct = clamp(50 + verdict/2, 0, 100)
+pePct = 100 - cePct
+side  = cePct >= 60 ? CE : pePct >= 60 ? PE : NEUTRAL
+```
 
-| Factor | Score range | Weight | Source |
+| Factor | Weight | Source | Rule |
 |---|---|---|---|
-| `pcr` | clamp((PCR−1)·30, ±30) | 0.10 | option chain totals |
-| `oiWriters` | +30 if PE writing, −30 if CE writing | 0.10 | atmBlk |
-| `vwap` | clamp((spot−vwap)/vwap·10000, ±50) | 0.08 | spot, vwap |
-| `ema` | EMA stack: +60 / +25 / −25 / −60 / 0 | 0.10 | EMA9/20/50 |
-| `cpr` | +40 above TC, −40 below BC | 0.06 | prior-day OHLC |
-| `heavyweights` | clamp(weightedAvgChg·50, ±60) | 0.10 | top constituents |
-| `vix` | clamp(−vixChgPct·5, ±30) | 0.05 | Yahoo VIX |
-| `gift` | clamp(giftChgPct·25, ±50) | 0.06 | Yahoo NSEI |
-| `fiiDii` | clamp(net Cr/50, ±40) | 0.08 | Sensibull |
-| `futures` | clamp(premium·1.5, ±30) | 0.07 | futures.ltp − spot |
-| `delta` | +40 bullish / −40 bearish / 0 neutral | 0.10 | candle close-position proxy |
-| `iv` | clamp(−(iv−18)·0.7, ±15) | 0.04 | atmBlk.atmIv |
-| `breadth` | clamp((advancePct−50)·0.8, ±40) | 0.06 | full breadth |
+| `pcr` | 0.10 | `flow.oi.pcr` | bullish if PCR > 1, bearish if < 0.7 |
+| `oiWriters` | 0.10 | `atmBlk.peWriting`, `atmBlk.ceWriting` | PE writers = bullish, CE writers = bearish |
+| `vwap` | 0.08 | `(spot − vwap) / vwap × 1000` | distance scaled to ±50 |
+| `ema` | 0.10 | EMA 9>20>50 stack | full ascending = +60, descending = -60 |
+| `cpr` | 0.06 | `cpr.pivot` vs spot | above pivot = bull, below = bear |
+| `heavyweights` | 0.10 | `heavyweightsTotalImpact` | weighted basket impact in pts |
+| `vix` | 0.05 | `vix.changePct` | rising VIX = bearish |
+| `gift` | 0.06 | `giftNifty.changePct` | global cue proxy |
+| `fiiDii` | 0.08 | Sensibull cash buy/sell diff (₹ Cr) | net institutional flow |
+| `futures` | 0.07 | `futures.premium` | premium = bullish basis |
+| `delta` | 0.10 | `flow.delta.deltaPct` | volume-flow imbalance |
+| `iv` | 0.04 | `atmIv` vs trend | rising IV in trending = continuation |
+| `breadth` | 0.06 | `breadth.advancePct` | advance/decline % around 50% pivot |
 
-```
-composite  = Σ (factor × weight)
-cePct      = clamp(50 + composite/2, 0..100)
-pePct      = 100 − cePct
-verdict    = STRONG_BULLISH  (cePct ≥ 70)
-           | BULLISH          (cePct ≥ 58)
-           | NEUTRAL          (else)
-           | BEARISH          (pePct ≥ 58)
-           | STRONG_BEARISH   (pePct ≥ 70)
-```
-
-The exact factor breakdown is exposed at `data.verdict.factors` for debugging.
+The card displays the dominant side as `BUY CE 62%` / `BUY PE 58%` /
+`NEUTRAL` and the per-factor contributions are surfaced in the snapshot
+under `verdict.factors`.
 
 ---
 
-## 6. Option-chain analytics
+## 6. Value-area unification — `vaPrimary`
 
-### 6.1 `_atmBlocks(strikes, atm)`
-- ATM CE / PE OI, IV, delta
-- Total CE OI, Total PE OI, **PCR = totPe/totCe**
-- Call wall = strike with max CE OI; Put wall = strike with max PE OI
-- **Max pain** = strike with largest combined OI
-- Writing flags: `peWriting` if any PE strike with ΔOI > 0 within ATM±2; same for CE
+A subtle but critical fix: there are TWO VAH/VAL bands in the snapshot —
 
-### 6.2 `_oiHistogram(strikes, atm, ±4, step=100)`
-- ATM ± 4 strikes spaced in 100s — used by the "OI Shift Active Strikes" card
-- Per-row buyer-favor score (40 pts side dominance + 20 spot-vs-strike + 15 delta band + 15 premium liveness + 10 OI)
+- `flow.volume.{vah, val}` — simple price-bin VAH/VAL (often wider)
+- `frvpInstitutional.engine.profile.{vah, val}` — institutional engine band (curated, accurate)
 
-### 6.3 `_oiBuildupAnalysis(strikes, atm, spot, step=100, range=6)`
-- Ranks every strike by `|ΔOI|`, takes top 5 per side
-- Per-row interpretation:
-  - `≥15%` Strong Buildup
-  - `≥8%` Buildup
-  - `≥3%` Moderate Buildup
-  - `≤−15%` Strong Unwinding
-  - `≤−8%` Unwinding
-  - `≤−3%` Mild Unwinding
-  - else Stable
-- Bar-chart series for ATM ± `range` strikes
-- `ceTakeaway` / `peTakeaway` — clustering of top-3 OI builds
+The HeroZero, Trade Strategy, Execution Engine, Market Story, and No-Trade
+conditions all now read a single unified band:
 
-### 6.4 `_oiShiftBias(rows)`
-- Bullish flow = PE OI added + CE OI removed
-- Bearish flow = CE OI added + PE OI removed
-- Direction: BULLISH (`bullPct ≥ 55`), BEARISH (`bearPct ≥ 55`), else NEUTRAL
-- Strength: `STRONG` (margin ≥ 30), `MODERATE` (≥ 15), else `MILD`
-- Tracks the single heaviest |ΔOI| as the "dominant strike"
+```js
+const vaPrimary = engineProfile?.vah && engineProfile?.val
+  ? { vah: engineProfile.vah, val: engineProfile.val, poc: engineProfile.poc }
+  : (vp?.vah && vp?.val ? { vah: vp.vah, val: vp.val, poc: vp.poc } : null);
+```
+
+Without this, downstream engines were reporting "Inside Value Area" while
+the FRVP card simultaneously showed "Below Value / Rejection below value".
+Now the entire dashboard agrees on a single value-area location.
 
 ---
 
-## 7. FRVP Institutional Engine — `frvpEngine.evaluate()`
+## 7. Option-chain analytics
 
-A 14-section auction-theory engine over 5-min candles.
+`_atmAnalytics(strikes, atm)` walks the chain ±6 strikes around ATM and
+returns:
 
-### 7.1 Profile (`_buildProfile`)
-- Bucket size: NIFTY 5pt, BANKNIFTY/SENSEX 10pt, others = 0.05% of avg price
-- For each candle, distribute volume **proportionally across all buckets** in the H/L range (not close-only)
-- **POC** = highest-volume bucket
-- **Value Area** (VAH/VAL) = expand outward from POC alternating up/down highest-volume neighbour until acc ≥ 70 % of total volume
-- HVN = top-5 buckets by volume
-- LVN = bottom-5 buckets inside the value area
+| Field | Computation |
+|---|---|
+| `atmCall`, `atmPut` | the matching strike's `call.ltp/oi/iv/delta` and `put.*` |
+| `pcr` | total PE OI / total CE OI within ±6 strikes |
+| `ceTotal`, `peTotal` | sum of OI on each side |
+| `ceWriting`, `peWriting` | true if `oiChange > 0` and `oiChange / totalOiChange > 0.30` |
+| `ceUnwinding`, `peUnwinding` | mirror — `oiChange < 0` with same threshold |
+| `callWall` | strike with the highest CE OI in the window |
+| `putWall` | strike with the highest PE OI in the window |
+| `maxPain` | strike that minimises total writer pain (CE + PE intrinsic loss) |
 
-### 7.2 Location
-- `markerPct = clamp((vah − spot)/(vah − val) · 100, 0..100)` — 0 = bullish edge, 100 = bearish edge
-- `nearPOC` if `|spot − POC| ≤ 0.15·(vah − val)`
+`_strikeLadder()` builds the per-strike ladder (greeks, OI, ΔOI, health
+score, classified buildup) for the trade-board / writer-pressure cards.
 
-### 7.3 Acceptance / Rejection (`_acceptance`)
-- Acceptance above VAH: 3 consecutive closes > VAH OR last-6-bar above-vol > 2× prior-30 avg
-- Rejection above VAH: any bar pierced VAH but last 2 closes are inside value
-- Symmetric below VAL
+---
 
-### 7.4 Strike Selection (`_selectStrikes`)
-- Take strikes that rank top-N on **any** of: total OI, total volume, |ΔOI|
-- Always include ATM regardless of ranking
+## 8. FRVP Institutional Engine — `frvpEngine.evaluate()`
 
-### 7.5 Buildup classification + flow (`_classifyBuildup` + `_aggregateFlow`)
+A 14-section institutional auction engine. Inputs: candle stream + chain.
+Outputs the full `dashboard.frvpInstitutional.engine` object.
 
-Tag → buyer/seller weight:
-
-| Tag | Buy | Sell |
+| Section | Output | Logic |
 |---|---|---|
-| Long Buildup | 0.80 | 0.20 |
-| Short Covering | 0.65 | 0.35 |
-| Balanced | 0.50 | 0.50 |
-| Long Unwinding | 0.35 | 0.65 |
-| Short Buildup | 0.20 | 0.80 |
+| 1 | **Profile** (VAH/POC/VAL/HVN/LVN) | classical Market Profile — sort 5-pt bins by volume, take 70% concentration as VAH/VAL, top bin as POC |
+| 2 | **Location** | inside/outside value, near POC (±15% of value-area width), markerPct |
+| 3 | **Acceptance** | `consecutiveAbove ≥ 3` bars closing above VAH = `acceptedAboveVAH`; same below |
+| 4 | **Selected strikes** | ATM ± 4 strikes (100-step), with classified `ceBuildup` / `peBuildup` per leg |
+| 5 | **Buildup classification** | `_classifyBuildup(side, oiChg, spotChange)` → Long Buildup / Short Buildup / Long Unwinding / Short Covering / Balanced |
+| 6 | **Flow aggregation** | per-strike weighted shares: `ceBuy = vol × _TAG_WEIGHTS[tag].buy`, etc. |
+| 7 | **Delta pressure** | `cumulative` (Σ delta on selected strikes), `deltaPct = cum / totalVol × 100`, bias bull if ≥ +8% |
+| 8 | **Dominance** | **fixed in this build**: `bullishVol = ceBuy + peSell`, `bearishVol = ceSell + peBuy`, `buyersScore = bullishVol / total × 100`. Conviction = "high" if dominance aligns with delta, "divergent" if opposite |
+| 9 | **Interpretation** | combines location + acceptance + dominance + delta into a one-line verdict (`PROBING_BELOW`, `BREAKOUT_CONFIRMED`, etc.) |
+| 10 | **Developing POC** | rolling 30-min POC trail — flags `Migrating Up` / `Migrating Down` |
+| 11 | **Gamma wall** | strike with the largest |delta·OI·100| product (gamma exposure) |
+| 12 | **Premium velocity** | CE/PE LTP skew — used as cold-start fallback only by the Premium Momentum engine |
+| 13 | **Naked POC** | unfilled POC from prior session (price has moved away without revisiting) |
+| 14 | **Trapped traders** | acceptance + dominance disagreement → bull/bear trap classifier |
 
-Per-strike weighted contribution to `ceBuy/ceSell/peBuy/peSell` plus the
-per-side dominant strike (max contribution).
-
-`buyersEntering = (ceBuyersPct + peBuyersPct) / 2` ; sellers = 100 − buyers.
-
-### 7.6 Delta Pressure (`_deltaPressure`)
-Close-position-within-range proxy:
-```
-proxy = (2·close − high − low) / (high − low)   // [-1, +1]
-cumulative += volume × proxy
-deltaPct = cumulative / totalVolume × 100
-bias = bullish (>+8) | bearish (<−8) | neutral
-```
-
-### 7.7 Dominance
-```
-buyersScore  = (buyersEntering + (100 − sellersEntering)) / 2
-dominantSide = BUYERS  (≥60)
-             | SELLERS (≥60)
-             | BALANCED
-conviction   = high      (dom + delta align)
-             | divergent (dom + delta opposite)
-             | normal
-```
-
-### 7.8 Directional Bias (option buyer)
-6 mutually-exclusive rules generate `{ side, strength, reason, targetStrike }`:
-- BUYERS + accepted-above ⇒ **CE STRONG/MODERATE**
-- SELLERS + accepted-below ⇒ **PE STRONG/MODERATE**
-- Bull-trap rejection at VAH + sellers ⇒ **PE STRONG**
-- Bear-trap rejection at VAL + buyers ⇒ **CE STRONG**
-- Trap + opposite-side dominance OR divergent conviction ⇒ **NEUTRAL WAIT**
-- Inside value pure flow ⇒ moderate CE / PE
-- else BALANCED
-
-### 7.9 Advanced overlays
-- `gammaWall` = max abs(ce_gamma · ce_oi − pe_gamma · pe_oi)
-- `premiumVel` = `{ ceLtp, peLtp, total, skew, state }` — skew > 0.10 ⇒ CE_EXPANDING; < −0.10 ⇒ PE_EXPANDING
-- `developingPOC` = trail of POCs over 30-min rolling windows
-- `nakedPOC` = lowest-touch HVN (magnet candidate)
+### Critical fix — bull/bear vol formula
+Earlier `buyersEntering = (ceBuyersPct + peBuyersPct) / 2` averaged
+opposite-direction signals (CE buying = bullish, PE buying = bearish), so
+the donut always read ~50/50 regardless of real flow. The replacement
+formula correctly computes `bullishVol / (bullishVol + bearishVol)` so 80/20
+reads truly mean 80% bullish vs 20% bearish flow.
 
 ---
 
-## 8. Market Direction Card
+## 9. Market Direction Card (2.2)
 
-`marketDirection` block in the orchestrator.
+The combined card now shows BOTH sides on every strike row plus the ATM:
 
-- **Direction Meter**: `downside = pePct`, `upside = cePct`, needle = upsidePct.
-  Verdict labels: `STRONG DOWNSIDE` (pe≥65), `DOWNSIDE BIAS` (pe≥55), `STRONG UPSIDE` (ce≥65), `UPSIDE BIAS` (ce≥55), else `BALANCED`.
-- **Intraday Levels**: anchor = round(atm/100)·100. CE candidates = clean 100-step strikes strictly above anchor (top 6 closest by distance). PE candidates = clean 100-step strikes strictly below anchor (top 6 closest).
-- Tier labels (closest → farthest):
-  - CE: Immediate / Strong / Extreme / R4 (Major) / R5 (Heavy) / R6 (Wall)
-  - PE: Immediate / Major / Critical / S4 (Deep) / S5 (Floor) / S6 (Bedrock)
-- **OI Estimated Move**: `downsideTarget = peCandidates[1] ?? peCandidates[0]`, `upsideTarget = ceCandidates[1] ?? ceCandidates[0]`, `maxPain = atmBlk.maxPain`.
+```
+[ CE strip · Tier · Strike CE · OI Build · Δ% · Strength · Interp ]
+                       [ STRIKE PILL ]
+[ PE strip · Tier · Strike PE · OI Build · Δ% · Strength · Interp ]
+```
+
+- 6 resistance tiers (Immediate → R6 Wall) ABOVE ATM, 6 support tiers
+  (Immediate → S6 Bedrock) BELOW ATM, plus the ATM in the middle
+- Each side reads from `oiBuildupAnalysis.ceTable` / `peTable`; if a strike
+  isn't in those tables the engine falls back to raw `optionChainSnapshot`
+  for OI numbers
+- The center pill is sky-blue + boxed only on the ATM row, neutral elsewhere
+- Strength bar = 7 segments scaled by `|oiChangePct|`
+
+The **Direction Meter** above it is a split bar with a needle:
+`needlePos = (callBuildSum - putBuildSum) / totalBuild × 50 + 50`. >= 60 →
+"DOWNSIDE BIAS"; <= 40 → "UPSIDE BIAS".
 
 ---
 
-## 9. Best Trade Picks — `_bestTradePicks()`
+## 10. Best Trade Picks — `_bestTradePicks()`
 
-Drives the green BUY CE / red BUY PE banners. **Strikes are restricted to 100-step + ATM ± 6** via `_hundredStepWindow()`.
+Per-side score (max 30) — with a strict 100-step ATM ± 6 window:
 
-### Per-side scoring (max ≈ 92, base 35):
-
-| Pillar | Max points | Source |
+| Component | Weight | Logic |
 |---|---|---|
-| Verdict alignment | up to 25 | `(sidePct − 50) × 0.5` |
-| FRVP directional bias | 20 (STRONG) / 12 (MODERATE) / 6 (WEAK), or −10 if opposite | engine.directionalBias |
-| Acceptance / rejection | ±12 same-side / ±8 opposite trap | acceptance flags |
-| Smart money (delta) | ±10 / ±8 cross | delta.bias |
-| Strike health | ±10 | leg.health.score |
-| OI structure | ±6 ±4 | atmBlk writing/unwinding |
-| Trap penalty | up to −10 | trapBlk.score × −0.5 |
+| Verdict alignment | 6 | strike picked from CE/PE side of master verdict |
+| FRVP location | 4 | inside-value penalty, breakout / breakdown bonus |
+| Acceptance | 12 | accepted above VAH / below VAL = +12 |
+| Delta | 10 | aligned with directional bias |
+| Health | 3 | ladder health score (0-100 → 0-3) |
+| OI | 6 | OI within target band (not too thin) |
+| Trap penalty | -10 | bull/bear trap detected |
 
-Final `probability = clamp(score, 25..92)`. Action label: `STRONG BUY ≥70`, `BUY ≥60`, `CAUTIOUS BUY ≥50`, `WAIT ≥40`, else `AVOID`.
+`probability` clamps to `[0, 95]`. Action labels:
 
-Primary side = whichever has higher probability AND ≥50.
+```
+≥ 60 → "BUY"        50-59 → "CAUTIOUS BUY"
+40-49 → "WAIT"      < 40 → "AVOID"
+```
 
-`tradeBoard` uses these picks to emit:
-- Best Option Buy (primary)
-- Alternate Scenario (opposite side, with reversal-condition string)
-- Risk Gauge (composite of trap + 100−confidence + bias-spread)
-- Execution Context (auction phase + flow + next level + key levels)
-
-Step is hard-coded to **100** for every target/SL — T1 = strike + dir·200, T2 = strike + dir·400, T3 = strike + dir·600, SL = strike − dir·150.
+`primary` is the side with higher probability; `spread = primary − loser`.
+Used by Trade Board card + Execution Engine.
 
 ---
 
-## 10. Hero or Zero Engine
+## 11. Hero or Zero Engine
 
-Score-based sniper banner. **Each side scored 0..9, threshold = 7**.
+**9-point sniper score per side, threshold ≥ 7 for HERO.**
 
-| Signal | CE points | PE points |
+| Signal | Side | Pts | Veto |
+|---|---|---|---|
+| `aboveVAH` / `belowVAL` | CE / PE | +2 | — |
+| `aboveVWAP` / `belowVWAP` | CE / PE | +2 | — |
+| `ceExpanding` / `peExpanding` | CE / PE | +2 | — |
+| `buyersDominant ≥ 65` / `sellersDominant ≥ 65` | CE / PE | +1 | — |
+| `deltaPct ≥ +10` / `≤ -10` | CE / PE | +1 | — |
+| `volSurge` (last 5m vol > 1.5× prior-20 avg) | both | +1 | — |
+| `bullTrap` | CE | — | **-4 hard veto** |
+| `bearTrap` | PE | — | **-4 hard veto** |
+
+`HERO_CE` fires only if `ceScore ≥ 7 AND ceScore > peScore`. Confidence:
+`min(95, 70 + score × 3)`. Otherwise emits `ZERO` with a sub-reason
+(`Inside Value Area`, `Bull Trap Detected`, `Bear Trap Detected`,
+`Premium Stagnant`, `No Edge`).
+
+The card now uses `vaPrimary` (see §6) for accurate VA location.
+
+---
+
+## 12. Premium Momentum Engine
+
+**Real time-derivative of CE/PE premium**, replacing the prior static-skew
+implementation that always reported "CE_EXPANDING" because CE LTP was
+structurally bigger than PE LTP.
+
+How it works:
+
+1. Per-symbol ring buffer `_premiumHistory[symbol|atm] = [{t, ceLtp, peLtp}]`
+   pushes one sample on every snapshot call. Capacity 240 entries (~12 min
+   at 3s polling); TTL 30 min.
+2. On each compute, picks the sample closest to `now − 8 min` as the
+   baseline; if buffer < 3 samples, falls back to the FRVP engine's static
+   skew heuristic (clearly marked as cold-start).
+3. Computes:
+   ```
+   ceExpansionPct = (ceLtp − baseline.ceLtp) / baseline.ceLtp × 100
+   peExpansionPct = (peLtp − baseline.peLtp) / baseline.peLtp × 100
+   ```
+4. Sparklines use the last 30 ring-buffer samples directly (real LTP
+   trail). Cold-start synthesises from candle close-position-in-range.
+5. Top state classifier:
+   - `ceExpansionPct > peExpansionPct + 5 AND ce >= 8` → **CE Momentum Strong** 🟢
+   - `peExpansionPct > ceExpansionPct + 5 AND pe >= 8` → **PE Momentum Strong** 🔴
+   - both < 5 → **Weak Premium** ⚠
+   - else → **Two-sided Momentum** ◇
+6. `momentumQuality` is a separate score (0-100): delta intensity (35) +
+   expansion magnitude (35) + writer presence (15) + day type (15).
+7. `scalpingAggression`: volSurge (30) + |delta| (25) + expansion (25) +
+   volatility regime (20). HIGH ≥ 70, MODERATE ≥ 45, LOW otherwise.
+8. Surfaces `baselineAgeSec` and `historyDepth` for transparency.
+
+---
+
+## 13. Trade Strategy Engine
+
+Scores 5 strategies against a fixed factor checklist; tie-broken by
+**directional bias** (verdict + price location), not by JS Object.entries
+insertion order (former bug).
+
+```
+const verdictDir = verdict.cePct >= verdict.pePct ? 'CE' : 'PE';
+let locationDir = 'NEUTRAL';
+if (belowVWAP && belowVAL)        locationDir = 'PE';
+else if (aboveVWAP && aboveVAH)   locationDir = 'CE';
+else if (belowVWAP || belowVAL)   locationDir = 'PE';
+else if (aboveVWAP || aboveVAH)   locationDir = 'CE';
+const tieBreakDir = verdictSpread < 5 ? locationDir : verdictDir;
+```
+
+| Strategy | Triggers (each +1-3) |
+|---|---|
+| **BUY_ON_DIP_CE** | aboveVWAP +2 · abovePOC · peWriting +2 · buyersDominant +2 · supportHolding · deltaPos · pullbackBullish +2 · ceExpanding · rejectedBelow |
+| **SELL_ON_RISE_PE** | belowVWAP +2 · belowPOC · ceWriting +2 · sellersDominant +2 · resistanceCapping · deltaNeg · pullbackBearish +2 · peExpanding · rejectedAbove |
+| **BREAKOUT_CE_BUY** | aboveVAH +3 · acceptedAbove +2 · volSurge +2 · ceExpanding +2 · ceUnwinding · buyersDominant · deltaPos · `rejectedAbove −5` (hard veto) |
+| **BREAKDOWN_PE_BUY** | belowVAL +3 · acceptedBelow +2 · volSurge +2 · peExpanding +2 · ceWriting · sellersDominant · deltaNeg · `rejectedBelow −5` (hard veto) |
+| **RANGE_MARKET** | insideValue +3 · BALANCED dominance +2 · two-sided writing +2 · stagnant premium · neutral delta |
+
+`confidence = clamp(25 + topScore × 5 + edge × 8, 25, 92)`.
+
+Outputs: `key`, `verdict` (`BUY CE` / `BUY PE` / `WAIT`), `strategy` label,
+`side`, `strike` (forced into ATM ± 6 100-step window), `topReasons[]`,
+`scores`, `edge`, `ranked[]`.
+
+---
+
+## 14. AI Execution Engine — final brain
+
+Fuses every other engine into ONE decision. Calculates dynamic weights
+based on time-of-day and regime, then runs a 5-vote ballot.
+
+### Time-of-day weight modifiers
+
+| Phase | Trigger | Weight tweaks |
 |---|---|---|
-| Above VAH | +2 | — |
-| Below VAL | — | +2 |
-| Above VWAP | +2 | — |
-| Below VWAP | — | +2 |
-| premiumVel.state = CE_EXPANDING | +2 | — |
-| premiumVel.state = PE_EXPANDING | — | +2 |
-| Buyers dominant ≥65% | +1 | — |
-| Sellers dominant ≥65% | — | +1 |
-| Δ ≥ +10% | +1 | — |
-| Δ ≤ −10% | — | +1 |
-| Volume surge (last 5m vol > 1.5× prior-20 avg) | +1 | +1 |
-| Bull-trap rejection at VAH | **−4 veto** | — |
-| Bear-trap rejection at VAL | — | **−4 veto** |
+| `OPEN_DRIVE` | 09:15 – 09:45 IST | premium ×1.4, vwap ×0.7 (price hasn't settled) |
+| `MORNING_TREND` | 09:45 – 11:30 | balanced |
+| `MIDDAY_CHOP` | 11:30 – 13:30 | premium ×0.8, support ×1.3 |
+| `AFTERNOON_BUILD` | 13:30 – 14:30 | frvp ×1.3 |
+| `POWER_HOUR` | 14:30 – 15:00 | delta ×1.3, premium ×1.3 |
+| `CLOSING_DRIFT` | 15:00 – 15:30 | wait ×2.0 (entry cutoff) |
 
-Verdict:
-- score ≥ 7 ⇒ **HERO_CE** / **HERO_PE**, confidence = `min(95, 70 + score·3)` (so 7→91, 8→94, 9→95)
-- else **ZERO** (subreason = insideValue / bullTrap / bearTrap / premium-stagnant / mixed-flow)
-
-Target strike = closest 100-step OTM (`round((spot ± 100)/100) × 100`).
-
----
-
-## 11. Premium Momentum Engine
+### Late-entry / stretched-move filter
 
 ```
-ceExpansionPct = state==CE_EXPANDING ? 15 + skew·60
-               : state==PE_EXPANDING ? skew·40
-               : skew·30
-peExpansionPct = mirrored
+const distFromVwap = Math.abs(spot - vwap);
+const stretched = distFromVwap > atr * 1.5;
+const veryStretched = distFromVwap > atr * 2.5;
+lateEntryPenalty = stretched ? 15 : 0;  // veryStretched +25
 ```
 
-(skew = `(ceLtp − peLtp)/(ceLtp + peLtp)` from FRVP advanced overlay)
+### Voting ballot
 
-- **Sparklines**: 30-point series built from `((2c−h−l)/(h−l))` close-position proxy of the last 30 5m bars; CE rises on positive close-bias, PE on negative
-- **Momentum Quality** (max 100): `(|Δ|≥12 ? 35 : ≥6 ? 22 : 10) + (|expansion|≥20 ? 35 : ≥10 ? 22 : 8) + (writing ? 15 : 0) + (trendDay ? 15 : 5)` ⇒ STRONG ≥75, MODERATE ≥50, else WEAK
-- **Delta Speed**: AGGRESSIVE (|Δ|≥20), MODERATE (≥10), SLOW (≥4), FLAT
-- **Scalping Aggression**: `(volSurge ? 30 : 0) + (|Δ|≥10 ? 25 : 10) + (|expansion|≥15 ? 25 : 10) + (volHigh ? 20 : 10)` ⇒ HIGH ≥70, MODERATE ≥45, else LOW
-
----
-
-## 12. Trade Strategy Engine
-
-Five mutually-exclusive strategies scored independently. Highest score wins; if best score < 5 OR (no expansion + tiny delta) ⇒ forced to RANGE_MARKET.
-
-| Strategy | Max | Triggers |
+| Voter | Weight | Output |
 |---|---|---|
-| BUY_ON_DIP_CE | 13 | aboveVWAP +2, abovePOC +1, peWriting +2, buyersDominant +2, supportHolding +1, Δ≥+8 +1, vwapPullback +2, ceExpanding +1, bearTrapReject +1 |
-| SELL_ON_RISE_PE | 13 | mirror of above |
-| BREAKOUT_CE_BUY | 12 | aboveVAH +3, acceptedAbove +2, volSurge +2, ceExpanding +2, ceUnwinding +1, buyersDom +1, Δ≥+8 +1, **bullTrap −5 veto** |
-| BREAKDOWN_PE_BUY | 12 | mirror, **bearTrap −5 veto** |
-| RANGE_MARKET | 9 | insideValue +3, balancedFlow +2, two-sided writing +2, premium stagnant +1, Δ neutral +1 |
+| HeroZero | 30 × premium-boost | CE / PE / WAIT 10 |
+| TradeStrategy | 25-28 × frvp-boost | CE / PE / WAIT 18 |
+| BestTradePick | 20 | CE / PE / WAIT 8 |
+| MasterVerdict | 15 × vwap-boost | side or WAIT 5 |
+| DeltaBias | 10 × delta-boost | CE / PE / WAIT 5 |
 
-`confidence = clamp(40 + (score/maxScore)·50 + edge·2, 25..92)`.
+### Penalties
 
----
+- `wait += noTradeScore × 0.6`
+- if `lateEntryPenalty > 0` → blocker `Move stretched — late entry`
+- if `noTradeScore ≥ 60` → **hard WAIT veto**
 
-## 13. Trap Detection — `_trapDetection()`
-
-Heuristic per-row score (each true ⇒ +25):
-- **fakeBreakout**: spot > vwap and spot > ema9·1.005 but `deltaBias != 'bullish'`
-- **fakeBreakdown**: spot < vwap and spot < ema9·0.995 but `deltaBias != 'bearish'`
-- **premiumTrap**: ATM IV < 8% (no premium expansion possible)
-- **ivCrushRisk**: ATM IV > 30%
-
-Output `risk = high (≥75) | medium (≥40) | low`.
-
----
-
-## 14. Support / Resistance Pressure — `_supportResistance()`
-
+### Final action
 ```
-sStr = Σ supports(oi · 1/(1 + dist/50) + oiChange·0.5 · 1/(1 + dist/50))
-rStr = Σ resistances(...same...)
-pressureScore = sStr / (sStr + rStr) × 100
-verdict = BULLISH (≥55) | BEARISH (≤45) | NEUTRAL
+if votes.CE > votes.PE && votes.CE > votes.WAIT && votes.CE >= 35 → BUY CE
+if votes.PE > votes.CE && votes.PE > votes.WAIT && votes.PE >= 35 → BUY PE
+else → WAIT
 ```
 
-Top 2 PE strikes below ATM = supports; top 2 CE strikes above ATM = resistances.
-Pressure bar visualises CE walls (red, left) vs PE walls (green, right) — needle position = `pressureScore`.
+### Confidence
+```
+totalVotes = sum(votes)
+winningVote = votes[winningSide]
+base = winningVote / totalVotes × 100
+bonus = +5 if HERO mode, +5 if edge over runner-up >= 20
+penalty = lateEntryPenalty + noTradeScore × 0.3
+confidence = clamp(base + bonus - penalty, 0, 100)
+```
+
+### Card layout (recent redesign)
+- LEFT cluster: `BUY CE / BUY PE / WAIT` headline + target strike + lifecycle phase
+  PAIRED with a large 170 px slim 3-stroke confidence ring (42 px center text)
+- TOP of ring: No-Trade chip
+- RIGHT cluster: Entry Type panel (24 px label) + 3 vote chips (CE / PE / WAIT)
 
 ---
 
-## 15. AI Market Story (narrator)
+## 15. Trap Detection — `_trapDetection()`
 
-`marketStory` block — pure synthesis, zero new data. Writes one paragraph + bullet list using:
+Five trap classifiers. Each detected = +20 trap score. Risk:
+- ≥ 60 → high (kills HERO + flips action to WAIT)
+- ≥ 30 → medium (raises confidence penalty)
+- else → low
 
-1. **OI structure** narrative ("Heavy CE writing between X–Y…" / "Two-sided writing…")
-2. **Price location** ("Above VWAP and above POC — bullish acceptance")
-3. **Premium velocity** ("CE premiums expanding aggressively — buyers stepping up")
-4. **Dominance + delta** ("Sellers dominate flow with 80% pressure (Δ +14.7%)…")
-5. **Hero/Zero overlay** ("🚀 HERO CE setup active…" / "⚠ Bear trap detected…")
-6. **Verdict tilt** ("Bias tilts CE +6 pts" / "Bias balanced (CE 56 vs PE 44)")
-
-Headline derived from heroZero.verdict OR cePct/pePct ≥ 60.
-
----
-
-## 16. Buyers vs Sellers Donut
-
-Lives **inside** the FRVP card now. Renders `dominance.buyersScore` / `sellersScore` as a green/red donut, with delta below.
-
-- Center label = dominant side + percentage
-- Sellers/Buyers tags: `Dominating` (≥60), `Balanced` (≥45), `Weak`
-- Conviction badge: CONFIRMED (delta aligned) / DIVERGENT (delta opposed)
+| Trap | Trigger |
+|---|---|
+| **fakeBreakout** | spot pierced VAH but reverted within 2 bars |
+| **fakeBreakdown** | spot pierced VAL but reverted within 2 bars |
+| **liquiditySweep** | dayHigh swept then reversed sharply on volSurge |
+| **premiumTrap** | premium expanded > 30% then collapsed to baseline |
+| **oiTrap** | sudden OI build at one strike followed by unwind in next 2 bars |
 
 ---
 
-## 17. Writer Pressure Engine — Per-strike institutional grade
+## 16. Support / Resistance Pressure — `_supportResistance()`
 
-Top 5 strikes per side ranked by `|ΔOI|`, restricted to clean 100-step + ATM ± 6.
+Top 6 resistance + 6 support strikes ranked by OI. Card adds:
 
-Each row carries 8 metrics:
-- **OI Velocity**: `oiPct` ⇒ EXPLOSIVE ≥50, HIGH ≥25, MODERATE ≥10, SLOW ≥3, UNWINDING ≤−10, else FLAT
-- **Premium State**: cross of `oiChg` × `iv − atmIv` ⇒ FAST DECAY / DECAYING / STICKY / EXPANDING (CE) ; STRONG / STABLE / WEAKENING (PE)
-- **Delta Pressure**: depends on global delta bias + per-strike `|delta|` (SELLERS ACTIVE / BUYERS PUSHING etc.)
-- **Volume Burst**: `volume/oi ≥ 0.5` YES, ≥0.25 MILD, else NO
-- **Smart Money tag**: Long/Short Buildup / Short Covering / Long Unwinding (from oiChg sign × spot direction)
-- **Wall Strength** = velocity·25% + premium·20% + delta·20% + volume·15% + futures·10% + ivBehavior·10% ⇒ EXTREME ≥80, VERY STRONG ≥65, STRONG ≥50, MODERATE ≥35, else WEAK
-- **Trap Risk**: oiChg > 0 with opposite-side delta + futures contradiction ⇒ HIGH ≥60, MEDIUM ≥35, else LOW
-- **Futures Alignment**: based on basis sign vs writer-dominant side
+- **Pressure bar** with red-resistance-LEFT / green-support-RIGHT split,
+  needle position = `support strength / total × 100`
+- **Strike ladder** strip below the bar — 13 chips (ATM ± 6, 100-step),
+  positioned at `(i/12) × 100%` so each chip aligns exactly under the bar's
+  tick-mark for that strike
+- ATM chip is sky-blue + boxed; resistance walls light up red, support
+  walls light up green
+- Each chip rendered as `<span>` with absolute positioning + `translateX(-50%)`
+  for clean visual alignment
 
-Top-level summary: `writerControl` (CE/PE/BALANCED), `aggressionLevel`, `premiumHealth`, `confidence`.
+`pressureScore = supportStrength / (supportStrength + resistanceStrength) × 100`.
 
 ---
 
-## 18. Endpoint shape (high level)
+## 17. AI Market Story (narrator)
+
+Builds a 5-6 sentence narrative paragraph from the snapshot:
+
+1. OI structure summary (PE/CE writing zones)
+2. Price location vs VWAP + POC (uses `vaPrimary` now)
+3. Premium expansion direction
+4. Buyers vs Sellers dominance verdict
+5. Trade verdict (HERO + side OR WAIT/ZERO)
+6. Bias balance (`CE X vs PE Y`)
+
+Tone driven by `verdict.tone`. Builds at end of orchestrator pipeline so it
+sees every other engine's output.
+
+---
+
+## 18. Buyers vs Sellers Donut (inside FRVP card)
+
+Lives ONLY inside the 2.5 FRVP Institutional Map card (no longer
+duplicated in Row 1b). 150 × 150 px donut showing dominance + delta:
+
+- Green arc = `buyersScore`, red arc = `sellersScore` (sum to 100)
+- Center: dominant percentage + `BUYERS` / `SELLERS` / `BALANCED` label
+- Right legend: side counts + Δ delta footer with positive/negative tone
+- A 4-tile **Call/Put · Buyers/Sellers breakdown** sits ABOVE the donut:
+  - Call Buyers (bullish · green) — `ceBuy` weighted vol + `ceBuyersPct`
+  - Call Sellers (bearish · red) — `ceSell` weighted vol + `ceSellersPct`
+  - Put Buyers (bearish · red) — `peBuy` weighted vol + `peBuyersPct`
+  - Put Sellers (bullish · green) — `peSell` weighted vol + `peSellersPct`
+
+---
+
+## 19. Writer Pressure Engine (per-strike institutional grade)
+
+For each strike in the ladder, computes 8 metrics:
+
+1. **OI velocity** = ΔOI / prior-OI × 100
+2. **Premium state** = expanding / holding / decaying based on 5-bar trend
+3. **Delta pressure** = |delta| × OI × 100 (gamma exposure proxy)
+4. **Volume burst** = current vol > 1.5× prior-20 avg
+5. **Smart-money tag** = Long Buildup / Short Buildup / Long Unwinding / Short Covering
+6. **Wall strength** = OI / median-strike-OI ratio
+7. **Trap risk** = piercing without acceptance (1 if true)
+8. **Futures alignment** = side aligned with futures premium direction
+
+These power the ladder card and the Best Trade Pick reasoning.
+
+---
+
+## 20. Row 3 — Confirmation layer
+
+Each card uses a 2-column grid: **120 px pie LEFT · data RIGHT**. Pies are
+slim (10% stroke), 110 px diameter, with toned-down inner text (20% pct,
+9% sublabel relative to pie diameter).
+
+| Card | Pie meaning | Data side |
+|---|---|---|
+| **3.1 Delta + Volume** | real buying strength (`buy / (buy+sell) × 100`); tone = delta bias | Aggression pill · Bid/Ask Imb (real `(buy-sell)/(buy+sell)*100`) · Net Delta · Volume Exp |
+| **3.2 Market Breadth** | advancing % of total | Adv / Dec / A-D ratio / Participation |
+| **3.3 Heavyweights / Index Breadth** | **dual-slice donut**: green bull% + red bear% (computed against `adv+dec` only) with both percentages rendered inline; center stack `X% BULL / X/Y / X% BEAR` | Heatmap dot-grid of every constituent (50 NIFTY / 30 SENSEX) sorted DESC by changePct, color intensity scales with abs(changePct) capped at 3% |
+| **3.4 IV / VIX** | IV rank score 0-100 | India VIX · VIX Δ% · ATM IV · IV Crush yes/no |
+
+The 3.3 card reads `breadth.allStocks[]` (newly added) which contains every
+constituent's `{symbol, changePct, price}` sorted DESC. Title auto-adapts
+to `NIFTY 50 Breadth` / `SENSEX 30 Breadth` based on `data.symbol`.
+
+---
+
+## 21. Row 4 — Structure context
+
+Same 2-column pattern as Row 3. Pies show **directional strength** rather
+than raw percentages where applicable:
+
+| Card | Pie | Data |
+|---|---|---|
+| **4.1 VWAP / AVWAP** | how far stretched from VWAP, capped at ±0.5%. Green if above, red if below | VWAP · AVWAP · Reclaim yes/no |
+| **4.2 EMA (9/20/50)** | stack alignment: 100% if fully ascending or fully descending, 50% if partial | EMA values · Trend pill |
+| **4.3 CPR (Daily)** | bias strength: 100% outside CPR, 50% inside | TC · Pivot · BC · Status pill |
+| **4.4 Max Pain** | distance from MP as % of day's range | Max Pain · Expiry · Day range · Bias pill (BULL DRAW / BEAR DRAW) |
+
+---
+
+## 22. Row 5 — No-Trade Engine
+
+Eight binary conditions:
+
+| Key | Trigger |
+|---|---|
+| `chopMarket` | regime = range AND trap detected |
+| `weakPremium` | atmIv < 8 OR premiumTrap detected |
+| `weakDelta` | bias = neutral AND |cvd| < 3 |
+| `futuresDivergence` | |futPremium| > 50 |
+| `insideValue` | spot inside `vaPrimary` (uses unified band) |
+| `ivCrush` | vix.changePct < -3 |
+| `breadthWeak` | adRatio < 0.7 |
+| `heavyweightsWeak` | weighted impact < -0.3% |
+
+Result:
+- ≥ 4 flagged OR trap risk = high → **NO TRADE**
+- ≥ 2 flagged OR trap risk = medium → **CAUTION**
+- else → **SAFE TO TRADE**
+
+Result tile shows a slim 90 px pie (flagged/total) on the left with a
+ShieldCheck/AlertTriangle/ShieldX icon + verdict text on the right.
+
+---
+
+## 23. FII / DII Smart Money Flow card (Row 6)
+
+Bottom-row full-width card driven by Sensibull payload:
+
+### Section 1 — FUTURES OI table
+```
+Participant · Date · Buy OI · Sell OI · Net OI · Overall Bias
+```
+Sensibull doesn't publish Buy/Sell split for futures, so those cells render
+`—`. Net OI from `quantity-wise.net_oi`. Bias = `view + strength`
+(e.g. `BEARISH + Medium → "Medium Bearish"`).
+
+### Section 2 — INDEX OPTIONS OI table
+```
+Participant · Date · Call Buy · Call Sell · Call Net · Put Buy · Put Sell · Put Net · Overall Bias
+```
+Buy/Sell from `call.long.oi_change` / `call.short.oi_change` per side.
+For PRO (the only player with full long/short), all six numeric cells fill;
+other players get `—` on Buy/Sell with cumulative `net_oi` as the Net.
+
+### Section 3 — OVERALL BIAS panel
+- **Institutional Bias headline** = FII futures `view + strength`
+- **Reason bullets** auto-built from per-segment views (FII fut/opt
+  direction, CE pressure, PRO mix, contrarian client warning)
+- **Market Interpretation arrows**: directional playbook
+  (`SELL ON RISE preferred`, `BUY PE on resistance rejection`, etc.)
+
+---
+
+## 24. Endpoint shape (high level)
 
 ```ts
-interface IntelV2Snapshot {
-  ok: boolean;
-  symbol: 'NIFTY_50' | 'SENSEX' | 'BANKNIFTY';
-  date: string;            // YYYY-MM-DD
-  isToday: boolean;
-  market: { isOpen: boolean; phase: string };
-
-  spot:    { ltp, change, changePct, dayHigh, dayLow, priorClose, vwap, ema9, ema20, ema50, atr, rsi, sessionAvwap, priorAvwap, live, liveTickAgeMs };
-  futures: { ltp, premium, basisState, basis };
-  options: { atm, maxPain, atmIv, atmCall, atmPut, callWall, putWall, expiry };
-  cpr:     { pivot, tc, bc, r1, r2, r3, s1, s2, s3, width, widthPct, widthClass };
-
-  verdict:    { side, verdict, cePct, pePct, factors, weights };
-  bias:       { directionScore, overallBias, smartMoney, reasoning };
-  confidence: { winning, label };
-  trap:       { risk, score, detected, rows };
-  flow:       { delta, volume, oi };
-  macro:      { vix, giftNifty, sensex, usFutures, dxy, crude, nikkei, fiiDii };
-  heavyweights: { rows, weightedAvgChangePct, leaders, laggards };
-
-  ladder: LadderRow[];      // ATM ± 4 with health scores
-  tradePlan: { action, reason, pick };
-  riskManagement: { entryPrice, stopLoss, target1, target2, rr, ... };
-
+{
+  ok: true, version: 'v2', symbol, displayName,
+  date, isToday, fallbackUsed, at, dataSource,
+  market: { isOpen, phase, reason },
+  spot: { ltp, change, changePct, vwap, ema9/20/50, atr, rsi, sessionAvwap, priorAvwap, live, liveTickAgeMs },
+  futures: { ltp, premium, basisState, basis },
+  regime: { regime, dayType, volatility, trendStrength },
+  bias: { directionScore, overallBias, smartMoney, reasoning },
+  confidence: { winning, label },
+  trap: { risk, score, detected, rows[] },
+  flow: {
+    delta: { bias, cvd, totalBuy, totalSell, deltaPct, netDelta },
+    volume: { poc, vah, val, hvns[], lvns[] } | null,
+    oi: { ceWriting, peWriting, ceUnwinding, peUnwinding, pcr, ceTotal, peTotal },
+  },
+  options: { atm, maxPain, atmIv, atmCall, atmPut, callWall, putWall, expiry },
+  cpr: { pivot, tc, bc, r1..r3, s1..s3, width, widthPct, widthClass } | null,
+  avwap: { session, priorDay },
+  macro: {
+    vix, giftNifty, sensex, usFutures, dxy, crude, nikkei,
+    fiiDii: { date, cash, future, option }
+  },
+  heavyweights: { rows[8], weightedAvgChangePct, advancing, declining, leaders[3], laggards[3] },
+  verdict: { side, verdict, cePct, pePct, factors{}, weights{} },
+  tradePlan: { action, reason, pick },
+  ladder: LadderRow[],
+  tradingDay: { today, expiry, expiryDate, daysToExpiry, lotSize },
   dashboard: {
-    statusWidgets, tradingDay, spotFutSeries,
-    buildUp, buyerSellerFlow, auctionIntensity,
-    vwapAvwapIntraday, frvpAuction, frvpInstitutional,
-    futuresInfo, oiHistogram, oiShiftBias, oiBuildupAnalysis,
-    marketDirection, writerPressure,
-    cvdSeries, delta, frvpHistogram, breadth,
-    heavyweightsImpact, heavyweightsAlignment,
-    ivAnalytics, trapDetector, regimeClassification,
-    optionChainSnapshot, topStrikeSelections,
-    bestTradePick, tradeBoard, heroZero,
-    premiumMomentum, tradeStrategy, marketStory,
-    supportResistance, riskManagement,
-    keyLevels, noTradeConditions, liveAlerts,
-    spark1m, hints,
-  };
-
-  debug: { candleCounts, strikeCount, ladderCount, candleSource, optionChainSource };
+    statusWidgets: { marketState, smartMoney, futures, premium, delta, trapRisk, bestAction, confidence, oiStructure, vwap },
+    spotFutSeries: { spot[], futures[] },
+    buildUp, buyerSellerFlow, auctionIntensity, vwapAvwapIntraday,
+    frvpAuction, frvpInstitutional,
+    futuresInfo: { oi, oiChange, volume, ltp, premium, basis, basisTrend, interpretation },
+    oiHistogram[], oiShiftBias, oiBuildupAnalysis,
+    marketDirection: { directionMeter, resistances[6], supports[6], oiEstimatedMove },
+    cvdSeries[], delta: { totalBuyVol, totalSellVol, netDelta, deltaPct, bidAskImbalance, interpretation },
+    frvpHistogram[], priceAbovePoc,
+    breadth: { advancing, declining, unchanged, total, sampled, advancePct, leaders[5], laggards[5], allStocks[] },
+    heavyweightsImpact[8], heavyweightsTotalImpact, heavyweightsAlignment,
+    ivAnalytics: { vix, vixChangePct, atmIv, ivRank, trend[], interpretation },
+    trapDetector[], regimeClassification,
+    optionChainSnapshot[], topStrikeSelections,
+    tradeBoard: { bestOptionBuy, alternateScenario, riskGauge, executionContext },
+    heroZero, marketStory, tradeStrategy, executionEngine, premiumMomentum,
+    bestTradePick, supportResistance, riskManagement, keyLevels[], noTradeConditions,
+    liveAlerts[], spark1m[], hints{},
+  },
+  debug: { candleCounts, strikeCount, ladderCount, candleSource, optionChainSource },
 }
 ```
 
 ---
 
-## 19. Frontend layout (`/intel-v2`)
+## 25. Frontend layout (`/intel-v2`)
 
 ```
-┌── Top Header (live status, refresh, symbol picker) ─────────────────┐
-├── Row 1  — 8-tile quote ribbon (Spot/Fut/Sensex/GiftNifty/MaxPain/PCR/VIX/IV) ─┤
-├── Row 1a — HeroZeroCard (40%) | PremiumMomentumCard (30%) | TradeStrategyCard (30%) ─┤
-├── Row 1b — TradeBoard: BestOptionBuy | AlternateScenario | ExecutionContext ─┤
-├── Row 2  — 2.2 Combined (Writing Pressure + Market Direction, 60%) | 2.5 FRVP Map (40%) ─┤
-│                                  Support / Resistance Pressure (full width)
-├── Row 3  — Confirmation Layer (delta / breadth / heavyweights / iv-vix / fii-dii) ─┤
-├── Row 4  — Structure Context (vwap / ema-stack / cpr / max-pain) ────┤
-├── Row 5  — No-trade Engine (8 conditions) ──────────────────────────┤
-├── Row 6  — AI Market Story (narrator, full width) ──────────────────┤
-└── Bottom — Live Alerts ticker ──────────────────────────────────────┘
+TopHeaderV2 ─ logo + symbol toggle + DATE/STATUS/STATE/TIME tiles + refresh
+Row1MasterDecision ─ 8-tile institutional quote ribbon
+ExecutionEngineCard ─ AI Execution Engine (final brain) — 230 px
+Row1bTradeBoard ─ Hero/Zero (40%) + Premium Momentum (30%) + Trade Strategy (30%) — 260 px
+Row1bTradeBoard ─ Best Option Buy + Alternate Scenario + Execution Context (3 col)
+Row2InstitutionalFlow ─ 2.2 Market Direction (60%) + 2.5 FRVP Institutional Map (40%)
+Row3ConfirmationLayer ─ 3.1 Delta · 3.2 Breadth · 3.3 Heavyweights · 3.4 IV/VIX (12 col, 360 px)
+Row4StructureContext ─ 4.1 VWAP · 4.2 EMA · 4.3 CPR · 4.4 Max Pain (12 col, 300 px)
+Row5NoTradeEngine ─ 8 condition tiles + Result donut (200 px)
+MarketStoryCard ─ AI narrator (280 px)
+FiiDiiCard ─ Smart Money Flow full-width bottom row (700 px)
+AlertsTickerV2 ─ live alert strip
 ```
 
-Each row component reads only from `data.dashboard.*` — no raw computation in the React layer.
+Hidden / commented (kept for reference):
+- `Row6BottomPanel` — legacy bottom panel
+- `Row7AuctionPanel` — legacy auction view
+- `4.6 GIFT Nifty` — duplicate of Row 1 quote tile
 
 ---
 
-## 20. Key files
+## 26. Key files
 
 ```
 backend/src/
-  app.js                          # mounts /api/intel-v2
-  controllers/intelV2.controller.js
-  routes/intelV2.routes.js
-  services/intelV2.service.js     # orchestrator (3000 lines)
-  services/frvpEngine.service.js  # 14-section auction engine
-  services/algorithms/marketInternals.service.js  # FII/DII + breadth
-  config/symbolRegistry.js        # NIFTY_50, SENSEX, BANKNIFTY metadata
+  app.js                                       # mounts /api/intel-v2
+  routes/intelV2.routes.js                     # snapshot + available-dates endpoints
+  services/intelV2.service.js                  # orchestrator (~3400 lines)
+  services/frvpEngine.service.js               # 14-section auction engine
+  services/algorithms/marketInternals.service.js  # FII/DII Sensibull integration
+  services/niftyFuturesProd.service.js         # NIFTY futures contract resolver + live tick
+  services/dhanLiveFeedProd.service.js         # WebSocket packets 4/5/8 parser
+  services/marketHours.service.js              # IST market open/closed
+  services/sensexBackfill.service.js           # SENSEX put-call-parity premium derivation
+  config/symbolRegistry.js                     # NIFTY_50, SENSEX, BANKNIFTY metadata
 
 src/
-  routes/intel-v2.tsx                              # page shell + polling
-  hooks/useIntelV2Snapshot.ts                      # 3s polling, available-dates fetch
-  lib/intelV2Types.ts                              # full type tree
+  routes/intel-v2.tsx                          # page shell + 3s polling
+  hooks/useIntelV2Snapshot.ts                  # poll loop, available-dates fetch
+  lib/intelV2Types.ts                          # full type tree
   components/intelv2/dash/
-    common.tsx                  # V2Card, V2Pill, V2_TONE
-    TopHeader.tsx
-    Row1MasterDecision.tsx       # 8-tile ribbon
-    HeroZeroCard.tsx
-    PremiumMomentumCard.tsx
-    TradeStrategyCard.tsx
-    Row1bTradeBoard.tsx
-    Row2InstitutionalFlow.tsx    # combined 2.2 + 2.5 FRVP, S/R below
-    SupportResistanceCard.tsx
-    MarketDirectionCard.tsx      # standalone (now embedded in 2.2)
-    OiBuildupAnalysisCard.tsx    # legacy 2.3, retained but not rendered
-    Row3ConfirmationLayer.tsx
-    Row4StructureContext.tsx
-    Row5NoTradeEngine.tsx
-    Row6BottomPanel.tsx          # imported but NOT rendered
-    Row7AuctionPanel.tsx         # imported but NOT rendered
-    MarketStoryCard.tsx
-    AlertsTicker.tsx
+    common.tsx                                 # V2Card · V2Pill · V2_TONE · V2MiniPie
+    TopHeader.tsx                              # 4 neon tiles
+    Row1MasterDecision.tsx                     # 8-tile ribbon
+    Row1bTradeBoard.tsx                        # Best Option Buy / Alt / Exec Context
+    HeroZeroCard.tsx                           # ZERO / HERO_CE / HERO_PE
+    PremiumMomentumCard.tsx                    # CE / PE expansion sparklines
+    TradeStrategyCard.tsx                      # 5-strategy verdict
+    ExecutionEngineCard.tsx                    # final-brain card with big slim ring
+    Row2InstitutionalFlow.tsx                  # combined 2.2 + 2.5 FRVP, S/R below
+    SupportResistanceCard.tsx                  # pressure bar + 13-chip strike ladder
+    Row3ConfirmationLayer.tsx                  # 3.1-3.4 with pies
+    Row4StructureContext.tsx                   # 4.1-4.4 with pies
+    Row5NoTradeEngine.tsx                      # 8 tiles + Result donut
+    MarketStoryCard.tsx                        # AI narrator
+    FiiDiiCard.tsx                             # full-width FII/DII bottom row
+    AlertsTicker.tsx                           # live alert strip
 ```
 
 ---
 
-## 21. Operational notes
+## 27. Operational notes
 
-- **Backend**: `node src/server.js` from `backend/`. No nodemon — restart on code changes.
-- **Polling**: 3s interval in live mode; historical mode fetches once.
-- **Cache**: live=800ms, historical=60s, macro=60s. Hard-restart clears all caches.
-- **Clean restart**: `taskkill /F /PID <port-3000-pid>` then `node src/server.js`.
-- **Trading day**: 09:15–15:30 IST. Engine entry cutoff = 15:00 IST; square-off only after.
-- **Weekend**: snapshot falls back to the most-recent trading day automatically.
+- Backend has **no nodemon** — must hard-restart for code changes.
+  `taskkill /F /PID <pid>` then `node src/server.js` from `backend/`.
+- Cache TTL: live = 800 ms · historical = 60 s · macro/breadth = 60 s.
+- 3-second polling on the page side.
+- All option strike picks **must** be 100-step within ATM ± 6 (via the
+  `_hundredStepWindow()` helper). Even on indexes with 50-step chains
+  (NIFTY), the dashboard renders only the 100-step strikes.
+- Symbol registry: NIFTY_50 sid=13 step=50 · SENSEX sid=51 step=100 ·
+  BANKNIFTY sid=25 step=100.
+- NIFTY futures pulled via `niftyFuturesProd.service.js` (NSE_FNO).
+  SENSEX uses put-call parity for implied premium.
 
 ---
 
-## 22. Math invariants (sanity assertions)
+## 28. Math invariants (sanity assertions)
 
-These hold for every snapshot regardless of symbol/date:
+The engine guarantees:
 
-| Invariant | Why |
-|---|---|
-| `cePct + pePct === 100` | mirror split |
-| `verdict.factors.* ∈ [−60, +60]` | each factor pre-clamped |
-| `marketDirection.resistances` strikes are all `> anchor` and `% 100 === 0` | clean 100-step filter |
-| `marketDirection.supports` strikes are all `< anchor` and `% 100 === 0` | mirror |
-| `bestTradePick.ce.strike` and `bestTradePick.pe.strike` ∈ [anchor − 600, anchor + 600] AND `% 100 === 0` | `_hundredStepWindow` |
-| `tradeStrategy.ranked.length === 5` | always 5 strategies scored |
-| `heroZero.scores.{ce,pe} ∈ [−4, 9]` | hard-veto can drive negative |
-| `frvpInstitutional.engine.dominance.{buyersScore,sellersScore} sum to 100` | mirror |
+- `cePct + pePct === 100` always
+- `verdict.factors[k] × verdict.weights[k]` summed = `directionScore` × 2
+- `frvpInstitutional.engine.dominance.buyersScore + sellersScore === 100`
+- `flow.delta.totalBuy + totalSell` = total option chain volume in window
+- `breadth.advancing + declining + unchanged ≤ breadth.total`
+- All option strike picks in `tradeBoard`, `bestTradePick`, `heroZero`,
+  `tradeStrategy`, `executionEngine` lie within ATM ± 600 pts (6 strikes
+  × 100-step) and are divisible by 100.
+- `executionEngine.votes.ce + pe + wait` does not necessarily = 100; raw
+  weighted sums are kept so the relative magnitudes are preserved.
 
-These can be added as backend integration tests if you want a regression net.
+---
+
+## 29. Recent fixes & lessons
+
+| Bug | Symptom | Fix |
+|---|---|---|
+| `bidAskImbalance` hardcoded | always 0 in 3.1 Delta card | replaced with real `((buy-sell)/(buy+sell))×100` |
+| `futuresInfo.oi` / `oiChange` hardcoded | always 0 | wired to live `niftyFuturesProd.getLiveTick()` |
+| FRVP buyers/sellers always ~50/50 | `(ceBuyersPct + peBuyersPct)/2` averaged opposite signals | replaced with `bullishVol/(bullishVol+bearishVol)*100` |
+| Premium Momentum reported `CE_EXPANDING` always | static skew formula = LTP ratio, not derivative | added per-symbol ring buffer with 8-min baseline window |
+| HeroZero / TradeStrategy / Exec said "Inside Value" while FRVP said "Below Value" | two different VAH/VAL bands in snapshot | unified through `vaPrimary` constant (engine-profile preferred) |
+| Trade Strategy tie-break used JS insertion order | always preferred BUY_ON_DIP_CE on tie | tie-break by `(verdict, location)` composite |
+| `expiry.slice` crash when expiry was Date or number | `Row4StructureContext` MaxPain card crashed | added `typeof expiry === 'string'` guard |
+| `DHAN_CLIENT_ID missing` 401 loop | live feed never started | added explicit `DHAN_CLIENT_ID` env var (extracted from JWT payload) |
+
+---
+
+*Last updated: dashboard recompose pass — slim pie charts, FRVP fixes, premium momentum ring buffer, vaPrimary unification, header tile redesign, full breadth dot grid, dual-slice bull/bear pie.*
