@@ -1288,10 +1288,14 @@ function _masterVerdict({ pcr, peWriting, ceWriting, spot, vwap, ema9, ema20, em
   f.breadth = breadthAdvancePct != null
     ? Math.max(-40, Math.min(40, (breadthAdvancePct - 50) * 0.8)) : 0;
 
+  // Weight rebalance — PCR is unreliable intraday (stale positioning,
+  // overnight carry, hedges). Reduce its weight from 0.10 → 0.03 and
+  // redistribute toward delta + flow which are far more reliable for
+  // same-day directional reads. Net weight stays ≈ 1.0.
   const W = {
-    pcr: 0.10, oiWriters: 0.10, vwap: 0.08, ema: 0.10, cpr: 0.06,
+    pcr: 0.03, oiWriters: 0.10, vwap: 0.10, ema: 0.10, cpr: 0.06,
     heavyweights: 0.10, vix: 0.05, gift: 0.06, fiiDii: 0.08,
-    futures: 0.07, delta: 0.10, iv: 0.04, breadth: 0.06,
+    futures: 0.07, delta: 0.13, iv: 0.04, breadth: 0.08,
   };
   let composite = 0;
   for (const k of Object.keys(W)) composite += (f[k] || 0) * W[k];
@@ -3645,13 +3649,84 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
     else if (veryStretched) lifecyclePhase = 'EXHAUSTION';
     else lifecyclePhase = 'ENTRY';
 
+    // ─── CONFLICT SCORE — penalise confidence when independent signals disagree ───
+    // Real-world A+ trades require multiple INDEPENDENT signals to align.
+    // Without this, all engines pulling from the same underlying move stack
+    // false confidence (overfitting). We list the 6 most-independent signals
+    // and tally how many AGREE with the chosen action vs how many disagree.
+    //
+    // For BUY CE: we expect bullish reads on each. For BUY PE: bearish.
+    // For WAIT: we just count how many engines flagged neutrality.
+    const conflictSignals = [];
+    if (action !== 'WAIT') {
+      const expectBull = action === 'BUY CE';
+      const tag = (k, isBull, isBear) => {
+        const aligned = expectBull ? isBull : isBear;
+        const opposed = expectBull ? isBear : isBull;
+        conflictSignals.push({ key: k, aligned, opposed });
+      };
+      // 1. Master verdict direction
+      tag('verdict', verdict.cePct >= 55, verdict.pePct >= 55);
+      // 2. Delta flow bias (independent of verdict)
+      tag('delta', fDelta?.bias === 'bullish', fDelta?.bias === 'bearish');
+      // 3. Breadth bias
+      const bAdv = breadth?.advancePct ?? 50;
+      tag('breadth', bAdv >= 55, bAdv <= 45);
+      // 4. Heavyweights net impact
+      const hImp = heavyTotalImpact ?? 0;
+      tag('heavy', hImp > 0.10, hImp < -0.10);
+      // 5. VIX direction (rising VIX = bearish)
+      const vixCh = macro?.vix?.changePct ?? 0;
+      tag('vix', vixCh < -1, vixCh > 1);
+      // 6. Futures basis
+      tag('futures', (futPremium ?? 0) > 10, (futPremium ?? 0) < -10);
+    } else {
+      // For WAIT we treat every neutral signal as "aligned" with WAIT, every
+      // strongly directional one as "opposed".
+      const neutralCount = (verdict.cePct < 55 && verdict.pePct < 55 ? 1 : 0)
+        + (fDelta?.bias === 'neutral' ? 1 : 0)
+        + (Math.abs((breadth?.advancePct ?? 50) - 50) < 8 ? 1 : 0);
+      for (let i = 0; i < neutralCount; i++) conflictSignals.push({ key: 'neutral', aligned: true, opposed: false });
+      const directionalCount = 6 - neutralCount;
+      for (let i = 0; i < Math.max(0, directionalCount); i++) conflictSignals.push({ key: 'directional', aligned: false, opposed: true });
+    }
+    const alignedCount = conflictSignals.filter(s => s.aligned).length;
+    const opposedCount = conflictSignals.filter(s => s.opposed).length;
+    const totalCount = conflictSignals.length || 1;
+    // 0 = full disagreement, 100 = full agreement
+    const independenceScore = Math.round(((alignedCount - opposedCount) / totalCount) * 100 + 50);
+    const conflictPenalty = Math.max(0, opposedCount * 8); // each opposing engine knocks 8 pts off
+
+    // Apply conflict penalty
+    const adjustedConfidence = Math.max(0, Math.min(100, confidence - conflictPenalty));
+
+    // ─── CONFIDENCE GRADE — replace bare percentages with letter grades ───
+    // Market probability isn't measurable to 1% precision. Grades convey
+    // the realistic uncertainty band.
+    const grade =
+      adjustedConfidence >= 90 ? 'A+'
+      : adjustedConfidence >= 80 ? 'A'
+      : adjustedConfidence >= 70 ? 'B'
+      : adjustedConfidence >= 55 ? 'C'
+      : 'D';
+    const convictionLabel =
+      adjustedConfidence >= 80 ? 'HIGH'
+      : adjustedConfidence >= 60 ? 'MEDIUM'
+      : adjustedConfidence >= 40 ? 'LOW'
+      : 'AVOID';
+
     return {
       action,                                      // BUY CE | BUY PE | WAIT
       mode,                                        // HERO | NORMAL | AVOID
       entryType,                                   // Breakout / Buy Dip / Sell Rise / Reversal / Continuation / None
       targetSide,                                  // CE | PE | null
       targetStrike,                                // round 100-step strike
-      confidence,                                  // 0..100
+      confidence: adjustedConfidence,              // 0..100 (after conflict penalty)
+      rawConfidence: confidence,                   // 0..100 (before penalty — kept for transparency)
+      grade,                                       // A+ | A | B | C | D
+      convictionLabel,                             // HIGH | MEDIUM | LOW | AVOID
+      independenceScore,                           // 0..100 — how many independent engines agree
+      conflictPenalty,                             // pts subtracted from raw confidence
       tone: action === 'BUY CE' ? 'bull'
           : action === 'BUY PE' ? 'bear' : 'warn',
       lifecyclePhase,                              // STANDBY | ENTRY | MOMENTUM | EXHAUSTION

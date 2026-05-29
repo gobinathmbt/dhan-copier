@@ -108,20 +108,38 @@ export function ExecutionEngineCard({ data }: { data: IntelV2Snapshot | null }) 
 
           {/* Big slim confidence ring sits next to BUY CE */}
           <div className="flex flex-col items-center justify-center gap-1">
-            {/* No-Trade chip — sits ABOVE the ring */}
-            <span
-              className="rounded-sm px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
-              style={{
-                background: ee.noTradeScore >= 60 ? "rgba(239,68,68,0.20)"
-                  : ee.noTradeScore >= 30 ? "rgba(250,204,21,0.20)"
-                  : "rgba(34,197,94,0.20)",
-                color: ee.noTradeScore >= 60 ? "#ef4444"
-                  : ee.noTradeScore >= 30 ? "#facc15"
-                  : "#22c55e",
-              }}
-            >
-              No-Trade {ee.noTradeScore}
-            </span>
+            {/* No-Trade chip + independence score — sits ABOVE the ring */}
+            <div className="flex items-center gap-1.5">
+              <span
+                className="rounded-sm px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
+                style={{
+                  background: ee.noTradeScore >= 60 ? "rgba(239,68,68,0.20)"
+                    : ee.noTradeScore >= 30 ? "rgba(250,204,21,0.20)"
+                    : "rgba(34,197,94,0.20)",
+                  color: ee.noTradeScore >= 60 ? "#ef4444"
+                    : ee.noTradeScore >= 30 ? "#facc15"
+                    : "#22c55e",
+                }}
+              >
+                No-Trade {ee.noTradeScore}
+              </span>
+              {ee.independenceScore != null ? (
+                <span
+                  className="rounded-sm px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
+                  style={{
+                    background: ee.independenceScore >= 70 ? "rgba(34,197,94,0.20)"
+                      : ee.independenceScore >= 50 ? "rgba(250,204,21,0.20)"
+                      : "rgba(239,68,68,0.20)",
+                    color: ee.independenceScore >= 70 ? "#22c55e"
+                      : ee.independenceScore >= 50 ? "#facc15"
+                      : "#ef4444",
+                  }}
+                  title="How many independent engines agree on this verdict (vs measuring the same underlying signal differently)"
+                >
+                  Indep {ee.independenceScore}
+                </span>
+              ) : null}
+            </div>
             <div className="relative h-[170px] w-[170px]">
               <svg viewBox="0 0 100 100" className="h-full w-full -rotate-90">
                 <circle cx="50" cy="50" r="44" fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="3" />
@@ -135,10 +153,13 @@ export function ExecutionEngineCard({ data }: { data: IntelV2Snapshot | null }) 
               </svg>
               <div className="absolute inset-0 flex flex-col items-center justify-center">
                 <span className="font-mono text-[42px] font-black leading-none" style={{ color: accent }}>
-                  {ee.confidence}%
+                  {ee.grade ?? `${ee.confidence}%`}
                 </span>
-                <span className="mt-1 text-[9px] font-bold uppercase tracking-[0.18em] text-white/55">
-                  Confidence
+                <span className="mt-1 text-[10px] font-bold uppercase tracking-[0.18em]" style={{ color: accent, opacity: 0.85 }}>
+                  {ee.convictionLabel ?? "Confidence"}
+                </span>
+                <span className="mt-0.5 text-[9px] font-mono text-white/45">
+                  {ee.confidence}%
                 </span>
               </div>
             </div>
@@ -165,7 +186,29 @@ export function ExecutionEngineCard({ data }: { data: IntelV2Snapshot | null }) 
         </div>
       </div>
 
-      {/* WHY / WHY NOT row */}
+      {/* WHY / WHY NOT row — when blockers exist, WHY NOT renders FIRST
+          so the "reasons to avoid" question is answered before "reasons
+          to enter". This matches institutional checklist priority. */}
+      {ee.blockers.length > 0 ? (
+        <div className="rounded-md border border-amber-500/50 bg-amber-500/[0.10] px-2.5 py-1.5">
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-bold uppercase tracking-[0.20em] text-amber-300">
+              ⚠ Why Not
+            </span>
+            <div className="flex flex-wrap gap-1">
+              {ee.blockers.map((b, i) => (
+                <span
+                  key={i}
+                  className="rounded-sm border border-amber-500/40 bg-amber-500/20 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-200"
+                >
+                  {b}
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div className="grid grid-cols-2 gap-2">
         {/* WHY (supportive reasons) */}
         {ee.reasons.length > 0 ? (
@@ -190,28 +233,12 @@ export function ExecutionEngineCard({ data }: { data: IntelV2Snapshot | null }) 
           </div>
         ) : <div />}
 
-        {/* WHY NOT (blockers) */}
-        {ee.blockers.length > 0 ? (
-          <div className="rounded-md border border-amber-500/40 bg-amber-500/[0.06] px-2 py-1">
-            <span className="text-[8px] font-bold uppercase tracking-[0.16em] text-amber-300">
-              ⚠ Why Not
-            </span>
-            <div className="mt-0.5 flex flex-wrap gap-1">
-              {ee.blockers.map((b, i) => (
-                <span
-                  key={i}
-                  className="rounded-sm border border-amber-500/30 bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-amber-200"
-                >
-                  {b}
-                </span>
-              ))}
-            </div>
-          </div>
-        ) : (
+        {/* All-clear chip when no blockers */}
+        {ee.blockers.length === 0 ? (
           <div className="rounded-md border border-emerald-500/30 bg-emerald-500/[0.06] px-2 py-1 text-center text-[10px] font-bold uppercase tracking-wider text-emerald-300">
             ✓ All filters passed
           </div>
-        )}
+        ) : <div />}
       </div>
     </div>
   );

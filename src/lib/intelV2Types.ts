@@ -674,6 +674,11 @@ export interface IntelV2Snapshot {
       targetSide: "CE" | "PE" | null;
       targetStrike: number | null;
       confidence: number;
+      rawConfidence?: number;
+      grade?: "A+" | "A" | "B" | "C" | "D";
+      convictionLabel?: "HIGH" | "MEDIUM" | "LOW" | "AVOID";
+      independenceScore?: number;
+      conflictPenalty?: number;
       tone: "bull" | "bear" | "warn";
       lifecyclePhase: "STANDBY" | "ENTRY" | "MOMENTUM" | "EXHAUSTION";
       regime:

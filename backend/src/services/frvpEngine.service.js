@@ -277,11 +277,32 @@ const _TAG_WEIGHTS = {
   'Short Buildup':  { buy: 0.20, sell: 0.80 },
 };
 
-function _classifyBuildup(side, oiChg, spotChange) {
-  // For CE side: spot up + OI up = long buildup (CE buyers); spot down + OI up = short buildup (CE writers)
-  // For PE side: spot down + OI up = long buildup (PE buyers); spot up + OI up = short buildup (PE writers)
+function _classifyBuildup(side, oiChg, spotChange, ltpChg) {
+  // Proper institutional classification — uses OI direction PLUS premium
+  // direction to disambiguate the four states. Spot direction is only used
+  // as a tie-breaker when premium signal is missing.
+  //
+  //   OI ↑ + Premium ↑ = Long Buildup    (new longs taking position)
+  //   OI ↑ + Premium ↓ = Short Buildup   (writers selling premium)
+  //   OI ↓ + Premium ↑ = Short Covering  (writers covering, premium rising)
+  //   OI ↓ + Premium ↓ = Long Unwinding  (longs exiting, premium falling)
+  //
+  // For PE side the premium direction is mirrored against spot move (PE
+  // premium rises when spot falls), so we reuse the same matrix.
   const oiUp = oiChg > 0;
   const oiDown = oiChg < 0;
+  const premUp = ltpChg != null && ltpChg > 0;
+  const premDown = ltpChg != null && ltpChg < 0;
+  const havePrem = premUp || premDown;
+
+  if (havePrem) {
+    if (oiUp && premUp)   return 'Long Buildup';
+    if (oiUp && premDown) return 'Short Buildup';
+    if (oiDown && premUp) return 'Short Covering';
+    if (oiDown && premDown) return 'Long Unwinding';
+  }
+
+  // Fallback to spot-based heuristic when premium delta isn't available.
   const spotUp = (spotChange ?? 0) >= 0;
   if (side === 'CE') {
     if (oiUp && spotUp) return 'Long Buildup';

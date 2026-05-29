@@ -280,7 +280,7 @@ function CombinedMarketDirectionBody({ data }: { data: IntelV2Snapshot | null })
       </div>
 
       {/* 3. OI Estimated Move */}
-      <div className="flex flex-col gap-1.5">
+      {/* <div className="flex flex-col gap-1.5">
         <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-sky-300">OI Estimated Move</span>
         <div className="grid grid-cols-3 gap-2">
           <CombinedTargetTile label="Upside Target" value={move.upsideTarget} tone="bull" icon="▲" />
@@ -292,7 +292,7 @@ function CombinedMarketDirectionBody({ data }: { data: IntelV2Snapshot | null })
             </span>
           </div>
         </div>
-      </div>
+      </div> */}
     </div>
   );
 }
