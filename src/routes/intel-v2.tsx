@@ -53,7 +53,7 @@ function IntelV2Page() {
   }, [symbol]);
 
   return (
-    <div className="fixed inset-0 left-16 flex flex-col bg-[#070a0e] text-white">
+    <div className="intelv2-root fixed inset-0 left-16 flex flex-col bg-[#070a0e] text-white">
       <TopHeaderV2
         data={data}
         symbol={symbol}
@@ -87,14 +87,14 @@ function IntelV2Page() {
         <Row5NoTradeEngine data={data} />
         <div className="min-h-[280px]"><MarketStoryCard data={data} /></div>
         {/* Full-width Smart Money Flow — FII/DII/PRO/CLIENT institutional positioning (BOTTOM ROW) */}
-        <div className="h-[700px] flex-shrink-0"><FiiDiiCard data={data} /></div>
+        <div className="h-[920px] flex-shrink-0"><FiiDiiCard data={data} /></div>
         {/* Sections below are commented out per dashboard simplification.
             Auction panel + bottom panel remain implemented but hidden. */}
         {/* <Row7AuctionPanel data={data} /> */}
         {/* <Row6BottomPanel data={data} /> */}
       </main>
 
-      <AlertsTickerV2 data={data} />
+      {/* <AlertsTickerV2 data={data} /> */}
     </div>
   );
 }

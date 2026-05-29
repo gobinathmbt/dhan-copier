@@ -364,7 +364,7 @@ function LevelHeader() {
     <div className="grid grid-cols-[1.4fr_72px_44px_46px_60px_1fr] items-center gap-1.5 px-2 text-[8px] font-bold uppercase tracking-wider text-white/45">
       <span>Tier</span>
       <span className="text-right">Strike</span>
-      <span className="text-right">OI Build</span>
+      <span className="text-center">OI Build</span>
       <span className="text-right">Change</span>
       <span className="text-center">Strength</span>
       <span className="text-right">Interpretation</span>

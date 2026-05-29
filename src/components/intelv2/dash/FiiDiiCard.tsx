@@ -178,7 +178,7 @@ export function FiiDiiCard({ data }: { data: IntelV2Snapshot | null }) {
         </span>
       }
     >
-      <div className="-m-1.5 flex min-h-0 flex-1 flex-col gap-2.5 p-1.5 pr-2">
+      <div className="-m-1.5 flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto p-1.5 pr-2">
         {/* ============ SECTION 1 — FUTURES ============ */}
         <SectionTitle title="FUTURES" date={fd.date} />
         <div className="overflow-hidden rounded-md border border-white/[0.10]">

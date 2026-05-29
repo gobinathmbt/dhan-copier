@@ -159,3 +159,39 @@
     border-radius: 2px;
   }
 }
+
+
+/* ─────────────────────────────────────────────────────────────────────
+ * /intel-v2 dashboard — global readability boost.
+ *  • Bumps base font size by ~14% so 10/11/12px chips read at 11/13/14px
+ *  • Slightly lifts low-weight text to medium so muted labels stay legible
+ *  • Scoped to .intelv2-root so it doesn't affect other pages
+ * ───────────────────────────────────────────────────────────────────── */
+.intelv2-root {
+  font-size: 14px;          /* was 13px (Tailwind base) — bumps everything ≈ +8% */
+}
+
+.intelv2-root .text-\[7px\]   { font-size: 9px;  }
+.intelv2-root .text-\[8px\]   { font-size: 10px; }
+.intelv2-root .text-\[9px\]   { font-size: 11px; }
+.intelv2-root .text-\[10px\]  { font-size: 12px; }
+.intelv2-root .text-\[11px\]  { font-size: 13px; }
+.intelv2-root .text-\[12px\]  { font-size: 14px; }
+.intelv2-root .text-\[13px\]  { font-size: 15px; }
+.intelv2-root .text-\[14px\]  { font-size: 16px; }
+.intelv2-root .text-\[15px\]  { font-size: 17px; }
+
+/* Lift muted text — anything at default weight gets a touch more spine
+ * so it doesn't blur into the dark background. Big numbers / pills /
+ * headlines retain their weights since they're already explicit. */
+.intelv2-root :where(span, div, li, td, th, label):not([class*="font-bold"]):not([class*="font-black"]):not([class*="font-semibold"]):not([class*="font-mono"]) {
+  font-weight: 500;
+}
+
+/* Bump low-opacity utility classes by one tier so muted labels remain
+ * readable at the larger size. */
+.intelv2-root .text-white\/35 { color: rgba(255, 255, 255, 0.50); }
+.intelv2-root .text-white\/40 { color: rgba(255, 255, 255, 0.55); }
+.intelv2-root .text-white\/45 { color: rgba(255, 255, 255, 0.60); }
+.intelv2-root .text-white\/55 { color: rgba(255, 255, 255, 0.70); }
+.intelv2-root .text-white\/65 { color: rgba(255, 255, 255, 0.78); }
