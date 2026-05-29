@@ -652,9 +652,9 @@ export interface IntelV2Snapshot {
       builtAt: number;
     };
     tradeStrategy: {
-      key: "BUY_ON_DIP_CE" | "SELL_ON_RISE_PE" | "BREAKOUT_CE_BUY" | "BREAKDOWN_PE_BUY" | "RANGE_MARKET";
+      key: "BUY_ON_DIP_CE" | "SELL_ON_RISE_PE" | "BREAKOUT_CE_BUY" | "BREAKDOWN_PE_BUY" | "RANGE_MARKET" | "PULLBACK_CE_BUY" | "PULLBACK_PE_BUY" | "RANGE_SCALP" | "NO_TRADE";
       verdict: "BUY CE" | "BUY PE" | "WAIT";
-      strategy: "BUY ON DIP" | "SELL ON RISE" | "BREAKOUT BUY" | "BREAKDOWN BUY" | "RANGE MARKET";
+      strategy: "BUY ON DIP" | "SELL ON RISE" | "BREAKOUT BUY" | "BREAKDOWN BUY" | "RANGE MARKET" | "PULLBACK CE BUY" | "PULLBACK PE BUY" | "RANGE SCALP" | "NO TRADE";
       icon: string;
       side: "CE" | "PE" | null;
       strike: number | null;
@@ -666,6 +666,14 @@ export interface IntelV2Snapshot {
       scores: Record<string, number>;
       edge: number;
       ranked: Array<{ key: string; score: number }>;
+      // ── Pure-logic state machine outputs (Phase 1 upgrade) ──
+      marketState?: "TREND_DISCOVERY" | "RANGE_ROTATION" | "GAMMA_PINNED" | "PANIC_EXPANSION" | "OPENING_AUCTION";
+      flowState?: "BUYERS_DOMINANT" | "SELLERS_DOMINANT" | "ABSORPTION" | "EXHAUSTION" | "BALANCED";
+      structureState?: "STRONG_BULLISH" | "STRONG_BEARISH" | "NEUTRAL";
+      entryQuality?: "GOOD" | "PULLBACK" | "LATE" | "NO_EDGE";
+      invalidations?: string[];
+      riskLevel?: "LOW" | "MEDIUM" | "HIGH";
+      gatedKey?: string;
     };
     executionEngine: {
       action: "BUY CE" | "BUY PE" | "WAIT";

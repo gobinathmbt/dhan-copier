@@ -2,18 +2,24 @@ import type { IntelV2Snapshot } from "@/lib/intelV2Types";
 import { V2Card, V2_TONE } from "./common";
 
 /**
- * TRADE STRATEGY ENGINE
+ * 🎯 TRADE STRATEGY ENGINE — pure-logic state-driven hierarchy.
  * ========================================================================
- * Classifies the current setup into one of five strategies:
+ * Replaces the legacy "score-accumulation" verdict with an institutional
+ * 5-layer state machine:
  *
- *   🟢 BUY ON DIP        — bullish trend pullback (BUY CE)
- *   🔴 SELL ON RISE      — bearish trend pullback (BUY PE)
- *   🚀 BREAKOUT BUY      — momentum break above VAH (BUY CE)
- *   🚀 BREAKDOWN BUY     — momentum break below VAL (BUY PE)
- *   🟡 RANGE MARKET      — inside value, no directional edge
+ *   MARKET STATE   → can this strategy even exist?
+ *   FLOW STATE     → who is pressing right now?
+ *   STRUCTURE      → where is price relative to value?
+ *   ENTRY QUALITY  → is timing good NOW?
+ *   STRATEGY       → final action (BUY CE / BUY PE / WAIT)
+ *   INVALIDATION   → what proves this trade WRONG?
  *
- * Sources: data.dashboard.tradeStrategy (computed from VWAP / FRVP /
- * dominance / delta / OI walls / premium velocity / volume surge).
+ * Backend lives at `data.dashboard.tradeStrategy` and exposes the new
+ * fields: marketState, flowState, structureState, entryQuality,
+ * invalidations[], riskLevel, gatedKey.
+ *
+ * The card is built with overflow-y-auto so long invalidation lists
+ * never bleed past the card boundary.
  */
 export function TradeStrategyCard({ data }: { data: IntelV2Snapshot | null }) {
   const ts = data?.dashboard?.tradeStrategy;
@@ -26,8 +32,42 @@ export function TradeStrategyCard({ data }: { data: IntelV2Snapshot | null }) {
       </V2Card>
     );
   }
+
   const t = V2_TONE[ts.tone];
-  const isWait = ts.verdict === "WAIT";
+  const isWait = ts.verdict === "WAIT" || ts.gatedKey === "NO_TRADE";
+
+  // Tone helpers for the state pills
+  const stateTone: Record<string, "bull" | "bear" | "warn" | "info" | "neutral"> = {
+    TREND_DISCOVERY: "info",
+    RANGE_ROTATION: "warn",
+    GAMMA_PINNED: "neutral",
+    PANIC_EXPANSION: "bear",
+    OPENING_AUCTION: "warn",
+  };
+  const flowTone: Record<string, "bull" | "bear" | "warn" | "neutral"> = {
+    BUYERS_DOMINANT: "bull",
+    SELLERS_DOMINANT: "bear",
+    ABSORPTION: "warn",
+    EXHAUSTION: "warn",
+    BALANCED: "neutral",
+  };
+  const structureTone: Record<string, "bull" | "bear" | "warn"> = {
+    STRONG_BULLISH: "bull",
+    STRONG_BEARISH: "bear",
+    NEUTRAL: "warn",
+  };
+  const entryTone: Record<string, "bull" | "bear" | "warn" | "neutral"> = {
+    GOOD: "bull",
+    PULLBACK: "bull",
+    LATE: "bear",
+    NO_EDGE: "neutral",
+  };
+
+  const ms = ts.marketState ?? "RANGE_ROTATION";
+  const fs = ts.flowState ?? "BALANCED";
+  const ss = ts.structureState ?? "NEUTRAL";
+  const eq = ts.entryQuality ?? "NO_EDGE";
+  const risk = ts.riskLevel ?? "MEDIUM";
 
   return (
     <V2Card
@@ -39,15 +79,15 @@ export function TradeStrategyCard({ data }: { data: IntelV2Snapshot | null }) {
       }
       accent={ts.tone}
     >
-      <div className="-m-1.5 flex min-h-0 flex-1 flex-col gap-1.5 overflow-hidden p-1.5">
-        {/* HEADLINE — strategy label + verdict */}
+      <div className="-m-1.5 flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto p-1.5 pr-2">
+        {/* ─── LAYER 5 — STRATEGY (headline) ─────────────────────────── */}
         <div
           className="flex items-center gap-2 rounded-md border px-2.5 py-1.5"
           style={{ background: t.soft, borderColor: t.border }}
         >
           <span className="text-[18px] leading-none">{ts.icon}</span>
           <div className="flex flex-col">
-            <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-white/55">
+            <span className="text-[9px] font-bold uppercase tracking-[0.18em] text-white/55">
               Strategy
             </span>
             <span
@@ -58,19 +98,19 @@ export function TradeStrategyCard({ data }: { data: IntelV2Snapshot | null }) {
             </span>
           </div>
           <div className="ml-auto flex flex-col items-end">
-            <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-white/55">
+            <span className="text-[9px] font-bold uppercase tracking-[0.18em] text-white/55">
               Verdict
             </span>
             <span
               className="text-[14px] font-black uppercase leading-none tracking-wider"
               style={{ color: t.color }}
             >
-              {ts.verdict}
+              {isWait ? "NO TRADE" : ts.verdict}
             </span>
           </div>
         </div>
 
-        {/* TRADE BLOCK — strike + confidence */}
+        {/* TRADE BLOCK — strike + risk pill */}
         {!isWait && ts.strike != null ? (
           <div
             className="grid grid-cols-[1fr_auto] items-center gap-2 rounded-md border px-2.5 py-1.5"
@@ -86,14 +126,20 @@ export function TradeStrategyCard({ data }: { data: IntelV2Snapshot | null }) {
               </span>
               <span className="text-[9px] text-white/55">{ts.subline}</span>
             </div>
-            <div
-              className="rounded-md border px-2 py-1 text-center"
-              style={{ borderColor: t.border, background: "rgba(255,255,255,0.02)" }}
-            >
-              <div className="text-[8px] font-bold uppercase tracking-[0.16em] text-white/55">Confidence</div>
-              <div className="font-mono text-[18px] font-black leading-none" style={{ color: t.color }}>
-                {ts.confidence}%
-              </div>
+            <div className="flex flex-col items-center gap-1">
+              <span
+                className="rounded-md px-2 py-1 text-[10px] font-bold uppercase tracking-wider"
+                style={{
+                  background: risk === "LOW" ? "rgba(34,197,94,0.18)"
+                    : risk === "HIGH" ? "rgba(239,68,68,0.18)"
+                    : "rgba(250,204,21,0.18)",
+                  color: risk === "LOW" ? "#22c55e"
+                    : risk === "HIGH" ? "#ef4444"
+                    : "#facc15",
+                }}
+              >
+                Risk: {risk}
+              </span>
             </div>
           </div>
         ) : (
@@ -102,68 +148,101 @@ export function TradeStrategyCard({ data }: { data: IntelV2Snapshot | null }) {
             style={{ background: t.soft, borderColor: t.border }}
           >
             <div className="text-[14px] font-black uppercase tracking-wider" style={{ color: t.color }}>
-              Avoid Directional Trade
+              No Trade
             </div>
             <div className="text-[10px] text-white/65">{ts.subline}</div>
           </div>
         )}
 
-        {/* REASONS */}
+        {/* ─── LAYERS 1-4 — STATE MACHINE (4-cell grid) ──────────────── */}
+        <div className="grid grid-cols-2 gap-1.5">
+          <StateCell
+            label="Market State"
+            value={ms.replace(/_/g, " ")}
+            tone={stateTone[ms] || "neutral"}
+          />
+          <StateCell
+            label="Flow"
+            value={fs.replace(/_/g, " ")}
+            tone={flowTone[fs] || "neutral"}
+          />
+          <StateCell
+            label="Structure"
+            value={ss.replace(/_/g, " ")}
+            tone={structureTone[ss] || "warn"}
+          />
+          <StateCell
+            label="Entry Quality"
+            value={eq.replace(/_/g, " ")}
+            tone={entryTone[eq] || "neutral"}
+          />
+        </div>
+
+        {/* ─── REASON (firing signals) ──────────────────────────────── */}
         {ts.topReasons.length > 0 ? (
-          <div className="flex flex-col gap-0.5 rounded-md border border-white/[0.06] bg-white/[0.02] px-2 py-1">
-            <span className="text-[8px] font-bold uppercase tracking-[0.16em] text-white/45">
-              Reason
+          <div className="flex flex-col gap-0.5 rounded-md border border-white/[0.08] bg-white/[0.02] px-2 py-1.5">
+            <span className="text-[9px] font-bold uppercase tracking-[0.18em] text-white/55">
+              ✓ Reason
             </span>
-            <ul className="flex flex-col gap-0.5 text-[10px] leading-tight text-white/75">
+            <ul className="flex flex-col gap-0.5 text-[10px] leading-tight text-white/80">
               {ts.topReasons.map((r, i) => (
-                <li key={i} className="flex items-start gap-1">
+                <li key={i} className="flex items-start gap-1.5">
                   <span className="mt-0.5 shrink-0" style={{ color: t.color }}>▸</span>
-                  <span>{r}</span>
+                  <span className="break-words">{r}</span>
                 </li>
               ))}
             </ul>
           </div>
         ) : null}
 
-        {/* RANKED STRATEGY DOTS — visual indicator of how close other setups are */}
-        <div className="flex items-center gap-1 text-[8px]">
-          <span className="font-bold uppercase tracking-wider text-white/45">Ranked:</span>
-          {ts.ranked.slice(0, 5).map((r, i) => {
-            const isWinner = r.key === ts.key;
-            const tone = r.key.includes("CE") || r.key === "BREAKOUT_CE_BUY" ? "bull"
-              : r.key.includes("PE") || r.key === "BREAKDOWN_PE_BUY" ? "bear"
-              : "warn";
-            const tt = V2_TONE[tone];
-            return (
-              <span
-                key={r.key}
-                className="rounded-sm px-1 py-0.5 font-mono"
-                style={{
-                  background: isWinner ? tt.color + "22" : "transparent",
-                  border: `1px solid ${isWinner ? tt.color + "55" : "rgba(255,255,255,0.08)"}`,
-                  color: isWinner ? tt.color : "rgba(255,255,255,0.45)",
-                  fontWeight: isWinner ? 700 : 400,
-                }}
-                title={`${r.key} = ${r.score}`}
-              >
-                {labelOf(r.key)} {r.score}
-              </span>
-            );
-          })}
-        </div>
+        {/* ─── INVALIDATION (what proves this trade WRONG) ──────────── */}
+        {ts.invalidations && ts.invalidations.length > 0 ? (
+          <div className="flex flex-col gap-0.5 rounded-md border border-amber-500/40 bg-amber-500/[0.06] px-2 py-1.5">
+            <span className="text-[9px] font-bold uppercase tracking-[0.18em] text-amber-300">
+              ⚠ Invalidation
+            </span>
+            <ul className="flex flex-col gap-0.5 text-[10px] leading-tight text-white/80">
+              {ts.invalidations.map((r, i) => (
+                <li key={i} className="flex items-start gap-1.5">
+                  <span className="mt-0.5 shrink-0 text-amber-300">×</span>
+                  <span className="break-words">{r}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
       </div>
     </V2Card>
   );
 }
 
-// Compact label for ranked dots
-function labelOf(key: string): string {
-  switch (key) {
-    case "BUY_ON_DIP_CE":     return "DIP";
-    case "SELL_ON_RISE_PE":   return "RISE";
-    case "BREAKOUT_CE_BUY":   return "BRK";
-    case "BREAKDOWN_PE_BUY":  return "BKD";
-    case "RANGE_MARKET":      return "RNG";
-    default:                  return key;
-  }
+/* ─────────────────────────────────────────────────────────────────────
+ * StateCell — one cell of the 4-cell state-machine grid.
+ * Shows the layer label (Market State / Flow / Structure / Entry Quality)
+ * and a coloured value pill.
+ * ───────────────────────────────────────────────────────────────────── */
+function StateCell({
+  label, value, tone,
+}: {
+  label: string;
+  value: string;
+  tone: "bull" | "bear" | "warn" | "info" | "neutral";
+}) {
+  const t = V2_TONE[tone];
+  return (
+    <div
+      className="flex flex-col gap-0.5 rounded-md border px-2 py-1"
+      style={{ borderColor: t.border, background: t.soft }}
+    >
+      <span className="text-[8px] font-bold uppercase tracking-[0.18em] text-white/55">
+        {label}
+      </span>
+      <span
+        className="text-[11px] font-black uppercase leading-tight tracking-wider"
+        style={{ color: t.color }}
+      >
+        {value}
+      </span>
+    </div>
+  );
 }

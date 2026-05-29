@@ -3361,6 +3361,113 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
     // Pick top-4 firing reasons for the chosen strategy
     const topReasons = reasons[finalKey].slice(0, 4);
 
+    // ─── PURE-LOGIC STATE MACHINE LAYER ──────────────────────────────────
+    // This is the institutional flow:
+    //   MARKET STATE → FLOW → STRUCTURE → ENTRY QUALITY → STRATEGY → INVALIDATION
+    //
+    // We compute these post-hoc from the same signals the strategy scorer
+    // already uses, so they're cheap and consistent. The frontend reads
+    // them to render a 5-block panel instead of the legacy "X% confidence"
+    // headline.
+
+    // 1. MARKET STATE — master controller
+    const phase = (() => {
+      if (!Number.isFinite(spotPrice) || !marketOpen) return 'OPENING_AUCTION';
+      const istNow = new Date(Date.now() + 5.5 * 3600 * 1000);
+      const mins = istNow.getUTCHours() * 60 + istNow.getUTCMinutes();
+      const sessionStart = 9 * 60 + 15;
+      return (mins - sessionStart) <= 15 ? 'OPENING_AUCTION' : null;
+    })();
+    let marketState = phase || 'RANGE_ROTATION';
+    const vixHigh = (macro?.vix?.changePct ?? 0) >= 5;
+    const atrSpike = atrVal != null && c5m.length >= 5 && atrVal > 1.5 *
+      (c5m.slice(-21, -1).reduce((s, b) => s + (b.high - b.low), 0) / Math.max(1, c5m.length - 1));
+    if (vixHigh || atrSpike) marketState = 'PANIC_EXPANSION';
+    else if (insideValue && !ceExpanding && !peExpanding && Math.abs(fDelta?.deltaPct ?? 0) < 5) {
+      // GAMMA_PINNED only when premium is dead AND we're inside value
+      marketState = 'GAMMA_PINNED';
+    } else if (insideValue) {
+      marketState = 'RANGE_ROTATION';
+    } else if ((aboveVAH || belowVAL) && (deltaPos || deltaNeg) && (ceExpanding || peExpanding)) {
+      marketState = 'TREND_DISCOVERY';
+    } else {
+      marketState = 'RANGE_ROTATION';
+    }
+
+    // 2. FLOW STATE — who's pressing
+    let flowState;
+    if (deltaPos && (aboveVAH || ceExpanding) && !aboveVWAP) {
+      // positive delta but price not following → absorption
+      flowState = 'ABSORPTION';
+    } else if (deltaNeg && (belowVAL || peExpanding) && aboveVWAP) {
+      flowState = 'ABSORPTION';
+    } else if (premiumMomentum?.momentumQuality === 'WEAK' && (aboveVAH || belowVAL)) {
+      flowState = 'EXHAUSTION';
+    } else if (buyersDominant && deltaPos)  flowState = 'BUYERS_DOMINANT';
+    else if (sellersDominant && deltaNeg)   flowState = 'SELLERS_DOMINANT';
+    else                                    flowState = 'BALANCED';
+
+    // 3. STRUCTURE STATE — where price sits
+    let structureState;
+    if (aboveVAH && aboveVWAP) structureState = 'STRONG_BULLISH';
+    else if (belowVAL && belowVWAP) structureState = 'STRONG_BEARISH';
+    else structureState = 'NEUTRAL';
+
+    // 4. ENTRY QUALITY — is timing good NOW?
+    const distFromVwap = (vwap != null && Number.isFinite(spotPrice)) ? Math.abs(spotPrice - vwap) : 0;
+    const stretched = atrVal != null && distFromVwap > atrVal * 1.5;
+    const veryStretched = atrVal != null && distFromVwap > atrVal * 2.5;
+    let entryQuality;
+    if (veryStretched) entryQuality = 'LATE';
+    else if (insideValue || marketState === 'GAMMA_PINNED') entryQuality = 'NO_EDGE';
+    else if (pullbackBullish || pullbackBearish) entryQuality = 'PULLBACK';
+    else if (!stretched && (acceptedAbove || acceptedBelow) && (ceExpanding || peExpanding)) entryQuality = 'GOOD';
+    else if (stretched) entryQuality = 'LATE';
+    else entryQuality = 'NO_EDGE';
+
+    // 5. STATE GATING — block strategies that don't fit the regime
+    let gatedKey = finalKey;
+    if (marketState === 'GAMMA_PINNED') gatedKey = 'NO_TRADE';
+    else if (marketState === 'RANGE_ROTATION' && (finalKey === 'BREAKOUT_CE_BUY' || finalKey === 'BREAKDOWN_PE_BUY')) {
+      // breakout buying blocked inside range
+      gatedKey = 'RANGE_SCALP';
+    } else if (marketState === 'TREND_DISCOVERY' && finalKey === 'RANGE_MARKET') {
+      // promote to pullback when trend valid
+      gatedKey = aboveVWAP ? 'PULLBACK_CE_BUY' : 'PULLBACK_PE_BUY';
+    } else if (entryQuality === 'LATE') {
+      // late entry — degrade to NO_TRADE
+      gatedKey = 'NO_TRADE';
+    } else if (entryQuality === 'NO_EDGE' && finalKey !== 'RANGE_MARKET') {
+      gatedKey = 'NO_TRADE';
+    }
+
+    // Risk level
+    let riskLevel;
+    if (gatedKey === 'NO_TRADE' || marketState === 'PANIC_EXPANSION') riskLevel = 'HIGH';
+    else if (entryQuality === 'GOOD' && marketState === 'TREND_DISCOVERY' && flowState !== 'ABSORPTION') riskLevel = 'LOW';
+    else if (entryQuality === 'PULLBACK') riskLevel = 'LOW';
+    else riskLevel = 'MEDIUM';
+
+    // Invalidation rules — what proves this trade WRONG
+    const invalidations = (() => {
+      const lines = [];
+      if (meta.side === 'CE') {
+        if (vaPrimary?.vah) lines.push(`Price re-enters value below ${vaPrimary.vah.toFixed(0)}`);
+        if (vwap) lines.push(`Loss of VWAP (${vwap.toFixed(0)}) reclaim`);
+        lines.push('Negative delta shift > -10%');
+        lines.push('CE premium stagnation or collapse');
+      } else if (meta.side === 'PE') {
+        if (vaPrimary?.val) lines.push(`Price reclaims value above ${vaPrimary.val.toFixed(0)}`);
+        if (vwap) lines.push(`Reclaim VWAP (${vwap.toFixed(0)})`);
+        lines.push('Positive delta surge > +10%');
+        lines.push('PE premium collapse');
+      } else {
+        lines.push('Range breakout — flip to directional setup');
+        lines.push('VIX or ATR spike — switch to PANIC_EXPANSION');
+      }
+      return lines;
+    })();
+
     return {
       key: finalKey,
       verdict: meta.verdict,           // BUY CE / BUY PE / WAIT
@@ -3376,6 +3483,14 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
       scores,
       edge,
       ranked: ranked.map(([k, s]) => ({ key: k, score: s })),
+      // ── State machine outputs (Phase 1 upgrade) ──
+      marketState,
+      flowState,
+      structureState,
+      entryQuality,
+      invalidations,
+      riskLevel,
+      gatedKey,
     };
   })();
 
