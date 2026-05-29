@@ -108,6 +108,20 @@ export function ExecutionEngineCard({ data }: { data: IntelV2Snapshot | null }) 
 
           {/* Big slim confidence ring sits next to BUY CE */}
           <div className="flex flex-col items-center justify-center gap-1">
+            {/* No-Trade chip — sits ABOVE the ring */}
+            <span
+              className="rounded-sm px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
+              style={{
+                background: ee.noTradeScore >= 60 ? "rgba(239,68,68,0.20)"
+                  : ee.noTradeScore >= 30 ? "rgba(250,204,21,0.20)"
+                  : "rgba(34,197,94,0.20)",
+                color: ee.noTradeScore >= 60 ? "#ef4444"
+                  : ee.noTradeScore >= 30 ? "#facc15"
+                  : "#22c55e",
+              }}
+            >
+              No-Trade {ee.noTradeScore}
+            </span>
             <div className="relative h-[170px] w-[170px]">
               <svg viewBox="0 0 100 100" className="h-full w-full -rotate-90">
                 <circle cx="50" cy="50" r="44" fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="3" />
@@ -128,20 +142,6 @@ export function ExecutionEngineCard({ data }: { data: IntelV2Snapshot | null }) 
                 </span>
               </div>
             </div>
-            {/* No-Trade chip */}
-            <span
-              className="rounded-sm px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
-              style={{
-                background: ee.noTradeScore >= 60 ? "rgba(239,68,68,0.20)"
-                  : ee.noTradeScore >= 30 ? "rgba(250,204,21,0.20)"
-                  : "rgba(34,197,94,0.20)",
-                color: ee.noTradeScore >= 60 ? "#ef4444"
-                  : ee.noTradeScore >= 30 ? "#facc15"
-                  : "#22c55e",
-              }}
-            >
-              No-Trade {ee.noTradeScore}
-            </span>
           </div>
         </div>
 
