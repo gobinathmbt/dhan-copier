@@ -130,58 +130,146 @@ function Donut({ percent, tone }: { percent: number; tone: "bull" | "bear" | "wa
   );
 }
 
-// 3.3 Heavyweights Alignment
+// 3.3 Heavyweights / Full Index Breadth — pie + dot grid for every stock
 function Heavyweights({ data }: { data: IntelV2Snapshot | null }) {
-  const rows = (data?.dashboard?.heavyweightsImpact || []).slice(0, 6);
-  const align = data?.dashboard?.heavyweightsAlignment;
-  const alignedPct = align && align.total > 0 ? Math.round((align.aligned / align.total) * 100) : 0;
-  const totalImpact = data?.dashboard?.heavyweightsTotalImpact ?? 0;
-  const tone: "bull" | "bear" | "warn" = totalImpact > 0.1 ? "bull" : totalImpact < -0.1 ? "bear" : "warn";
+  const b = data?.dashboard?.breadth;
+  const all = b?.allStocks ?? [];
+  const adv = b?.advancing ?? 0;
+  const dec = b?.declining ?? 0;
+  const unc = b?.unchanged ?? 0;
+  const total = b?.total ?? all.length ?? 1;
+  const sampled = b?.sampled ?? ((adv + dec + unc) || 1);
+  // Two-slice pie: bullish vs bearish (excludes flat). Percentages are
+  // computed against advancing+declining so the two slices always sum to 100.
+  const directional = Math.max(1, adv + dec);
+  const bullPct = Math.round((adv / directional) * 100);
+  const bearPct = 100 - bullPct;
+  const advPct = b?.advancePct ?? Math.round((adv / Math.max(1, total)) * 100);
+  const tone: "bull" | "bear" | "warn" = advPct >= 60 ? "bull" : advPct >= 40 ? "warn" : "bear";
+  const indexLabel = data?.symbol === "SENSEX" ? "SENSEX 30" : "NIFTY 50";
+
   return (
-    <V2Card title="3.3 Heavyweights Alignment">
-      <div className="grid grid-cols-[120px_1fr] items-start gap-3">
-        <div className="flex items-center justify-center pt-1">
-          <V2MiniPie value={alignedPct} tone={tone} size={110} label={`${align?.aligned ?? 0}/${align?.total ?? 0}`} showPct={false} />
+    <V2Card title={`3.3 ${indexLabel} Breadth`}>
+      <div className="grid grid-cols-[140px_1fr] items-center gap-3">
+        <div className="flex items-center justify-center">
+          <DualPie bullPct={bullPct} bearPct={bearPct} size={130} adv={adv} dec={dec} />
         </div>
-        <div className="flex flex-col">
-          <div className="grid grid-cols-4 px-1 pb-0.5 text-[10px] font-bold uppercase tracking-wider text-white/45">
-            <span>Stock</span>
-            <span className="text-right">Price</span>
-            <span className="text-right">Contrib</span>
-            <span className="text-right">Align</span>
-          </div>
-          <div className="flex flex-col gap-1 overflow-y-auto" style={{ maxHeight: 130 }}>
-            {rows.map((r) => {
-              const rTone = r.changePct >= 0 ? "bull" : "bear";
-              return (
-                <div key={r.symbol} className="grid grid-cols-4 px-1 text-[12px]">
-                  <span className="font-mono font-bold text-white/85 truncate">{r.symbol}</span>
-                  <span className="text-right font-mono text-white/65">{v2Fmt(r.last, 2)}</span>
-                  <span className="text-right font-mono" style={{ color: V2_TONE[rTone].color }}>
-                    {v2FmtSigned(r.impactPts, 1)}
-                  </span>
-                  <span className="text-right">
-                    <V2Pill
-                      label={r.changePct >= 0 ? "Bullish" : "Bearish"}
-                      tone={rTone as "bull" | "bear"}
-                      size="xs"
-                    />
-                  </span>
-                </div>
-              );
-            })}
-            {!rows.length ? <div className="text-center text-[12px] text-white/45">No data</div> : null}
-          </div>
+        {/* Dot grid — every stock as a tiny coloured square. Green = up,
+            red = down, gray = flat. Sorted DESC by changePct. */}
+        <div
+          className="grid gap-[3px]"
+          style={{
+            gridTemplateColumns: `repeat(${total > 30 ? 10 : 8}, minmax(0, 1fr))`,
+          }}
+        >
+          {all.map((s) => {
+            const t: "bull" | "bear" | "neutral" =
+              s.changePct > 0.05 ? "bull" : s.changePct < -0.05 ? "bear" : "neutral";
+            const sat = Math.min(1, Math.abs(s.changePct) / 3);
+            return (
+              <div
+                key={s.symbol}
+                title={`${s.symbol} ${s.changePct >= 0 ? "+" : ""}${s.changePct}%`}
+                className="aspect-square rounded-sm"
+                style={{
+                  background:
+                    t === "neutral"
+                      ? "rgba(255,255,255,0.08)"
+                      : `${V2_TONE[t].color}${Math.round(0.30 + sat * 0.55 * 255).toString(16).padStart(2, "0")}`,
+                }}
+              />
+            );
+          })}
         </div>
       </div>
-      <div className="mt-1.5 flex items-center justify-between rounded-sm bg-white/[0.03] px-2 py-1.5">
-        <span className="text-[10px] uppercase tracking-wider text-white/55">Alignment Score</span>
-        <span className="font-mono text-[12px] font-bold" style={{ color: V2_TONE[tone].color }}>
-          {align?.score || `0/0`} • {align?.label || "Mixed"}
-        </span>
+      <div className="mt-1.5 grid grid-cols-3 gap-1 text-[11px]">
+        <div className="flex items-center justify-center rounded-sm bg-emerald-500/[0.10] px-2 py-1">
+          <span className="font-mono font-bold text-emerald-400">{adv}</span>
+          <span className="ml-1 text-[10px] uppercase tracking-wider text-emerald-400/80">Adv</span>
+        </div>
+        <div className="flex items-center justify-center rounded-sm bg-white/[0.04] px-2 py-1">
+          <span className="font-mono font-bold text-white/70">{unc}</span>
+          <span className="ml-1 text-[10px] uppercase tracking-wider text-white/55">Flat</span>
+        </div>
+        <div className="flex items-center justify-center rounded-sm bg-rose-500/[0.10] px-2 py-1">
+          <span className="font-mono font-bold text-rose-400">{dec}</span>
+          <span className="ml-1 text-[10px] uppercase tracking-wider text-rose-400/80">Dec</span>
+        </div>
       </div>
-      <V2Hint label="Heavyweights" text={data?.dashboard?.hints?.heavy || ""} tone={tone} />
+      <V2Hint
+        label="Breadth"
+        text={
+          b?.interpretation ||
+          data?.dashboard?.hints?.breadth ||
+          `${bullPct}% bullish vs ${bearPct}% bearish across ${sampled} stocks.`
+        }
+        tone={tone}
+      />
     </V2Card>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * DualPie — 2-slice donut: bullish (green) + bearish (red) with both
+ * percentages rendered inline. No center number — both slices are
+ * labelled directly via leader lines.
+ * ───────────────────────────────────────────────────────────────────── */
+function DualPie({
+  bullPct, bearPct, size = 130, adv, dec,
+}: {
+  bullPct: number; bearPct: number; size?: number; adv: number; dec: number;
+}) {
+  const r = 36;
+  const c = 2 * Math.PI * r;
+  const bullArc = (bullPct / 100) * c;
+  const bearArc = (bearPct / 100) * c;
+  return (
+    <div className="relative shrink-0" style={{ width: size, height: size }}>
+      <svg viewBox="0 0 100 100" className="h-full w-full -rotate-90">
+        {/* Track */}
+        <circle cx="50" cy="50" r={r} fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="11" />
+        {/* Bull slice — green */}
+        <circle
+          cx="50" cy="50" r={r}
+          fill="none"
+          stroke="#22c55e"
+          strokeWidth="11"
+          strokeDasharray={`${bullArc} ${c}`}
+          strokeDashoffset={0}
+        />
+        {/* Bear slice — red, starts where bull ends */}
+        <circle
+          cx="50" cy="50" r={r}
+          fill="none"
+          stroke="#ef4444"
+          strokeWidth="11"
+          strokeDasharray={`${bearArc} ${c}`}
+          strokeDashoffset={-bullArc}
+        />
+      </svg>
+      {/* Center labels — bull on top, bear on bottom */}
+      <div className="absolute inset-0 flex flex-col items-center justify-center gap-0.5">
+        <div className="flex items-baseline gap-1">
+          <span className="font-mono text-[18px] font-black leading-none text-emerald-400 tabular-nums">
+            {bullPct}%
+          </span>
+          <span className="text-[8px] font-bold uppercase tracking-wider text-emerald-400/80">
+            Bull
+          </span>
+        </div>
+        <div className="text-[8px] font-mono text-white/35 tabular-nums">
+          {adv} / {adv + dec}
+        </div>
+        <div className="flex items-baseline gap-1">
+          <span className="font-mono text-[18px] font-black leading-none text-rose-400 tabular-nums">
+            {bearPct}%
+          </span>
+          <span className="text-[8px] font-bold uppercase tracking-wider text-rose-400/80">
+            Bear
+          </span>
+        </div>
+      </div>
+    </div>
   );
 }
 

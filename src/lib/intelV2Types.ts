@@ -567,6 +567,7 @@ export interface IntelV2Snapshot {
       advancePct: number; declinePct?: number; adRatio: number;
       leaders?: Array<{ symbol: string; changePct: number; price?: number }>;
       laggards?: Array<{ symbol: string; changePct: number; price?: number }>;
+      allStocks?: Array<{ symbol: string; changePct: number; price?: number }>;
       source?: string;
       interpretation?: string;
     };

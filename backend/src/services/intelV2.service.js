@@ -451,12 +451,22 @@ async function _fullBreadth(symbolKey, dateKey) {
     .map(r => ({ symbol: r.symbol.replace(/\.(NS|BO)$/, ''), changePct: r.changePct, price: r.price }));
   const laggards = [...valid].sort((a, b) => a.changePct - b.changePct).slice(0, 5)
     .map(r => ({ symbol: r.symbol.replace(/\.(NS|BO)$/, ''), changePct: r.changePct, price: r.price }));
+  // Full per-stock list — sorted DESC by changePct so the frontend can paint
+  // a heatmap-style dot grid (greens at top, reds at bottom). 50 entries
+  // for NIFTY, 30 for SENSEX. Used by 3.3 Heavyweights pie+grid.
+  const allStocks = [...valid]
+    .sort((a, b) => b.changePct - a.changePct)
+    .map(r => ({
+      symbol: r.symbol.replace(/\.(NS|BO)$/, ''),
+      changePct: _round(r.changePct, 2),
+      price: r.price,
+    }));
   const data = {
     symbol: symbolKey,
     advancing, declining, unchanged, total, sampled: valid.length,
     advancePct: _round((advancing / total) * 100, 0),
     declinePct: _round((declining / total) * 100, 0),
-    adRatio, leaders, laggards,
+    adRatio, leaders, laggards, allStocks,
     source: 'full-index',
   };
   _breadthCache.set(cacheKey, { at: Date.now(), data });
