@@ -34,7 +34,12 @@ export function TopHeaderV2({
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
   }, []);
-  const istTime = now.toLocaleTimeString("en-IN", { hour12: false });
+  const istTime = now.toLocaleTimeString("en-IN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  });
 
   const showLive = !date;
   const allDates = (() => {

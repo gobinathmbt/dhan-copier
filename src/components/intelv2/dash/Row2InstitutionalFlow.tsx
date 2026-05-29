@@ -1,5 +1,6 @@
 ﻿import type { IntelV2Snapshot } from "@/lib/intelV2Types";
 import { V2Card, V2Pill, v2Fmt, V2_TONE, V2Hint } from "./common";
+import { useState } from "react";
 // 2.3 OI Buildup Analysis — REMOVED. Functionality covered by 2.2 Combined card.
 // import { OiBuildupAnalysisCard } from "./OiBuildupAnalysisCard";
 import { SupportResistanceCardV2 } from "./SupportResistanceCard";
@@ -118,6 +119,10 @@ function CombinedWritingPressureBody({ data }: { data: IntelV2Snapshot | null })
 
 /* ── Market Direction body (no V2Card wrapper — for combined card) ── */
 function CombinedMarketDirectionBody({ data }: { data: IntelV2Snapshot | null }) {
+  // Strike-window state — defaults to 4 (ATM ± 4). Dropdown sits above the
+  // Intraday Levels table on the right. Available windows: 4, 5, 6, 8, 10.
+  const [windowSize, setWindowSize] = useState(4);
+
   // Re-use the standalone MarketDirectionCard logic by inlining its body.
   // We strip the outer V2Card so it nests cleanly inside the combined card.
   const md = data?.dashboard?.marketDirection;
@@ -171,15 +176,33 @@ function CombinedMarketDirectionBody({ data }: { data: IntelV2Snapshot | null })
         </div>
       </div>
 
-      {/* 2. Intraday Levels (Important) â€” Excel-style mirrored ladder.
-          Single continuous ladder sorted by strike DESC. Resistances render
-          with label LEFT + strike CENTER; supports flip to strike CENTER +
-          label RIGHT. ATM is intentionally excluded â€” it's neither a
-          resistance nor a support. */}
+      {/* 2. Intraday Levels (Important) — Excel-style mirrored ladder.
+          Renders ATM ± `windowSize` strikes (default ±4, dropdown configurable).
+          Resistances render with label LEFT + strike CENTER; supports flip
+          to strike CENTER + label RIGHT. ATM stays in the middle row. */}
       <div className="flex flex-col gap-1">
-        <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-white/85">
-          Intraday Levels <span className="text-white/45">(CE Walls left Â· ATM center Â· PE Walls right)</span>
-        </span>
+        <div className="flex items-center justify-between">
+          <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-white/85">
+            Intraday Levels <span className="text-white/45">(CE Walls left · ATM center · PE Walls right)</span>
+          </span>
+          {/* Strike-window selector — sits above-right of the table */}
+          <label className="flex items-center gap-1.5 rounded-sm border border-white/[0.10] bg-white/[0.04] px-2 py-1">
+            <span className="text-[9px] font-bold uppercase tracking-wider text-white/55">
+              Strikes
+            </span>
+            <select
+              value={windowSize}
+              onChange={(e) => setWindowSize(Number(e.target.value))}
+              className="bg-transparent text-[11px] font-mono font-bold text-sky-300 outline-none"
+            >
+              {[4, 5, 6, 8, 10].map((n) => (
+                <option key={n} value={n} className="bg-[#0e1117] text-white">
+                  ATM ± {n}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
         <div className="overflow-hidden rounded-md border border-white/[0.08]">
           {/* Mirror header — same 6 columns rendered on both halves with strike pill in the center */}
           <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-white/[0.08] bg-white/[0.03] px-2 py-1">
@@ -246,18 +269,25 @@ function CombinedMarketDirectionBody({ data }: { data: IntelV2Snapshot | null })
               pe: peByStrike.get(strike) ?? blank,
             });
 
+            // Build tier-name lookup so each strike still gets its real
+            // tier label when one exists; otherwise fall back to a generic
+            // "+N CE / -N PE" tag based on distance from ATM.
+            const tierByStrike = new Map<number, string>();
+            for (const r of md.resistances) tierByStrike.set(r.strike, r.tier);
+            for (const r of md.supports) tierByStrike.set(r.strike, r.tier);
+
+            const STEP = 100;
             const byStrike = new Map<number, Row>();
-            for (const r of md.resistances) {
-              if (anchor != null && r.strike === anchor) continue;
-              byStrike.set(r.strike, { strike: r.strike, tier: r.tier, side: "resistance", ...lookup(r.strike) });
-            }
-            for (const r of md.supports) {
-              if (anchor != null && r.strike === anchor) continue;
-              if (byStrike.has(r.strike)) continue;
-              byStrike.set(r.strike, { strike: r.strike, tier: r.tier, side: "support", ...lookup(r.strike) });
-            }
             if (anchor != null) {
-              byStrike.set(anchor, { strike: anchor, tier: "ATM", side: "atm", ...lookup(anchor) });
+              for (let i = windowSize; i >= -windowSize; i--) {
+                const s = anchor + i * STEP;
+                const side: "resistance" | "support" | "atm" =
+                  i > 0 ? "resistance" : i < 0 ? "support" : "atm";
+                const tier = i === 0
+                  ? "ATM"
+                  : tierByStrike.get(s) ?? (i > 0 ? `+${i} CE` : `${i} PE`);
+                byStrike.set(s, { strike: s, tier, side, ...lookup(s) });
+              }
             }
 
             const rows = [...byStrike.values()].sort((a, b) => b.strike - a.strike);
