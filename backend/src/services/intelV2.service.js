@@ -47,6 +47,15 @@ const MACRO_CACHE_MS = 60_000;
 const _heavyCache = new Map();      // key: symbol|date → { at, data }
 const _breadthCache = new Map();    // key: symbol|date → { at, data }
 
+// ── ATM Premium history ──────────────────────────────────────────────────
+// Ring buffer keyed by symbol — captures (t, ceLtp, peLtp) every snapshot.
+// Used by the Premium Momentum engine to compute REAL time-derivative of
+// CE / PE premium instead of relying on the static LTP-skew which always
+// reports CE-bigger as "CE expanding" regardless of direction.
+const _premiumHistory = new Map(); // symbol → [{ t, ceLtp, peLtp, atm }]
+const PREMIUM_HISTORY_MAX = 240;   // ~12 min @ 3s polling
+const PREMIUM_HISTORY_TTL_MS = 30 * 60_000; // drop samples older than 30m
+
 // ── Constituents ──────────────────────────────────────────────────────────
 const HEAVYWEIGHTS = {
   NIFTY_50: [
@@ -2518,6 +2527,22 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
     return 'inside';
   }
 
+  // ── VALUE AREA — single source of truth ──────────────────────────────
+  // Earlier code was reading the simple price-bin VAH/VAL (`vp`) which is
+  // typically wider than the institutional engine's curated VAH/VAL
+  // (`frvpInstitutional.engine.profile`). This caused multiple downstream
+  // engines (HeroZero, Trade Strategy, NoTrade) to incorrectly flag
+  // "Inside Value Area" while the FRVP card simultaneously showed
+  // "Below Value / Rejection below value" — confusing users and
+  // suppressing valid PE entries.
+  //
+  // Prefer the institutional engine band; fall back to vp only if it
+  // hasn't been computed (cold start / historical mode).
+  const _engineProfile = frvpInstitutional?.engine?.profile;
+  const vaPrimary = (_engineProfile?.vah && _engineProfile?.val)
+    ? { vah: _engineProfile.vah, val: _engineProfile.val, poc: _engineProfile.poc }
+    : (vp?.vah && vp?.val ? { vah: vp.vah, val: vp.val, poc: vp.poc } : null);
+
   const smartMoney = _smartMoneyBias({
     deltaBias: delta.bias,
     peWriting: atmBlk.peWriting,
@@ -2757,11 +2782,12 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
     const fDelta  = fEngine?.delta;
     const fPrem   = fEngine?.advanced?.premiumVel;
 
-    // Core spot levels
-    const aboveVAH = vp?.vah != null && Number.isFinite(spotPrice) && spotPrice > vp.vah;
-    const belowVAL = vp?.val != null && Number.isFinite(spotPrice) && spotPrice < vp.val;
-    const insideValue = vp?.vah != null && vp?.val != null
-      && Number.isFinite(spotPrice) && spotPrice >= vp.val && spotPrice <= vp.vah;
+    // Core spot levels — use the institutional engine's VAH/VAL when
+    // available so this engine agrees with the FRVP card display.
+    const aboveVAH = vaPrimary?.vah != null && Number.isFinite(spotPrice) && spotPrice > vaPrimary.vah;
+    const belowVAL = vaPrimary?.val != null && Number.isFinite(spotPrice) && spotPrice < vaPrimary.val;
+    const insideValue = vaPrimary?.vah != null && vaPrimary?.val != null
+      && Number.isFinite(spotPrice) && spotPrice >= vaPrimary.val && spotPrice <= vaPrimary.vah;
     const aboveVWAP = vwap != null && Number.isFinite(spotPrice) && spotPrice > vwap;
     const belowVWAP = vwap != null && Number.isFinite(spotPrice) && spotPrice < vwap;
 
@@ -2918,17 +2944,22 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
   })();
 
   // ── PREMIUM MOMENTUM ENGINE ─────────────────────────────────────────
-  // Tracks CE/PE premium expansion %, delta speed, and scalping aggression.
-  // Builds short LTP sparkline trails for visual context and grades the
-  // overall momentum quality.
+  // Tracks REAL CE/PE premium expansion % using a per-symbol ring buffer
+  // of ATM CE/PE LTP samples. Replaces the prior implementation which
+  // derived expansion from the static premium-velocity skew — that read
+  // is just the size ratio of the two premiums (CE bigger when IV skew is
+  // positive) and falsely reported "CE Momentum Strong" on bear days.
+  //
+  // The new engine:
+  //   1. Pushes (t, ceLtp, peLtp) into _premiumHistory on every call
+  //   2. Picks a baseline sample ~5–10 min old (or oldest available)
+  //   3. Computes ceExpansionPct = (ceLtp − ceBase) / ceBase × 100
+  //   4. Same for PE. Sign + magnitude are now real.
+  //   5. Falls back to the old skew heuristic only when fewer than 3
+  //      samples exist (cold start).
   //
   // Lives at dashboard.premiumMomentum.
   const premiumMomentum = (() => {
-    // Walk the candle stream backwards and rebuild ATM CE+PE LTP trails.
-    // Since we don't have a per-strike timeseries cached, we approximate
-    // using a synthetic gradient based on the current expansion state.
-    // (Real-time mode: each tick adds a real LTP sample; historical: the
-    // sparkline is reconstructed from the FRVP engine's premiumVel skew.)
     const fEngine = frvpInstitutional?.engine;
     const fPrem = fEngine?.advanced?.premiumVel;
     const fDelta = fEngine?.delta;
@@ -2936,23 +2967,54 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
     // Current ATM CE/PE LTP
     const ceLtp = _safe(atmBlk.atmCall?.ltp);
     const peLtp = _safe(atmBlk.atmPut?.ltp);
+    const now = Date.now();
 
-    // Premium expansion % — derived from the premiumVel skew.
-    //   skew > 0  → CE expanding faster
-    //   skew < 0  → PE expanding faster
-    //   We translate skew into per-side % moves: +20% × skew, with floors.
-    const skew = _safe(fPrem?.skew);
-    const ceExpansionPct = (() => {
-      // Heuristic: skew of +0.20 ⇒ CE +25%, +0.10 ⇒ +12%, -0.10 ⇒ -6%
-      if (fPrem?.state === 'CE_EXPANDING') return _round(15 + skew * 60, 0);
-      if (fPrem?.state === 'PE_EXPANDING') return _round(skew * 40, 0); // negative-ish
-      return _round(skew * 30, 0);
-    })();
-    const peExpansionPct = (() => {
-      if (fPrem?.state === 'PE_EXPANDING') return _round(15 - skew * 60, 0);
-      if (fPrem?.state === 'CE_EXPANDING') return _round(-skew * 40, 0);
-      return _round(-skew * 30, 0);
-    })();
+    // ── Maintain ring buffer ──────────────────────────────────────────
+    const histKey = `${SYMBOL}|${atm}`; // include ATM strike — flush trail when ATM jumps
+    const trail = _premiumHistory.get(histKey) || [];
+    if (ceLtp > 0 && peLtp > 0) {
+      trail.push({ t: now, ceLtp, peLtp });
+      // prune by age + max length
+      while (trail.length > 0 && (now - trail[0].t) > PREMIUM_HISTORY_TTL_MS) trail.shift();
+      while (trail.length > PREMIUM_HISTORY_MAX) trail.shift();
+      _premiumHistory.set(histKey, trail);
+    }
+
+    // ── Baseline pick — sample closest to (now − 8 min) ───────────────
+    const TARGET_BASELINE_MS = 8 * 60_000;
+    let baseline = null;
+    if (trail.length >= 3) {
+      const targetT = now - TARGET_BASELINE_MS;
+      // find the sample with t closest to targetT, but never the latest one
+      let best = trail[0];
+      let bestDist = Math.abs(best.t - targetT);
+      for (let i = 1; i < trail.length - 1; i++) {
+        const d = Math.abs(trail[i].t - targetT);
+        if (d < bestDist) { bestDist = d; best = trail[i]; }
+      }
+      baseline = best;
+    }
+
+    // ── Real expansion % ──────────────────────────────────────────────
+    let ceExpansionPct, peExpansionPct;
+    if (baseline && baseline.ceLtp > 0 && baseline.peLtp > 0) {
+      ceExpansionPct = _round(((ceLtp - baseline.ceLtp) / baseline.ceLtp) * 100, 0);
+      peExpansionPct = _round(((peLtp - baseline.peLtp) / baseline.peLtp) * 100, 0);
+    } else {
+      // Cold-start fallback: only first 3 polls. Use the old skew heuristic
+      // but mark it clearly so consumers know it isn't yet reliable.
+      const skew = _safe(fPrem?.skew);
+      ceExpansionPct = (() => {
+        if (fPrem?.state === 'CE_EXPANDING') return _round(15 + skew * 60, 0);
+        if (fPrem?.state === 'PE_EXPANDING') return _round(skew * 40, 0);
+        return _round(skew * 30, 0);
+      })();
+      peExpansionPct = (() => {
+        if (fPrem?.state === 'PE_EXPANDING') return _round(15 - skew * 60, 0);
+        if (fPrem?.state === 'CE_EXPANDING') return _round(-skew * 40, 0);
+        return _round(-skew * 30, 0);
+      })();
+    }
 
     // Momentum quality — uses delta + premium velocity + writer pressure
     const dPct = Math.abs(_safe(fDelta?.deltaPct));
@@ -2999,29 +3061,34 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
       : scalpingAggression === 'MODERATE' ? 'warn'
       : 'neutral';
 
-    // Build short sparkline series for CE / PE.
-    // We synthesise from the LTP trail of the last 30 5m bars by indexing
-    // the close-position-within-range proxy as a stand-in for premium move.
-    const buildSpark = (sign) => {
-      // sign +1 (CE) — premium climbs when delta positive
-      // sign -1 (PE) — premium climbs when delta negative
-      const window = c5m.slice(-30);
-      if (!window.length) return [];
-      const out = [];
-      let acc = 100;
-      for (const c of window) {
-        const range = Math.max(0.01, c.high - c.low);
-        const closePos = ((2 * c.close - c.high - c.low) / range);
-        const move = closePos * sign * 1.2; // scale
-        acc += move;
-        out.push(_round(acc, 2));
-      }
-      return out;
-    };
-    const ceSpark = buildSpark(+1);
-    const peSpark = buildSpark(-1);
+    // ── Real CE / PE LTP sparkline trails from the ring buffer ────────
+    // Take the last 30 samples; if fewer, synthesise from the candle stream
+    // as a visual placeholder.
+    let ceSpark, peSpark;
+    if (trail.length >= 6) {
+      const tail = trail.slice(-30);
+      ceSpark = tail.map(s => _round(s.ceLtp, 2));
+      peSpark = tail.map(s => _round(s.peLtp, 2));
+    } else {
+      const buildSpark = (sign) => {
+        const window = c5m.slice(-30);
+        if (!window.length) return [];
+        const out = [];
+        let acc = 100;
+        for (const c of window) {
+          const range = Math.max(0.01, c.high - c.low);
+          const closePos = ((2 * c.close - c.high - c.low) / range);
+          const move = closePos * sign * 1.2;
+          acc += move;
+          out.push(_round(acc, 2));
+        }
+        return out;
+      };
+      ceSpark = buildSpark(+1);
+      peSpark = buildSpark(-1);
+    }
 
-    // Top-level state — which side is dominant
+    // Top-level state — directional read of expansion
     let topState, topTone, topLabel;
     if (ceExpansionPct > peExpansionPct + 5 && ceExpansionPct >= 8) {
       topState = 'CE Momentum Strong';
@@ -3051,6 +3118,10 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
       deltaSpeed, deltaTone, deltaPct: _round(deltaPct, 2),
       scalpingAggression, scalpingTone, scalpingScore,
       volSurge,
+      // Debug — surface the baseline reference time so we know whether the
+      // engine is running on real history or the cold-start fallback.
+      baselineAgeSec: baseline ? Math.round((now - baseline.t) / 1000) : 0,
+      historyDepth: trail.length,
     };
   })();
 
@@ -3076,10 +3147,10 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
     const belowVWAP = vwap != null && Number.isFinite(spotPrice) && spotPrice < vwap;
     const abovePOC  = vp?.poc != null && Number.isFinite(spotPrice) && spotPrice > vp.poc;
     const belowPOC  = vp?.poc != null && Number.isFinite(spotPrice) && spotPrice < vp.poc;
-    const aboveVAH  = vp?.vah != null && Number.isFinite(spotPrice) && spotPrice > vp.vah;
-    const belowVAL  = vp?.val != null && Number.isFinite(spotPrice) && spotPrice < vp.val;
-    const insideValue = vp?.vah != null && vp?.val != null
-      && spotPrice >= vp.val && spotPrice <= vp.vah;
+    const aboveVAH  = vaPrimary?.vah != null && Number.isFinite(spotPrice) && spotPrice > vaPrimary.vah;
+    const belowVAL  = vaPrimary?.val != null && Number.isFinite(spotPrice) && spotPrice < vaPrimary.val;
+    const insideValue = vaPrimary?.vah != null && vaPrimary?.val != null
+      && spotPrice >= vaPrimary.val && spotPrice <= vaPrimary.vah;
 
     const acceptedAbove  = !!fAccept?.acceptedAboveVAH;
     const acceptedBelow  = !!fAccept?.acceptedBelowVAL;
@@ -3179,8 +3250,39 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
     if (!ceExpanding && !peExpanding)                    { scores.RANGE_MARKET += 1; reasons.RANGE_MARKET.push('Premium Stagnant'); }
     if (Math.abs(fDelta?.deltaPct ?? 0) < 5)             { scores.RANGE_MARKET += 1; reasons.RANGE_MARKET.push(`Δ Neutral ${(fDelta?.deltaPct ?? 0).toFixed(1)}%`); }
 
-    // Pick the winning strategy
-    const ranked = Object.entries(scores).sort((a, b) => b[1] - a[1]);
+    // Pick the winning strategy.
+    // Tie-break by composite directional bias when scores are equal:
+    //   1. Master verdict side (cePct vs pePct)
+    //   2. PLUS price location (above/below VWAP and VAL/VAH)
+    // Without this, JS Object.entries insertion order silently prefers
+    // BUY_ON_DIP_CE on every tie, which falsely reads as a CE setup
+    // even when price is clearly below VWAP and below VAL.
+    const verdictDir = verdict.cePct >= verdict.pePct ? 'CE' : 'PE';
+    // Location score — strong vote for the side aligned with price action.
+    let locationDir = 'NEUTRAL';
+    if (belowVWAP && belowVAL)        locationDir = 'PE';
+    else if (aboveVWAP && aboveVAH)   locationDir = 'CE';
+    else if (belowVWAP || belowVAL)   locationDir = 'PE';
+    else if (aboveVWAP || aboveVAH)   locationDir = 'CE';
+    // Combined directional preference: location wins over verdict edge
+    // when the verdict is essentially flat (≤ 5 pts spread).
+    const verdictSpread = Math.abs(verdict.cePct - verdict.pePct);
+    const tieBreakDir = verdictSpread < 5 && locationDir !== 'NEUTRAL'
+      ? locationDir
+      : verdictDir;
+
+    const sideOf = (key) =>
+      key.includes('CE') ? 'CE'
+      : key.includes('PE') ? 'PE'
+      : 'NEUTRAL';
+    const ranked = Object.entries(scores).sort((a, b) => {
+      const diff = b[1] - a[1];
+      if (diff !== 0) return diff;
+      // Equal score: strategies aligned with directional bias come first.
+      const aAlign = sideOf(a[0]) === tieBreakDir ? 1 : 0;
+      const bAlign = sideOf(b[0]) === tieBreakDir ? 1 : 0;
+      return bAlign - aAlign;
+    });
     const [topKey, topScore] = ranked[0];
     const runnerUp = ranked[1]?.[1] ?? 0;
     // Edge over runner-up — used to gauge confidence
@@ -3311,10 +3413,10 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
     const fDelta  = fEngine?.delta;
     const fPrem   = fEngine?.advanced?.premiumVel;
 
-    const aboveVAH = vp?.vah != null && Number.isFinite(spotPrice) && spotPrice > vp.vah;
-    const belowVAL = vp?.val != null && Number.isFinite(spotPrice) && spotPrice < vp.val;
-    const insideValue = vp?.vah != null && vp?.val != null
-      && spotPrice >= vp.val && spotPrice <= vp.vah;
+    const aboveVAH = vaPrimary?.vah != null && Number.isFinite(spotPrice) && spotPrice > vaPrimary.vah;
+    const belowVAL = vaPrimary?.val != null && Number.isFinite(spotPrice) && spotPrice < vaPrimary.val;
+    const insideValue = vaPrimary?.vah != null && vaPrimary?.val != null
+      && spotPrice >= vaPrimary.val && spotPrice <= vaPrimary.vah;
 
     const trendStrength = regimeBlk.trendStrength;
     const volatility = regimeBlk.volatility;
@@ -3596,10 +3698,10 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
 
     // 2. Price location — VWAP + POC narrative
     const aboveVwap = vwap != null && Number.isFinite(spotPrice) && spotPrice >= vwap;
-    const abovePoc  = vp?.poc != null && Number.isFinite(spotPrice) && spotPrice >= vp.poc;
-    const insideValue = vp?.vah != null && vp?.val != null && spotPrice >= vp.val && spotPrice <= vp.vah;
+    const abovePoc  = vaPrimary?.poc != null && Number.isFinite(spotPrice) && spotPrice >= vaPrimary.poc;
+    const insideValue = vaPrimary?.vah != null && vaPrimary?.val != null && spotPrice >= vaPrimary.val && spotPrice <= vaPrimary.vah;
     if (insideValue) {
-      lines.push(`Price trades inside the value area (${vp.val.toFixed(0)}–${vp.vah.toFixed(0)}), accepted by the auction — wait for break.`);
+      lines.push(`Price trades inside the value area (${vaPrimary.val.toFixed(0)}–${vaPrimary.vah.toFixed(0)}), accepted by the auction — wait for break.`);
     } else if (aboveVwap && abovePoc) {
       lines.push(`Price holds above VWAP and above POC — bullish acceptance.`);
     } else if (!aboveVwap && !abovePoc) {
@@ -3748,7 +3850,7 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
       { key: 'weakPremium',        label: 'Weak Premium',          detected: atmBlk.atmIv < 8 || trapBlk.rows.find(r => r.key === 'premiumTrap')?.detected },
       { key: 'weakDelta',          label: 'Weak Delta',            detected: delta.bias === 'neutral' && Math.abs(delta.cvd) < 3 },
       { key: 'futuresDivergence',  label: 'Futures Divergence',    detected: futPremium != null && Math.abs(futPremium) > 50 },
-      { key: 'insideValue',        label: 'Inside Value',          detected: vp && Number.isFinite(spotPrice) && spotPrice > vp.val && spotPrice < vp.vah },
+      { key: 'insideValue',        label: 'Inside Value',          detected: vaPrimary && Number.isFinite(spotPrice) && spotPrice > vaPrimary.val && spotPrice < vaPrimary.vah },
       { key: 'ivCrush',            label: 'IV Crush',              detected: macro?.vix?.changePct != null && macro.vix.changePct < -3 },
       { key: 'breadthWeak',        label: 'Breadth Weak',          detected: breadth.adRatio != null && breadth.adRatio < 0.7 && breadth.adRatio > 0 },
       { key: 'heavyweightsWeak',   label: 'Heavyweights Weak',     detected: heavy?.weightedAvgChangePct != null && heavy.weightedAvgChangePct < -0.3 },

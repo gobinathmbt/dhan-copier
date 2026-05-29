@@ -444,12 +444,6 @@ function ExcelLevelRow({
         >
           {strike.toLocaleString()}
         </span>
-        <span
-          className="text-[8px] font-bold uppercase tracking-wider"
-          style={{ color: sideAccent, opacity: 0.85 }}
-        >
-          {isAtm ? "ATM" : tier.replace(/\s*\([^)]*\)/, "")}
-        </span>
       </div>
       {/* RIGHT — PE strip */}
       <SideStrip flavour="PE" m={pe} />
