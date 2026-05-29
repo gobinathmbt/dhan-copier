@@ -1295,7 +1295,7 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
         ) : null}
 
         {/* â”€â”€ BUYERS / SELLERS / PARTICIPATION grid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-        <div className="mt-2 grid grid-cols-3 gap-2 text-[11px]">
+        {/* <div className="mt-2 grid grid-cols-3 gap-2 text-[11px]">
           <div className="rounded-sm border border-emerald-500/20 bg-emerald-500/[0.04] px-2 py-1.5">
             <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-emerald-400">BUYERS</div>
             <CompactPair label="Entering" value={`${f.buyers.entering}%`} valueColor="#22c55e" />
@@ -1324,7 +1324,7 @@ function FrvpInstitutional({ data }: { data: IntelV2Snapshot | null }) {
               <CompactPair label="Î³ Wall" value={String(advanced.gammaWall.strike)} valueColor="#a855f7" />
             ) : null}
           </div>
-        </div>
+        </div> */}
 
         {/* ── CALL/PUT BUYERS vs SELLERS BREAKDOWN ───────────────────────
             Shows the raw weighted flow volumes plus their percentages so

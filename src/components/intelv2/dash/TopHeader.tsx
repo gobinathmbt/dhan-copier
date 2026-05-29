@@ -1,6 +1,6 @@
 import type { IntelV2Snapshot, IntelV2Symbol } from "@/lib/intelV2Types";
-import { Activity, Calendar, ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
-import { v2Fmt, v2FmtSigned, V2Pill } from "./common";
+import { Activity, Calendar, ChevronLeft, ChevronRight, Clock, Lock, RefreshCw } from "lucide-react";
+import { V2Pill } from "./common";
 import { cn } from "@/lib/utils";
 import { useEffect, useState } from "react";
 
@@ -36,13 +36,6 @@ export function TopHeaderV2({
   }, []);
   const istTime = now.toLocaleTimeString("en-IN", { hour12: false });
 
-  const spotChange = data?.spot.change ?? 0;
-  const spotPct = data?.spot.changePct ?? 0;
-
-  const fut = data?.futures.ltp ?? 0;
-  const futChange = (fut && data?.spot.priorClose) ? Number((fut - data.spot.priorClose).toFixed(2)) : 0;
-  const futPct = (data?.spot.priorClose && futChange) ? Number(((futChange / data.spot.priorClose) * 100).toFixed(2)) : 0;
-
   const showLive = !date;
   const allDates = (() => {
     const set = new Set([...availableDates, todayIST()]);
@@ -67,7 +60,7 @@ export function TopHeaderV2({
   const goLive = () => onDate(null);
 
   return (
-    <div className="flex h-16 shrink-0 items-center justify-between border-b border-white/[0.06] bg-[#0a0d12] px-4">
+    <div className="relative flex h-16 shrink-0 items-center justify-between border-b border-white/[0.06] bg-[#0a0d12] px-4">
       {/* LEFT — Logo + Symbol toggle */}
       <div className="flex items-center gap-5">
         <div className="flex items-center gap-2">
@@ -100,76 +93,96 @@ export function TopHeaderV2({
         </div>
       </div>
 
-      {/* CENTER — Spot / Fut / Premium / VIX */}
-      <div className="flex items-center gap-8">
-        <Quote
-          label="Spot"
-          value={v2Fmt(data?.spot.ltp, 2)}
-          changeAbs={spotChange}
-          changePct={spotPct}
-          live={!!data?.spot.live}
-        />
-        <Quote
-          label={symbol === "SENSEX" ? "Sensex Fut" : "Nifty Fut"}
-          value={v2Fmt(fut, 2)}
-          changeAbs={futChange}
-          changePct={futPct}
-        />
-        <Quote
-          label="Premium / Disc"
-          value={v2Fmt(data?.futures.premium, 2)}
-          tone={(data?.futures.premium ?? 0) >= 0 ? "bull" : "bear"}
-          subText={(data?.futures.premium ?? 0) >= 0 ? "Premium" : "Discount"}
-        />
-        <Quote
-          label="India VIX"
-          value={v2Fmt(data?.dashboard?.ivAnalytics?.vix, 2)}
-          changePct={data?.dashboard?.ivAnalytics?.vixChangePct ?? null}
-        />
-      </div>
+      {/* CENTER — Date · Status · State · Time as styled icon tiles
+          (absolutely positioned so the cluster is centered against the
+          full header width regardless of how wide LEFT/RIGHT clusters are). */}
+      <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+        <div className="pointer-events-auto flex items-center gap-3">
+        <CenterTile
+          tone="info"
+          icon={<Calendar size={18} />}
+          label="DATE"
+        >
+          <div className="flex items-center gap-1">
+            <button
+              onClick={goPrev}
+              disabled={!canPrev}
+              className="rounded p-0.5 text-sky-300/65 hover:text-sky-300 disabled:opacity-30"
+              title="Previous day"
+            >
+              <ChevronLeft size={14} />
+            </button>
+            <input
+              type="date"
+              value={date || todayIST()}
+              max={todayIST()}
+              onChange={(e) => {
+                const v = e.target.value;
+                onDate(v === todayIST() ? null : v);
+              }}
+              className="bg-transparent text-[13px] font-mono font-bold text-sky-200 outline-none [color-scheme:dark]"
+            />
+            <button
+              onClick={goNext}
+              disabled={!canNext}
+              className="rounded p-0.5 text-sky-300/65 hover:text-sky-300 disabled:opacity-30"
+              title="Next day"
+            >
+              <ChevronRight size={14} />
+            </button>
+          </div>
+        </CenterTile>
 
-      {/* RIGHT — Date picker, refresh, time, status */}
-      <div className="flex items-center gap-3">
-        <div className="flex items-center gap-1 rounded-md border border-white/[0.07] bg-white/[0.03] px-2 py-1.5">
-          <button
-            onClick={goPrev}
-            disabled={!canPrev}
-            className="rounded p-0.5 text-white/65 hover:bg-white/10 hover:text-white disabled:opacity-30"
-            title="Previous day"
-          >
-            <ChevronLeft size={15} />
-          </button>
-          <Calendar size={13} className="text-white/55" />
-          <input
-            type="date"
-            value={date || todayIST()}
-            max={todayIST()}
-            onChange={(e) => {
-              const v = e.target.value;
-              onDate(v === todayIST() ? null : v);
-            }}
-            className="bg-transparent text-[12px] font-mono text-white/85 outline-none [color-scheme:dark]"
-          />
-          <button
-            onClick={goNext}
-            disabled={!canNext}
-            className="rounded p-0.5 text-white/65 hover:bg-white/10 hover:text-white disabled:opacity-30"
-            title="Next day"
-          >
-            <ChevronRight size={15} />
-          </button>
+        <CenterTile
+          tone={showLive ? "bull" : "neutral"}
+          icon={<Activity size={18} />}
+          label="STATUS"
+        >
           <button
             onClick={goLive}
             className={cn(
-              "ml-1 rounded px-2 py-1 text-[11px] font-bold tracking-wider",
-              showLive ? "bg-emerald-500/20 text-emerald-400" : "bg-white/5 text-white/55 hover:text-white",
+              "rounded-md border px-3 py-1 text-[12px] font-black tracking-[0.18em]",
+              showLive
+                ? "border-emerald-400/60 bg-emerald-400/15 text-emerald-300 shadow-[0_0_12px_rgba(34,197,94,0.35)]"
+                : "border-white/15 bg-white/5 text-white/55 hover:text-white",
+            )}
+            title={showLive ? "Auto-refresh enabled" : "Click to go live"}
+          >
+            {showLive ? "LIVE" : "STATIC"}
+          </button>
+        </CenterTile>
+
+        <CenterTile
+          tone={data?.market.isOpen ? "bull" : "bear"}
+          icon={data?.market.isOpen ? <Activity size={18} /> : <Lock size={16} />}
+          label="STATE"
+        >
+          <span
+            className={cn(
+              "rounded-md border px-3 py-1 text-[12px] font-black tracking-[0.18em]",
+              data?.market.isOpen
+                ? "border-emerald-400/60 bg-emerald-400/15 text-emerald-300 shadow-[0_0_12px_rgba(34,197,94,0.35)]"
+                : "border-rose-400/60 bg-rose-400/15 text-rose-300 shadow-[0_0_12px_rgba(239,68,68,0.30)]",
             )}
           >
-            LIVE
-          </button>
-        </div>
+            {data?.market.isOpen ? "OPEN" : "CLOSED"}
+          </span>
+        </CenterTile>
 
-        {/* Refresh button + last-updated indicator */}
+        <CenterTile
+          tone="purple"
+          icon={<Clock size={18} />}
+          label="TIME"
+        >
+          <span className="font-mono text-[14px] font-bold tabular-nums text-purple-200">
+            {istTime}
+          </span>
+        </CenterTile>
+        </div>
+      </div>
+
+      {/* RIGHT — Refresh + last-updated */}
+      <div className="flex items-center gap-3">
         <div className="flex items-center gap-1.5 rounded-md border border-white/[0.07] bg-white/[0.03] px-2 py-1.5">
           <button
             onClick={() => onRefresh?.()}
@@ -192,53 +205,54 @@ export function TopHeaderV2({
             size="xs"
           />
         </div>
-
-        <div className="flex flex-col items-end">
-          <V2Pill
-            label={data?.market.isOpen ? "OPEN" : "CLOSED"}
-            tone={data?.market.isOpen ? "bull" : "bear"}
-            size="sm"
-          />
-          <div className="font-mono text-[11px] text-white/65 mt-0.5">{istTime}</div>
-        </div>
       </div>
     </div>
   );
 }
 
-function Quote({
-  label, value, changeAbs, changePct, tone, subText, live,
+/* ─────────────────────────────────────────────────────────────────────
+ * CenterTile — neon-style header card with icon + label + content.
+ * Matches the user's reference image: rounded box with a glowing icon
+ * at top, ALL-CAPS label below, action/value at the bottom.
+ * ───────────────────────────────────────────────────────────────────── */
+function CenterTile({
+  tone, icon, label, children,
 }: {
+  tone: "info" | "bull" | "bear" | "warn" | "neutral" | "purple";
+  icon: React.ReactNode;
   label: string;
-  value: string;
-  changeAbs?: number | null;
-  changePct?: number | null;
-  tone?: "bull" | "bear" | "neutral";
-  subText?: string;
-  live?: boolean;
+  children: React.ReactNode;
 }) {
-  const c = changeAbs ?? changePct ?? 0;
-  const positive = c >= 0;
-  const tColor = tone === "bull" ? "text-emerald-400"
-    : tone === "bear" ? "text-rose-400"
-    : positive ? "text-emerald-400" : "text-rose-400";
+  const palette = {
+    info:    { color: "#38bdf8", bg: "rgba(56,189,248,0.10)",  border: "rgba(56,189,248,0.40)",  glow: "0 0 14px rgba(56,189,248,0.25)" },
+    bull:    { color: "#22c55e", bg: "rgba(34,197,94,0.10)",   border: "rgba(34,197,94,0.40)",   glow: "0 0 14px rgba(34,197,94,0.25)"  },
+    bear:    { color: "#ef4444", bg: "rgba(239,68,68,0.10)",   border: "rgba(239,68,68,0.40)",   glow: "0 0 14px rgba(239,68,68,0.25)"  },
+    warn:    { color: "#f59e0b", bg: "rgba(245,158,11,0.10)",  border: "rgba(245,158,11,0.40)",  glow: "0 0 14px rgba(245,158,11,0.25)" },
+    neutral: { color: "#9ca3af", bg: "rgba(156,163,175,0.08)", border: "rgba(156,163,175,0.30)", glow: "none" },
+    purple:  { color: "#a855f7", bg: "rgba(168,85,247,0.10)",  border: "rgba(168,85,247,0.40)",  glow: "0 0 14px rgba(168,85,247,0.25)" },
+  } as const;
+  const p = palette[tone];
   return (
-    <div className="flex flex-col items-center">
-      <span className="flex items-center gap-1 text-[10px] uppercase tracking-[0.14em] text-white/55">
-        {label}
-        {live ? (
-          <span
-            className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(34,197,94,0.8)]"
-            title="Live WebSocket tick"
-          />
-        ) : null}
-      </span>
-      <span className="font-mono text-[18px] font-bold text-white">{value}</span>
-      <span className={cn("font-mono text-[11px]", tColor)}>
-        {changeAbs != null ? v2FmtSigned(changeAbs, 2) : ""}
-        {changePct != null ? ` (${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%)` : ""}
-        {subText ? ` ${subText}` : ""}
-      </span>
+    <div
+      className="flex flex-col items-center justify-center gap-1 rounded-md border px-3 py-1.5"
+      style={{ borderColor: p.border, background: p.bg, boxShadow: p.glow }}
+    >
+      <div className="flex items-center gap-1.5">
+        <span
+          className="flex h-5 w-5 items-center justify-center rounded-full"
+          style={{ background: `${p.color}22`, color: p.color }}
+        >
+          {icon}
+        </span>
+        <span
+          className="text-[10px] font-bold uppercase tracking-[0.18em]"
+          style={{ color: p.color }}
+        >
+          {label}
+        </span>
+      </div>
+      <div className="flex items-center justify-center">{children}</div>
     </div>
   );
 }
+

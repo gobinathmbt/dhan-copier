@@ -79,85 +79,89 @@ export function ExecutionEngineCard({ data }: { data: IntelV2Snapshot | null }) 
         </div>
       </div>
 
-      {/* MAIN ROW — action + entry + confidence */}
-      <div className="grid grid-cols-[1.4fr_1fr_auto] items-center gap-3">
-        {/* Action block */}
-        <div className="flex flex-col">
-          <span
-            className="text-[40px] font-black leading-none tracking-[0.04em]"
-            style={{ color: accent, textShadow: isHero ? `0 0 14px ${accent}` : "none" }}
-          >
-            {ee.action}
-          </span>
-          {ee.targetStrike != null ? (
-            <span className="mt-1 font-mono text-[18px] font-bold" style={{ color: accent }}>
-              {ee.targetStrike.toLocaleString()} {ee.targetSide}
+      {/* MAIN ROW — verdict block (BUY CE + bigger confidence ring beside it on the LEFT)
+          + entry type / votes on the RIGHT. */}
+      <div className="grid grid-cols-[auto_1fr] items-center gap-4">
+        {/* LEFT cluster — Action label paired with a large confidence ring */}
+        <div className="flex items-center gap-4">
+          {/* Action block */}
+          <div className="flex flex-col">
+            <span
+              className="text-[40px] font-black leading-none tracking-[0.04em]"
+              style={{ color: accent, textShadow: isHero ? `0 0 14px ${accent}` : "none" }}
+            >
+              {ee.action}
             </span>
-          ) : (
-            <span className="mt-1 text-[12px] font-bold uppercase tracking-wider text-white/55">
-              {ee.mode === "AVOID" ? "Avoid Entry" : "Standby"}
+            {ee.targetStrike != null ? (
+              <span className="mt-1 font-mono text-[18px] font-bold" style={{ color: accent }}>
+                {ee.targetStrike.toLocaleString()} {ee.targetSide}
+              </span>
+            ) : (
+              <span className="mt-1 text-[12px] font-bold uppercase tracking-wider text-white/55">
+                {ee.mode === "AVOID" ? "Avoid Entry" : "Standby"}
+              </span>
+            )}
+            <span className="text-[10px] uppercase tracking-wider text-white/55">
+              {ee.lifecyclePhase} PHASE
             </span>
-          )}
-          <span className="text-[10px] uppercase tracking-wider text-white/55">
-            {ee.lifecyclePhase} PHASE
-          </span>
+          </div>
+
+          {/* Big slim confidence ring sits next to BUY CE */}
+          <div className="flex flex-col items-center justify-center gap-1">
+            <div className="relative h-[170px] w-[170px]">
+              <svg viewBox="0 0 100 100" className="h-full w-full -rotate-90">
+                <circle cx="50" cy="50" r="44" fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="3" />
+                <circle
+                  cx="50" cy="50" r="44" fill="none"
+                  stroke={accent} strokeWidth="3" strokeLinecap="round"
+                  strokeDasharray={276}
+                  strokeDashoffset={276 - (276 * ee.confidence) / 100}
+                  style={{ transition: "stroke-dashoffset 0.6s ease" }}
+                />
+              </svg>
+              <div className="absolute inset-0 flex flex-col items-center justify-center">
+                <span className="font-mono text-[42px] font-black leading-none" style={{ color: accent }}>
+                  {ee.confidence}%
+                </span>
+                <span className="mt-1 text-[9px] font-bold uppercase tracking-[0.18em] text-white/55">
+                  Confidence
+                </span>
+              </div>
+            </div>
+            {/* No-Trade chip */}
+            <span
+              className="rounded-sm px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
+              style={{
+                background: ee.noTradeScore >= 60 ? "rgba(239,68,68,0.20)"
+                  : ee.noTradeScore >= 30 ? "rgba(250,204,21,0.20)"
+                  : "rgba(34,197,94,0.20)",
+                color: ee.noTradeScore >= 60 ? "#ef4444"
+                  : ee.noTradeScore >= 30 ? "#facc15"
+                  : "#22c55e",
+              }}
+            >
+              No-Trade {ee.noTradeScore}
+            </span>
+          </div>
         </div>
 
-        {/* Entry type + votes */}
-        <div className="flex flex-col gap-1 text-[10px]">
+        {/* RIGHT — Entry type + votes */}
+        <div className="flex flex-col gap-2 text-[10px]">
           <div
-            className="rounded-md border px-2 py-1.5"
+            className="rounded-md border px-3 py-2.5"
             style={{ borderColor: accentBorder, background: accentSoft }}
           >
-            <span className="text-[8px] font-bold uppercase tracking-[0.16em] text-white/55">Entry Type</span>
-            <div className="font-mono text-[14px] font-black leading-tight" style={{ color: accent }}>
+            <span className="text-[11px] font-bold uppercase tracking-[0.18em] text-white/65">Entry Type</span>
+            <div className="font-mono text-[24px] font-black leading-tight" style={{ color: accent }}>
               {ee.entryType}
             </div>
           </div>
           {/* Vote breakdown — visual hint of consensus */}
-          <div className="grid grid-cols-3 gap-1">
+          <div className="grid grid-cols-3 gap-1.5">
             <VoteChip label="CE" value={ee.votes.ce} tone="bull" winning={ee.action === "BUY CE"} />
             <VoteChip label="PE" value={ee.votes.pe} tone="bear" winning={ee.action === "BUY PE"} />
             <VoteChip label="WAIT" value={ee.votes.wait} tone="warn" winning={ee.action === "WAIT"} />
           </div>
-        </div>
-
-        {/* Confidence ring */}
-        <div className="flex flex-col items-center gap-0.5">
-          <div className="relative h-[80px] w-[80px]">
-            <svg viewBox="0 0 100 100" className="h-full w-full -rotate-90">
-              <circle cx="50" cy="50" r="40" fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="9" />
-              <circle
-                cx="50" cy="50" r="40" fill="none"
-                stroke={accent} strokeWidth="9" strokeLinecap="round"
-                strokeDasharray={251}
-                strokeDashoffset={251 - (251 * ee.confidence) / 100}
-                style={{ transition: "stroke-dashoffset 0.6s ease" }}
-              />
-            </svg>
-            <div className="absolute inset-0 flex flex-col items-center justify-center">
-              <span className="font-mono text-[20px] font-black leading-none" style={{ color: accent }}>
-                {ee.confidence}%
-              </span>
-              <span className="mt-0.5 text-[7px] font-bold uppercase tracking-[0.16em] text-white/55">
-                Confidence
-              </span>
-            </div>
-          </div>
-          {/* No-Trade chip */}
-          <span
-            className="rounded-sm px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider"
-            style={{
-              background: ee.noTradeScore >= 60 ? "rgba(239,68,68,0.20)"
-                : ee.noTradeScore >= 30 ? "rgba(250,204,21,0.20)"
-                : "rgba(34,197,94,0.20)",
-              color: ee.noTradeScore >= 60 ? "#ef4444"
-                : ee.noTradeScore >= 30 ? "#facc15"
-                : "#22c55e",
-            }}
-          >
-            No-Trade {ee.noTradeScore}
-          </span>
         </div>
       </div>
 
@@ -222,16 +226,16 @@ function VoteChip({ label, value, tone, winning }: {
   const t = V2_TONE[tone];
   return (
     <div
-      className="flex items-center justify-between rounded-sm border px-1.5 py-0.5"
+      className="flex items-center justify-between rounded-sm border px-2.5 py-1.5"
       style={{
         background: winning ? `${t.color}22` : "rgba(255,255,255,0.02)",
         borderColor: winning ? `${t.color}55` : "rgba(255,255,255,0.06)",
       }}
     >
-      <span className="text-[8px] font-bold uppercase tracking-wider text-white/55">{label}</span>
+      <span className="text-[10px] font-bold uppercase tracking-wider text-white/65">{label}</span>
       <span
-        className="font-mono text-[10px] font-bold tabular-nums"
-        style={{ color: winning ? t.color : "rgba(255,255,255,0.65)" }}
+        className="font-mono text-[14px] font-bold tabular-nums"
+        style={{ color: winning ? t.color : "rgba(255,255,255,0.75)" }}
       >
         {value}
       </span>
