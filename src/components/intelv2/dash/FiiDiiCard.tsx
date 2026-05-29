@@ -202,7 +202,7 @@ export function FiiDiiCard({ data }: { data: IntelV2Snapshot | null }) {
                 return (
                   <tr key={p} className={i % 2 === 0 ? "bg-white/[0.02]" : "bg-white/[0.05]"}>
                     <td className="px-3 py-2.5 text-[12px] font-bold uppercase tracking-wider text-white/95">{p}</td>
-                    <td className="px-2 py-2.5 font-mono text-[10px] text-white/55">{fd.date}</td>
+                    <td className="px-2 py-2.5 font-mono text-[10px] text-white/95">{fd.date}</td>
                     <td className="px-2 py-2.5 text-right font-mono text-[11px] text-white/35">—</td>
                     <td className="px-2 py-2.5 text-right font-mono text-[11px] text-white/35">—</td>
                     <td
@@ -248,17 +248,17 @@ export function FiiDiiCard({ data }: { data: IntelV2Snapshot | null }) {
                 return (
                   <tr key={p} className={i % 2 === 0 ? "bg-white/[0.02]" : "bg-white/[0.05]"}>
                     <td className="px-2.5 py-2.5 text-[12px] font-bold uppercase tracking-wider text-white/95">{p}</td>
-                    <td className="px-2 py-2.5 font-mono text-[10px] text-white/55">{fd.date}</td>
-                    <td className="px-2 py-2.5 text-right font-mono text-[11px] tabular-nums text-white/85">{c.hasBuy ? fmt(c.buy) : <span className="text-white/35">—</span>}</td>
-                    <td className="px-2 py-2.5 text-right font-mono text-[11px] tabular-nums text-white/85">{c.hasSell ? fmt(c.sell) : <span className="text-white/35">—</span>}</td>
+                    <td className="px-2 py-2.5 font-mono text-[10px] text-white/95">{fd.date}</td>
+                    <td className="px-2 py-2.5 text-right font-mono text-[11px] tabular-nums text-white/95">{c.hasBuy ? fmt(c.buy) : <span className="text-white/35">—</span>}</td>
+                    <td className="px-2 py-2.5 text-right font-mono text-[11px] tabular-nums text-white/95">{c.hasSell ? fmt(c.sell) : <span className="text-white/35">—</span>}</td>
                     <td
                       className="px-2 py-2.5 text-right font-mono text-[12px] font-bold tabular-nums"
                       style={{ color: colorOf(c.net) }}
                     >
                       {fmtSigned(c.net)}
                     </td>
-                    <td className="px-2 py-2.5 text-right font-mono text-[11px] tabular-nums text-white/85">{pu.hasBuy ? fmt(pu.buy) : <span className="text-white/35">—</span>}</td>
-                    <td className="px-2 py-2.5 text-right font-mono text-[11px] tabular-nums text-white/85">{pu.hasSell ? fmt(pu.sell) : <span className="text-white/35">—</span>}</td>
+                    <td className="px-2 py-2.5 text-right font-mono text-[11px] tabular-nums text-white/95">{pu.hasBuy ? fmt(pu.buy) : <span className="text-white/35">—</span>}</td>
+                    <td className="px-2 py-2.5 text-right font-mono text-[11px] tabular-nums text-white/95">{pu.hasSell ? fmt(pu.sell) : <span className="text-white/35">—</span>}</td>
                     <td
                       className="px-2 py-2.5 text-right font-mono text-[12px] font-bold tabular-nums"
                       style={{ color: colorOf(pu.net) }}
@@ -296,10 +296,10 @@ export function FiiDiiCard({ data }: { data: IntelV2Snapshot | null }) {
 
           {/* Reason bullets */}
           <div>
-            <div className="mb-1 text-[11px] font-bold uppercase tracking-wider text-white/55">
+            <div className="mb-1 text-[11px] font-bold uppercase tracking-wider text-white/95">
               Reason:
             </div>
-            <ul className="flex flex-col gap-1 text-[12px] leading-snug text-white/85">
+            <ul className="flex flex-col gap-1 text-[12px] leading-snug text-white/95">
               {reasons.map((r, i) => (
                 <li key={i} className="flex items-start gap-2">
                   <span className="mt-0.5 shrink-0" style={{ color: V2_TONE[flowTone].color }}>
@@ -313,7 +313,7 @@ export function FiiDiiCard({ data }: { data: IntelV2Snapshot | null }) {
 
           {/* Market Interpretation arrows */}
           <div>
-            <div className="mb-1 text-[11px] font-bold uppercase tracking-wider text-white/55">
+            <div className="mb-1 text-[11px] font-bold uppercase tracking-wider text-white/95">
               Market Interpretation:
             </div>
             <ul className="flex flex-col gap-1 text-[12px] leading-snug text-white/90">
@@ -343,7 +343,7 @@ function SectionTitle({ title, date }: { title: string; date?: string }) {
   return (
     <div className="flex items-center justify-between border-b border-sky-500/25 pb-1">
       <span className="text-[12px] font-bold uppercase tracking-[0.18em] text-sky-300">{title}</span>
-      {date ? <span className="font-mono text-[11px] text-white/55">{date}</span> : null}
+      {date ? <span className="font-mono text-[11px] text-white/95">{date}</span> : null}
     </div>
   );
 }
@@ -360,7 +360,7 @@ function ViewPill({
 }) {
   if (!view) {
     return (
-      <span className="inline-flex items-center rounded-sm border border-white/15 bg-white/[0.05] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-white/55">
+      <span className="inline-flex items-center rounded-sm border border-white/15 bg-white/[0.05] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-white/95">
         Indecisive
       </span>
     );
