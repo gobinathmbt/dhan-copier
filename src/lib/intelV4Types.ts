@@ -14,6 +14,7 @@ export interface V4SideMetric {
   buyersPct: number;
   sellersPct: number;
   buildup: string;
+  oiState?: string;
   dominance: "BUYERS" | "SELLERS" | "BALANCED";
   score: number;
 }
@@ -27,6 +28,14 @@ export interface V4Strike {
   dominantSide: "CE" | "PE" | "BALANCED";
   strength: "WEAK" | "MODERATE" | "STRONG" | "DOMINANT";
   marketImpact: "BULLISH" | "BEARISH" | "NEUTRAL";
+  wall?: {
+    type: "RESISTANCE" | "SUPPORT";
+    tier: string;
+    tierIdx: number;
+    oi: number;
+    oiChange: number;
+    strength: "STRONG" | "MODERATE" | "WEAK";
+  } | null;
   note: string;
 }
 
@@ -60,7 +69,32 @@ export interface V4Decision {
   atm: number | null;
   primaryStrike: number;
   step: number;
+  window?: { above: number; below: number; expanded: boolean };
   overall: V4Overall;
+  pressure?: {
+    cePressure: number;
+    pePressure: number;
+    tilt: number;
+    tiltLabel: "STRONG BULLISH" | "BULLISH" | "BALANCED" | "BEARISH" | "STRONG BEARISH";
+    intensity: "LOW" | "MODERATE" | "HIGH" | "EXTREME";
+    intensityPct: number;
+  };
+  oiTrend?: {
+    ceOiAdded: number;
+    ceOiUnwind: number;
+    peOiAdded: number;
+    peOiUnwind: number;
+    ceShare: number;
+    peShare: number;
+    narrative: string;
+    bias: "BULLISH" | "BEARISH" | "NEUTRAL";
+    priceDirection: "UP" | "DOWN";
+  };
+  supportResistance?: {
+    topResistance: { strike: number; tier: string; oi: number; oiChange: number; strength: "STRONG" | "MODERATE" | "WEAK" } | null;
+    topSupport:    { strike: number; tier: string; oi: number; oiChange: number; strength: "STRONG" | "MODERATE" | "WEAK" } | null;
+    walls: Array<{ strike: number; type: "RESISTANCE" | "SUPPORT"; tier: string; tierIdx: number; oi: number; oiChange: number; strength: "STRONG" | "MODERATE" | "WEAK" }>;
+  };
   bestStrike: { strike: number; side: string; score: number; reason: string } | null;
   mostVolume: { strike: number; volume: number } | null;
   strikes: V4Strike[];

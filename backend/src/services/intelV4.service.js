@@ -179,6 +179,8 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
   const flowDelta = v2.flow?.delta;
   const futPremium = v2.futures?.premium ?? 0;
   const vix = v2.macro?.vix?.changePct ?? 0;
+  const md = v2.dashboard?.marketDirection || null;
+  const oiBuildup = v2.dashboard?.oiBuildupAnalysis || null;
 
   if (atm == null) {
     return { ok: false, error: 'ATM unresolved', version: 'v4' };
@@ -191,25 +193,70 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
 
   const primaryStrike = Math.round(atm / step) * step;
 
+  // ── Build wall maps from V2's marketDirection (rounded to 100-step) ──
+  // Walls = strikes ranked by OI on each side. We map each strike to its
+  // tier label ("Immediate Resistance", "Major Support", etc.) and OI.
+  const wallMap = new Map();
+  const resistances = (md?.resistances || []).slice(0, 6);
+  const supports    = (md?.supports || []).slice(0, 6);
+  resistances.forEach((r, i) => {
+    const k = Math.round(r.strike / step) * step;
+    wallMap.set(k, {
+      type: 'RESISTANCE',
+      tier: r.tier,
+      tierIdx: i,
+      oi: r.oi,
+      oiChange: r.oiChange,
+      strength: i === 0 ? 'STRONG' : i <= 2 ? 'MODERATE' : 'WEAK',
+    });
+  });
+  supports.forEach((r, i) => {
+    const k = Math.round(r.strike / step) * step;
+    if (!wallMap.has(k)) {
+      wallMap.set(k, {
+        type: 'SUPPORT',
+        tier: r.tier,
+        tierIdx: i,
+        oi: r.oi,
+        oiChange: r.oiChange,
+        strength: i === 0 ? 'STRONG' : i <= 2 ? 'MODERATE' : 'WEAK',
+      });
+    }
+  });
+
+  // ── Dynamic window — if a major wall sits beyond ATM ± 5, extend up to ±8 ──
+  let windowAbove = STRIKE_WINDOW;
+  let windowBelow = STRIKE_WINDOW;
+  const MAX_WINDOW = 8;
+  for (const [k, w] of wallMap.entries()) {
+    const offset = Math.round((k - primaryStrike) / step);
+    if (w.tierIdx <= 1) { // only top-2 walls trigger expansion
+      if (offset > windowAbove)  windowAbove = Math.min(MAX_WINDOW, offset);
+      if (offset < -windowBelow) windowBelow = Math.min(MAX_WINDOW, -offset);
+    }
+  }
+
   // Build a strike map from the ladder for O(1) lookup.
   const byStrike = new Map(ladder.map(r => [r.strike, r]));
 
-  // ── Per-strike rows for ATM ± 5 ──────────────────────────────────────
+  // ── Per-strike rows for ATM ± dynamic window ────────────────────────
   const strikes = [];
-  for (let i = STRIKE_WINDOW; i >= -STRIKE_WINDOW; i--) {
+  for (let i = windowAbove; i >= -windowBelow; i--) {
     const strike = primaryStrike + i * step;
     const row = byStrike.get(strike);
+    const wall = wallMap.get(strike) || null;
     if (!row) {
       strikes.push({
         strike,
         isAtm: i === 0,
         offset: i,
-        ce: { oi: 0, oiChg: 0, ltp: 0, iv: 0, delta: 0, vol: 0, buyersPct: 50, sellersPct: 50, buildup: '—', dominance: 'BALANCED', score: 0 },
-        pe: { oi: 0, oiChg: 0, ltp: 0, iv: 0, delta: 0, vol: 0, buyersPct: 50, sellersPct: 50, buildup: '—', dominance: 'BALANCED', score: 0 },
+        ce: { oi: 0, oiChg: 0, ltp: 0, iv: 0, delta: 0, vol: 0, buyersPct: 50, sellersPct: 50, buildup: '—', oiState: '—', dominance: 'BALANCED', score: 0 },
+        pe: { oi: 0, oiChg: 0, ltp: 0, iv: 0, delta: 0, vol: 0, buyersPct: 50, sellersPct: 50, buildup: '—', oiState: '—', dominance: 'BALANCED', score: 0 },
         dominantSide: 'BALANCED',
         strength: 'WEAK',
         marketImpact: 'NEUTRAL',
-        note: 'No data',
+        wall,
+        note: wall ? `${wall.type} wall — ${wall.tier}` : 'No data',
       });
       continue;
     }
@@ -218,8 +265,22 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
     const ceScored = scoreSide(ceBuildup, row.ce?.volume || 0);
     const peScored = scoreSide(peBuildup, row.pe?.volume || 0);
 
+    // OI state — concise label for the change-in-OI direction
+    const oiStateOf = (oi, oiChg) => {
+      if (!oi || !Number.isFinite(oiChg)) return '—';
+      const pct = (oiChg / oi) * 100;
+      if (pct >= 50) return 'STRONG ADD';
+      if (pct >= 15) return 'ADDING';
+      if (pct >= 5) return 'BUILDING';
+      if (pct <= -50) return 'STRONG UNWIND';
+      if (pct <= -15) return 'UNWINDING';
+      if (pct <= -5) return 'EASING';
+      return 'STABLE';
+    };
+    const ceOiState = oiStateOf(row.ce?.oi, row.ce?.oiChange);
+    const peOiState = oiStateOf(row.pe?.oi, row.pe?.oiChange);
+
     // Per-strike market impact: combine CE + PE impact directions.
-    // Bullish impact = CE.buyersPct - CE.sellersPct + PE.sellersPct - PE.buyersPct
     const ceImpact = IMPACT_MAP[`CE|${ceBuildup}`] ?? 'NEUTRAL';
     const peImpact = IMPACT_MAP[`PE|${peBuildup}`] ?? 'NEUTRAL';
     const ceScore = ceImpact === 'BULLISH' ? +1 : ceImpact === 'BEARISH' ? -1 : 0;
@@ -239,6 +300,8 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
 
     // Note — short institutional summary
     const note = (() => {
+      if (wall && wall.tierIdx === 0) return `★ ${wall.type === 'RESISTANCE' ? 'TOP RESISTANCE' : 'TOP SUPPORT'}`;
+      if (wall) return `${wall.tier}`;
       if (i === 0) return `ATM @ ${primaryStrike}`;
       if (ceBuildup === 'Long Buildup' && peBuildup === 'Short Buildup') return 'Institutions long this strike';
       if (ceBuildup === 'Short Buildup' && peBuildup === 'Long Buildup') return 'Institutions short this strike';
@@ -263,6 +326,7 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
         buyersPct: ceScored.buyersPct,
         sellersPct: ceScored.sellersPct,
         buildup: ceBuildup,
+        oiState: ceOiState,
         dominance: ceScored.dominance,
         score: ceScored.score,
       },
@@ -276,12 +340,14 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
         buyersPct: peScored.buyersPct,
         sellersPct: peScored.sellersPct,
         buildup: peBuildup,
+        oiState: peOiState,
         dominance: peScored.dominance,
         score: peScored.score,
       },
       dominantSide,
       strength: pickStrengthLabel(dominanceMagnitude),
       marketImpact,
+      wall,
       note,
     });
   }
@@ -415,6 +481,94 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
     return best;
   })();
 
+  // ── CE / PE PRESSURE GAUGE ─────────────────────────────────────────
+  // Aggregate gauge from 0..100 on each side. 100 = max bullish (CE) /
+  // bearish (PE) push. Both can be high simultaneously when volatility
+  // expands on both sides.
+  //
+  //   cePressure = bullishFlow / totalFlow * 100
+  //   pePressure = bearishFlow / totalFlow * 100
+  //   tilt       = cePressure - pePressure  (-100..+100)
+  //
+  // Plus an "intensity" reading driven by total OI change in the window
+  // — high intensity = institutions actively positioning, low = quiet.
+  const cePressure = bullishFlowPct;
+  const pePressure = 100 - bullishFlowPct;
+  const tilt = cePressure - pePressure;
+  const totalOiChg = strikes.reduce((s, x) => s + Math.abs(x.ce.oiChg) + Math.abs(x.pe.oiChg), 0);
+  const totalOi = strikes.reduce((s, x) => s + x.ce.oi + x.pe.oi, 0);
+  const oiActivity = totalOi > 0 ? (totalOiChg / totalOi) * 100 : 0;
+  const intensity =
+    oiActivity >= 30 ? 'EXTREME' :
+    oiActivity >= 15 ? 'HIGH' :
+    oiActivity >= 7  ? 'MODERATE' :
+    'LOW';
+
+  // ── OI TREND ANALYSIS — separate from per-strike buildup ──────────
+  // Aggregate change-in-OI across CE vs PE within the visible window.
+  //   ceOiAdded  = sum of CE oiChg where oiChg > 0
+  //   peOiAdded  = sum of PE oiChg where oiChg > 0
+  //   bias       = whichever side added more OI today
+  //
+  // Combined with price direction (vs prior close) this maps cleanly to
+  // the four-quadrant institutional narrative:
+  //   • CE OI ↑ + Price ↓ = CE WRITERS DOMINANT  (bearish)
+  //   • PE OI ↑ + Price ↑ = PE WRITERS DOMINANT  (bullish)
+  //   • CE OI ↑ + Price ↑ = CE BUYERS DOMINANT   (bullish)
+  //   • PE OI ↑ + Price ↓ = PE BUYERS DOMINANT   (bearish)
+  let ceOiAdded = 0, ceOiUnwind = 0;
+  let peOiAdded = 0, peOiUnwind = 0;
+  for (const s of strikes) {
+    if (s.ce.oiChg > 0) ceOiAdded += s.ce.oiChg; else ceOiUnwind += -s.ce.oiChg;
+    if (s.pe.oiChg > 0) peOiAdded += s.pe.oiChg; else peOiUnwind += -s.pe.oiChg;
+  }
+  const priceUp = (v2.spot?.changePct ?? 0) >= 0;
+  const oiTrendNarrative = (() => {
+    if (ceOiAdded > peOiAdded * 1.2) {
+      return priceUp ? 'CE BUYERS DOMINANT' : 'CE WRITERS DOMINANT';
+    }
+    if (peOiAdded > ceOiAdded * 1.2) {
+      return priceUp ? 'PE WRITERS DOMINANT' : 'PE BUYERS DOMINANT';
+    }
+    return 'BALANCED OI BUILD';
+  })();
+  const oiTrendBias = (() => {
+    if (oiTrendNarrative.includes('CE BUYERS') || oiTrendNarrative.includes('PE WRITERS')) return 'BULLISH';
+    if (oiTrendNarrative.includes('CE WRITERS') || oiTrendNarrative.includes('PE BUYERS')) return 'BEARISH';
+    return 'NEUTRAL';
+  })();
+
+  // ── SUPPORT / RESISTANCE summary (top wall on each side, within window) ──
+  const inWindow = new Set(strikes.map(s => s.strike));
+  const topResistance = (() => {
+    for (const r of resistances) {
+      const k = Math.round(r.strike / step) * step;
+      if (inWindow.has(k)) {
+        return {
+          strike: k, tier: r.tier, oi: r.oi, oiChange: r.oiChange,
+          strength: r.tier.toLowerCase().includes('immediate') ? 'STRONG'
+            : r.tier.toLowerCase().includes('strong') || r.tier.toLowerCase().includes('major') ? 'MODERATE'
+            : 'WEAK',
+        };
+      }
+    }
+    return null;
+  })();
+  const topSupport = (() => {
+    for (const r of supports) {
+      const k = Math.round(r.strike / step) * step;
+      if (inWindow.has(k)) {
+        return {
+          strike: k, tier: r.tier, oi: r.oi, oiChange: r.oiChange,
+          strength: r.tier.toLowerCase().includes('immediate') ? 'STRONG'
+            : r.tier.toLowerCase().includes('strong') || r.tier.toLowerCase().includes('major') ? 'MODERATE'
+            : 'WEAK',
+        };
+      }
+    }
+    return null;
+  })();
+
   return {
     ok: true,
     version: 'v4',
@@ -429,6 +583,7 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
     atm,
     primaryStrike,
     step,
+    window: { above: windowAbove, below: windowBelow, expanded: windowAbove > STRIKE_WINDOW || windowBelow > STRIKE_WINDOW },
     overall: {
       control,
       directionLikely,
@@ -443,6 +598,35 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
       conviction,
       verdict,
       reasons: reasons.slice(0, 6),
+    },
+    pressure: {
+      cePressure,                                  // 0..100
+      pePressure,                                  // 0..100
+      tilt,                                        // -100..+100 (positive = bullish)
+      tiltLabel:
+        tilt >= 40 ? 'STRONG BULLISH' :
+        tilt >= 15 ? 'BULLISH' :
+        tilt <= -40 ? 'STRONG BEARISH' :
+        tilt <= -15 ? 'BEARISH' :
+        'BALANCED',
+      intensity,                                   // LOW | MODERATE | HIGH | EXTREME
+      intensityPct: _round(oiActivity, 1),
+    },
+    oiTrend: {
+      ceOiAdded:  _round(ceOiAdded, 0),
+      ceOiUnwind: _round(ceOiUnwind, 0),
+      peOiAdded:  _round(peOiAdded, 0),
+      peOiUnwind: _round(peOiUnwind, 0),
+      ceShare:    Math.round((ceOiAdded / Math.max(1, ceOiAdded + peOiAdded)) * 100),
+      peShare:    Math.round((peOiAdded / Math.max(1, ceOiAdded + peOiAdded)) * 100),
+      narrative:  oiTrendNarrative,
+      bias:       oiTrendBias,
+      priceDirection: priceUp ? 'UP' : 'DOWN',
+    },
+    supportResistance: {
+      topResistance,
+      topSupport,
+      walls: Array.from(wallMap.entries()).map(([k, w]) => ({ strike: k, ...w })),
     },
     bestStrike,
     mostVolume,
