@@ -184,19 +184,10 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
     return { ok: false, error: 'ATM unresolved', version: 'v4' };
   }
 
-  // Step is inferred from snapshot — fall back to 100 when unknown.
-  const step = (() => {
-    if (ladder.length >= 2) {
-      const sorted = [...ladder].map(r => r.strike).sort((a, b) => a - b);
-      let minDiff = Infinity;
-      for (let i = 1; i < sorted.length; i++) {
-        const d = sorted[i] - sorted[i - 1];
-        if (d > 0 && d < minDiff) minDiff = d;
-      }
-      return minDiff !== Infinity ? minDiff : 100;
-    }
-    return 100;
-  })();
+  // Force 100-step grid regardless of the chain's native step. NIFTY ships
+  // 50-step strikes but the dashboard shows 100-step only (per project rule),
+  // so V4 always picks ATM ± 5 × 100 strikes.
+  const step = 100;
 
   const primaryStrike = Math.round(atm / step) * step;
 
