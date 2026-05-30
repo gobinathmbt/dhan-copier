@@ -1,5 +1,5 @@
 import { Link, useLocation, useNavigate, useRouter } from "@tanstack/react-router";
-import { Activity, LayoutDashboard, LineChart, Users, ScrollText, ClipboardList, TrendingUp, LogOut, Wifi, WifiOff, Target, Brain, Radar, Radio, Crosshair } from "lucide-react";
+import { Activity, LayoutDashboard, LineChart, Users, ScrollText, LogOut, Wifi, WifiOff, Target, Brain, Radio, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useModeStore } from "@/stores/mode.store";
 import { clearToken } from "@/lib/auth";
@@ -12,9 +12,12 @@ const NAV_ITEMS = [
   // { to: "/chart", label: "Chart", icon: LineChart },
   { to: "/custom-chart", label: "Chart", icon: LineChart },
   // { to: "/trade", label: "Order", icon: ClipboardList },
-  { to: "/intel", label: "Intel Terminal", icon: Radar },
+  // Intel V1 (legacy) — hidden. Re-enable by uncommenting.
+  // { to: "/intel", label: "Intel Terminal", icon: Radar },
   { to: "/intel-v2", label: "Intel V2 Console", icon: Radio },
-  { to: "/intel-v3", label: "Intel V3 Ultimate",  icon: Crosshair },
+  // Intel V3 Ultimate — hidden. Re-enable by uncommenting.
+  // { to: "/intel-v3", label: "Intel V3 Ultimate",  icon: Crosshair },
+  { to: "/intel-v4", label: "Intel V4 Decision",  icon: Zap },
   { to: "/nifty50", label: "Nifty 50", icon: Target },
   { to: "/scalping", label: "Intraday Scalping Algo AI", icon: Brain },
   { to: "/accounts", label: "Accounts", icon: Users },
