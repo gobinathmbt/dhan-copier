@@ -48,6 +48,45 @@
 
 const intelV2 = require('./intelV2.service');
 
+/* ─────────────────────────────────────────────────────────────────────
+ * Per-symbol history ring buffer.
+ * Stores up to last 240 snapshots (~12 min @ 3s polling) per symbol.
+ * Used by:
+ *   • OI velocity              (Δ OI per minute)
+ *   • Volume velocity          (vs trailing average)
+ *   • Wall stability           (how long the top wall has held)
+ *   • Strike migration         (top wall drift over time)
+ *   • IV trend                 (ATM IV expansion / contraction)
+ *   • Time above/below VWAP    (acceptance duration)
+ *   • Absorption detection     (price moves with no OI confirmation)
+ *   • Trend exhaustion         (price keeps going but volume / OI fading)
+ * ───────────────────────────────────────────────────────────────────── */
+const HISTORY_MAX = 240;
+const HISTORY_TTL_MS = 60 * 60_000;
+const _history = new Map(); // symbol → [{ t, atm, spot, vwap, atmIv, oiByStrike: Map, volByStrike: Map, topR, topS }]
+
+function _pushHistory(symbol, snap) {
+  const list = _history.get(symbol) || [];
+  list.push(snap);
+  const cutoff = Date.now() - HISTORY_TTL_MS;
+  while (list.length && list[0].t < cutoff) list.shift();
+  while (list.length > HISTORY_MAX) list.shift();
+  _history.set(symbol, list);
+}
+
+function _historyAt(symbol, ageMs) {
+  const list = _history.get(symbol) || [];
+  if (!list.length) return null;
+  const targetT = Date.now() - ageMs;
+  let best = null;
+  let bestDist = Infinity;
+  for (const s of list) {
+    const d = Math.abs(s.t - targetT);
+    if (d < bestDist) { best = s; bestDist = d; }
+  }
+  return best;
+}
+
 const STRIKE_WINDOW = 5; // ATM ± 5
 
 function _safe(n) { return Number.isFinite(n) ? n : 0; }
@@ -181,6 +220,9 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
   const vix = v2.macro?.vix?.changePct ?? 0;
   const md = v2.dashboard?.marketDirection || null;
   const oiBuildup = v2.dashboard?.oiBuildupAnalysis || null;
+  const atmIv = v2.options?.atmIv ?? 0;
+  const lotSize = v2.tradingDay?.lotSize || 50;
+  const dte = Math.max(0.5, v2.tradingDay?.daysToExpiry ?? 1);
 
   if (atm == null) {
     return { ok: false, error: 'ATM unresolved', version: 'v4' };
@@ -397,29 +439,444 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
   else if (bullishFlowPct <= 40) control = 'SELLERS';
   else control = 'NEUTRAL';
 
-  // Confidence — # of confirming dimensions
-  let confirms = 0;
-  if (control !== 'NEUTRAL') confirms++;
-  if (directionLikely !== 'RANGE') confirms++;
-  // VWAP confirmation
-  if (control === 'BUYERS' && spot > vwap) confirms++;
-  if (control === 'SELLERS' && spot < vwap) confirms++;
-  // FRVP acceptance confirmation
+  // ─────────────────────────────────────────────────────────────────────
+  // V5-GRADE INSTITUTIONAL ENGINES (8 layers, weighted scoring)
+  // ─────────────────────────────────────────────────────────────────────
+  // Push current snapshot into history BEFORE computing velocities so we
+  // can read prev/now consistently from the buffer.
+  const oiByStrikeNow = new Map();
+  const volByStrikeNow = new Map();
+  for (const s of strikes) {
+    oiByStrikeNow.set(s.strike, { ce: s.ce.oi, pe: s.pe.oi });
+    volByStrikeNow.set(s.strike, { ce: s.ce.vol, pe: s.pe.vol });
+  }
+  const topRStrike = md?.resistances?.[0]?.strike ?? null;
+  const topSStrike = md?.supports?.[0]?.strike ?? null;
+  _pushHistory(symbol, {
+    t: Date.now(),
+    atm, spot, vwap, atmIv,
+    oiByStrike: oiByStrikeNow,
+    volByStrike: volByStrikeNow,
+    topR: topRStrike, topS: topSStrike,
+    aboveVwap: spot > vwap,
+  });
+  const histList = _history.get(symbol) || [];
+
+  // ── Engine 1: OI Velocity (lots / minute) ──────────────────────────
+  // Aggregate OI added across the visible window over the last ~5 min.
+  const ENG_oiVelocity = (() => {
+    const fiveMinAgo = _historyAt(symbol, 5 * 60_000);
+    if (!fiveMinAgo) return { value: 0, label: 'NORMAL', score: 0, ageMin: 0 };
+    const ageMin = Math.max(1, (Date.now() - fiveMinAgo.t) / 60_000);
+    let totalDeltaOi = 0;
+    for (const s of strikes) {
+      const prev = fiveMinAgo.oiByStrike.get(s.strike);
+      if (prev) {
+        totalDeltaOi += Math.abs(s.ce.oi - prev.ce) + Math.abs(s.pe.oi - prev.pe);
+      }
+    }
+    const oiPerMin = totalDeltaOi / ageMin;
+    // Calibration: 5L/min = aggressive on NIFTY
+    const label =
+      oiPerMin >= 500_000 ? 'AGGRESSIVE' :
+      oiPerMin >= 250_000 ? 'STRONG' :
+      oiPerMin >= 100_000 ? 'NORMAL' :
+      'QUIET';
+    const score =
+      label === 'AGGRESSIVE' ? 100 :
+      label === 'STRONG'     ? 70 :
+      label === 'NORMAL'     ? 40 :
+      10;
+    return { value: Math.round(oiPerMin), label, score, ageMin: _round(ageMin, 1) };
+  })();
+
+  // ── Engine 2: Volume Velocity (current vs trailing average) ────────
+  const ENG_volumeVelocity = (() => {
+    const totalVolNow = strikes.reduce((s, x) => s + x.ce.vol + x.pe.vol, 0);
+    if (histList.length < 5) return { ratio: 1, label: 'NORMAL', score: 40, totalNow: totalVolNow };
+    // Sample baseline: median of the prior 20 snapshots in history.
+    const baseList = histList.slice(0, -1).slice(-20);
+    const baselineVols = baseList.map(h => {
+      let t = 0;
+      for (const v of h.volByStrike.values()) t += v.ce + v.pe;
+      return t;
+    }).filter(v => v > 0).sort((a, b) => a - b);
+    const median = baselineVols[Math.floor(baselineVols.length / 2)] || 1;
+    const ratio = totalVolNow / median;
+    const label =
+      ratio >= 5 ? 'AGGRESSIVE' :
+      ratio >= 3 ? 'INSTITUTIONAL' :
+      ratio >= 2 ? 'STRONG' :
+      ratio >= 1 ? 'NORMAL' :
+      'QUIET';
+    const score =
+      label === 'AGGRESSIVE'    ? 100 :
+      label === 'INSTITUTIONAL' ? 80 :
+      label === 'STRONG'        ? 60 :
+      label === 'NORMAL'        ? 40 :
+      15;
+    return { ratio: _round(ratio, 2), label, score, totalNow: totalVolNow };
+  })();
+
+  // ── Engine 3: VWAP Acceptance Duration (consecutive minutes) ───────
+  const ENG_vwapAcceptance = (() => {
+    if (histList.length < 2) return { sideMin: 0, side: spot > vwap ? 'ABOVE' : 'BELOW', score: 30 };
+    const aboveNow = spot > vwap;
+    let sustainedMin = 0;
+    // Walk history backwards while the side stays the same.
+    for (let i = histList.length - 1; i >= 0; i--) {
+      if (histList[i].aboveVwap === aboveNow) {
+        sustainedMin = (Date.now() - histList[i].t) / 60_000;
+      } else break;
+    }
+    const score =
+      sustainedMin >= 30 ? 100 :
+      sustainedMin >= 15 ? 80 :
+      sustainedMin >= 5  ? 50 :
+      sustainedMin >= 1  ? 30 :
+      10;
+    return {
+      sideMin: _round(sustainedMin, 1),
+      side: aboveNow ? 'ABOVE' : 'BELOW',
+      score,
+      label:
+        sustainedMin >= 30 ? 'STRONG ACCEPTANCE' :
+        sustainedMin >= 15 ? 'MODERATE ACCEPTANCE' :
+        sustainedMin >= 5  ? 'EARLY ACCEPTANCE' :
+        'TESTING',
+    };
+  })();
+
+  // ── Engine 4: Wall Stability (top resistance + top support persistence) ──
+  const ENG_wallStability = (() => {
+    let resAge = 0, supAge = 0;
+    if (histList.length >= 2 && topRStrike != null) {
+      for (let i = histList.length - 1; i >= 0; i--) {
+        if (histList[i].topR === topRStrike) {
+          resAge = (Date.now() - histList[i].t) / 60_000;
+        } else break;
+      }
+    }
+    if (histList.length >= 2 && topSStrike != null) {
+      for (let i = histList.length - 1; i >= 0; i--) {
+        if (histList[i].topS === topSStrike) {
+          supAge = (Date.now() - histList[i].t) / 60_000;
+        } else break;
+      }
+    }
+    const avgAge = (resAge + supAge) / 2;
+    const score =
+      avgAge >= 60 ? 100 :
+      avgAge >= 30 ? 80 :
+      avgAge >= 15 ? 60 :
+      avgAge >= 5  ? 40 :
+      20;
+    return {
+      resistanceAgeMin: _round(resAge, 1),
+      supportAgeMin:    _round(supAge, 1),
+      avgAgeMin:        _round(avgAge, 1),
+      score,
+      label:
+        avgAge >= 30 ? 'ROCK SOLID' :
+        avgAge >= 15 ? 'STABLE' :
+        avgAge >= 5  ? 'FORMING' :
+        'NEW',
+    };
+  })();
+
+  // ── Engine 5: Strike Migration (top wall drift) ────────────────────
+  const ENG_strikeMigration = (() => {
+    const old = _historyAt(symbol, 15 * 60_000);
+    if (!old) return { resDirection: 'STABLE', supDirection: 'STABLE', bias: 'NEUTRAL', score: 30 };
+    const resDelta = (topRStrike ?? 0) - (old.topR ?? topRStrike ?? 0);
+    const supDelta = (topSStrike ?? 0) - (old.topS ?? topSStrike ?? 0);
+    // Resistance moving UP = bullish. Support moving UP = bullish.
+    // Resistance moving DOWN = bearish. Support moving DOWN = bearish.
+    const resDirection = resDelta > 0 ? 'RISING' : resDelta < 0 ? 'FALLING' : 'STABLE';
+    const supDirection = supDelta > 0 ? 'RISING' : supDelta < 0 ? 'FALLING' : 'STABLE';
+    let bias = 'NEUTRAL', score = 30;
+    if (resDelta > 0 && supDelta > 0) { bias = 'BULLISH'; score = 100; }
+    else if (resDelta < 0 && supDelta < 0) { bias = 'BEARISH'; score = 100; }
+    else if (resDelta > 0 || supDelta > 0) { bias = 'BULLISH'; score = 60; }
+    else if (resDelta < 0 || supDelta < 0) { bias = 'BEARISH'; score = 60; }
+    return { resDirection, supDirection, bias, score, resDelta, supDelta };
+  })();
+
+  // ── Engine 6: IV Trend (expansion vs contraction) ──────────────────
+  const ENG_ivTrend = (() => {
+    const old = _historyAt(symbol, 10 * 60_000);
+    if (!old || !old.atmIv || atmIv === 0) return { ivChangePct: 0, label: 'FLAT', score: 30 };
+    const ivChangePct = ((atmIv - old.atmIv) / old.atmIv) * 100;
+    const expanding = ivChangePct >= 2;
+    const contracting = ivChangePct <= -2;
+    // Bullish move + IV expanding = strong; bearish + IV expanding = strong;
+    // either + IV contracting = weak (fake move).
+    const trendValid = (spot > vwap && expanding) || (spot < vwap && expanding);
+    const score =
+      trendValid && Math.abs(ivChangePct) >= 5 ? 90 :
+      trendValid ? 65 :
+      contracting ? 20 :
+      40;
+    return {
+      ivChangePct: _round(ivChangePct, 2),
+      label: expanding ? 'EXPANDING' : contracting ? 'CONTRACTING' : 'FLAT',
+      score,
+    };
+  })();
+
+  // ── Engine 7: Gamma Exposure (GEX) ─────────────────────────────────
+  // Net GEX = Σ (CE_OI × CE_gamma × LotSize) − Σ (PE_OI × PE_gamma × LotSize)
+  // Positive GEX = dealers long gamma → pinning / range bound
+  // Negative GEX = dealers short gamma → trending / explosive moves
+  // We approximate gamma using delta proxy when greek isn't available.
+  const ENG_gex = (() => {
+    let netGex = 0;
+    let topGexStrike = null;
+    let topGexAbs = 0;
+    for (const s of strikes) {
+      // Approximate gamma from delta — gamma peaks at ATM where |delta| ≈ 0.5.
+      // gammaProxy = max(0, 0.5 − |delta − 0.5|)
+      const ceGamma = Math.max(0, 0.5 - Math.abs(Math.abs(s.ce.delta) - 0.5));
+      const peGamma = Math.max(0, 0.5 - Math.abs(Math.abs(s.pe.delta) - 0.5));
+      const ceGex = s.ce.oi * ceGamma * lotSize;
+      const peGex = s.pe.oi * peGamma * lotSize;
+      const strikeGex = ceGex - peGex;
+      netGex += strikeGex;
+      if (Math.abs(strikeGex) > topGexAbs) {
+        topGexAbs = Math.abs(strikeGex);
+        topGexStrike = s.strike;
+      }
+    }
+    const regime = netGex > 0 ? 'POSITIVE_GAMMA' : 'NEGATIVE_GAMMA';
+    const interpretation = netGex > 0
+      ? 'Dealer gamma long — market pinned / range-bound'
+      : 'Dealer gamma short — explosive / trending moves likely';
+    // Score: high |GEX| with NEGATIVE_GAMMA = trend-confirming for directional verdicts.
+    const absGexNorm = Math.min(1, Math.abs(netGex) / 1e9);
+    const score = regime === 'NEGATIVE_GAMMA' ? 50 + absGexNorm * 50 : 50 - absGexNorm * 30;
+    return {
+      netGex: Math.round(netGex),
+      regime,
+      topGexStrike,
+      score: Math.round(score),
+      interpretation,
+    };
+  })();
+
+  // ── Engine 8: Delta Exposure (DEX) ─────────────────────────────────
+  // Σ (OI × Delta × LotSize). Tells you net directional exposure.
+  const ENG_dex = (() => {
+    let ceDex = 0, peDex = 0;
+    for (const s of strikes) {
+      ceDex += s.ce.oi * Math.abs(s.ce.delta) * lotSize;
+      peDex += s.pe.oi * Math.abs(s.pe.delta) * lotSize;
+    }
+    const netDex = ceDex - peDex;
+    const skew = (ceDex + peDex) > 0 ? (netDex / (ceDex + peDex)) * 100 : 0;
+    const bias = skew > 10 ? 'CE_HEAVY' : skew < -10 ? 'PE_HEAVY' : 'BALANCED';
+    return {
+      ceDex: Math.round(ceDex),
+      peDex: Math.round(peDex),
+      netDex: Math.round(netDex),
+      skewPct: _round(skew, 1),
+      bias,
+    };
+  })();
+
+  // ── Absorption — price moved but OI didn't follow ──────────────────
+  const ENG_absorption = (() => {
+    const old = _historyAt(symbol, 5 * 60_000);
+    if (!old) return { detected: false, score: 0, label: 'NONE' };
+    const priceChgPct = old.spot > 0 ? ((spot - old.spot) / old.spot) * 100 : 0;
+    let oiChgTotal = 0, volTotal = 0;
+    for (const s of strikes) {
+      const prev = old.oiByStrike.get(s.strike);
+      if (prev) oiChgTotal += Math.abs(s.ce.oi - prev.ce) + Math.abs(s.pe.oi - prev.pe);
+      volTotal += s.ce.vol + s.pe.vol;
+    }
+    // High volume + significant price move + low OI change = absorption
+    const significantMove = Math.abs(priceChgPct) >= 0.15;
+    const lowOiChange = oiChgTotal / Math.max(1, strikes.reduce((a, s) => a + s.ce.oi + s.pe.oi, 0)) < 0.02;
+    const detected = significantMove && volTotal > 0 && lowOiChange;
+    return {
+      detected,
+      priceChgPct: _round(priceChgPct, 2),
+      label: detected
+        ? (priceChgPct > 0 ? 'SELLER ABSORPTION (caps upside)' : 'BUYER ABSORPTION (floors downside)')
+        : 'NONE',
+      score: detected ? 75 : 30,
+    };
+  })();
+
+  // ── Trend Exhaustion ───────────────────────────────────────────────
+  const ENG_exhaustion = (() => {
+    const old = _historyAt(symbol, 10 * 60_000);
+    if (!old) return { detected: false, label: 'NONE', score: 30 };
+    const priceUp = spot > old.spot;
+    const oldTotalVol = (() => {
+      let t = 0;
+      for (const v of old.volByStrike.values()) t += v.ce + v.pe;
+      return t;
+    })();
+    const totalVolNow = strikes.reduce((s, x) => s + x.ce.vol + x.pe.vol, 0);
+    const volFading = oldTotalVol > 0 && totalVolNow < oldTotalVol * 0.7;
+    let oiDirection = 0;
+    for (const s of strikes) {
+      const prev = old.oiByStrike.get(s.strike);
+      if (prev) oiDirection += (s.ce.oi - prev.ce) + (s.pe.oi - prev.pe);
+    }
+    const oiContracting = oiDirection < 0;
+    // Exhaustion: price still going but volume fading OR OI contracting
+    const detected = (priceUp && (volFading || oiContracting)) || (!priceUp && (volFading || oiContracting));
+    return {
+      detected,
+      label: detected ? 'WARNING — trend losing fuel' : 'NONE',
+      score: detected ? 70 : 25,
+      volFading, oiContracting,
+    };
+  })();
+
+  // ── Put/Call Wall Ratio (top-3 walls by side) ──────────────────────
+  const ENG_pcWallRatio = (() => {
+    const top3PE = (md?.supports || []).slice(0, 3).reduce((s, r) => s + r.oi, 0);
+    const top3CE = (md?.resistances || []).slice(0, 3).reduce((s, r) => s + r.oi, 0);
+    const ratio = top3CE > 0 ? top3PE / top3CE : 0;
+    return {
+      pe: top3PE,
+      ce: top3CE,
+      ratio: _round(ratio, 2),
+      bias:
+        ratio >= 1.5 ? 'BULLISH FLOOR' :
+        ratio <= 0.66 ? 'BEARISH CEILING' :
+        'BALANCED',
+    };
+  })();
+
+  // ── Expected Move (1 σ from ATM IV) ────────────────────────────────
+  const ENG_expectedMove = (() => {
+    if (atmIv <= 0 || spot <= 0) return null;
+    const sigma = spot * (atmIv / 100) * Math.sqrt(dte / 365);
+    const upperBand = spot + sigma;
+    const lowerBand = spot - sigma;
+    let location = 'WITHIN';
+    if (spot >= upperBand) location = 'ABOVE_UPPER';
+    else if (spot <= lowerBand) location = 'BELOW_LOWER';
+    else if (spot >= upperBand - sigma * 0.2) location = 'NEAR_UPPER';
+    else if (spot <= lowerBand + sigma * 0.2) location = 'NEAR_LOWER';
+    return {
+      sigma: _round(sigma, 1),
+      upperBand: _round(upperBand, 1),
+      lowerBand: _round(lowerBand, 1),
+      location,
+    };
+  })();
+
+  // ── Multi-Timeframe Confirmation ────────────────────────────────────
+  // Check spot vs VWAP at 5/15/30/60-min historical anchor points.
+  const ENG_mtfConfirm = (() => {
+    const tfs = [5, 15, 30, 60];
+    const reads = tfs.map(min => {
+      const old = _historyAt(symbol, min * 60_000);
+      if (!old) return { tf: min, valid: false, bias: 'NONE' };
+      const wasAbove = old.spot > old.vwap;
+      const nowAbove = spot > vwap;
+      const bias =
+        wasAbove && nowAbove ? 'BULLISH' :
+        !wasAbove && !nowAbove ? 'BEARISH' :
+        'CHANGING';
+      return { tf: min, valid: true, bias };
+    });
+    const bull = reads.filter(r => r.bias === 'BULLISH').length;
+    const bear = reads.filter(r => r.bias === 'BEARISH').length;
+    const aligned = Math.max(bull, bear);
+    return {
+      reads,
+      bull, bear,
+      aligned,
+      score: aligned * 25, // 4 aligned = 100, 3 = 75, …
+      label:
+        aligned === 4 ? 'ALL ALIGNED' :
+        aligned === 3 ? 'STRONGLY ALIGNED' :
+        aligned === 2 ? 'PARTIAL ALIGNMENT' :
+        'CONFLICTING',
+    };
+  })();
+
+  // ── Institutional Participation (composite of velocity/walls/IV) ──
+  const ENG_instParticipation = (() => {
+    const composite = (
+      ENG_oiVelocity.score   * 0.30 +
+      ENG_volumeVelocity.score * 0.30 +
+      ENG_wallStability.score  * 0.20 +
+      ENG_ivTrend.score        * 0.20
+    );
+    return {
+      score: Math.round(composite),
+      label:
+        composite >= 80 ? 'EXTREME' :
+        composite >= 60 ? 'HIGH' :
+        composite >= 40 ? 'MODERATE' :
+        'LOW',
+    };
+  })();
+
+  // ─────────────────────────────────────────────────────────────────────
+  // WEIGHTED SCORING — replaces simple confirms++ counter.
+  // Each engine outputs a 0..100 directional/aligned score, then we
+  // multiply by its institutional weight to get the final confidence.
+  // ─────────────────────────────────────────────────────────────────────
   const accAbove = !!fEngine?.acceptance?.acceptedAboveVAH;
   const accBelow = !!fEngine?.acceptance?.acceptedBelowVAL;
-  if (control === 'BUYERS' && accAbove) confirms++;
-  if (control === 'SELLERS' && accBelow) confirms++;
-  // Delta alignment
-  if (flowDelta?.bias === 'bullish' && control === 'BUYERS') confirms++;
-  if (flowDelta?.bias === 'bearish' && control === 'SELLERS') confirms++;
-  // Futures basis
-  if (futPremium >= 10 && control === 'BUYERS') confirms++;
-  if (futPremium <= -10 && control === 'SELLERS') confirms++;
-  // VIX
-  if (vix < -1 && control === 'BUYERS') confirms++;
-  if (vix > 1 && control === 'SELLERS') confirms++;
 
-  const confidence = Math.min(95, Math.round(50 + confirms * 8));
+  // Direction-aligned helper — flips engine's score sign based on whether
+  // the engine's bias matches the current control. Returns +ve when aligned.
+  const aligned = (engineBias, control) => {
+    if (control === 'NEUTRAL') return 0;
+    const bullish = engineBias === 'BULLISH' || engineBias === 'BUYERS' || engineBias === 'CE_HEAVY' || engineBias === 'BULLISH FLOOR';
+    const bearish = engineBias === 'BEARISH' || engineBias === 'SELLERS' || engineBias === 'PE_HEAVY' || engineBias === 'BEARISH CEILING';
+    if (control === 'BUYERS' && bullish) return 1;
+    if (control === 'SELLERS' && bearish) return 1;
+    if (control === 'BUYERS' && bearish) return -0.5;
+    if (control === 'SELLERS' && bullish) return -0.5;
+    return 0;
+  };
+
+  // First pass — compute control / direction the same way we always have
+  // (using flow vol + vote tally), then refine confidence using engines.
+
+  // Confidence components (each weighted, total 100) — we'll multiply each
+  // by an alignment factor so misaligned engines penalise the score.
+  const components = {
+    gex:           { weight: 20, score: ENG_gex.score, aligned: 1 }, // GEX is regime-agnostic
+    oiVelocity:    { weight: 15, score: ENG_oiVelocity.score, aligned: 1 },
+    volumeVel:     { weight: 15, score: ENG_volumeVelocity.score, aligned: 1 },
+    vwapAccept:    { weight: 10, score: ENG_vwapAcceptance.score, aligned: aligned(ENG_vwapAcceptance.side === 'ABOVE' ? 'BULLISH' : 'BEARISH', control) },
+    strikeMig:     { weight: 10, score: ENG_strikeMigration.score, aligned: aligned(ENG_strikeMigration.bias, control) },
+    wallStability: { weight: 10, score: ENG_wallStability.score, aligned: 1 },
+    ivExpansion:   { weight: 10, score: ENG_ivTrend.score, aligned: 1 },
+    frvpAccept:    { weight: 10, score: (accAbove || accBelow) ? 80 : 30,
+      aligned: (control === 'BUYERS' && accAbove) || (control === 'SELLERS' && accBelow) ? 1 : 0 },
+  };
+
+  // Composite: Σ (component.score × weight × aligned-factor) / Σ weights
+  let weightedNum = 0;
+  let weightedDen = 0;
+  for (const k of Object.keys(components)) {
+    const c = components[k];
+    const factor = Math.max(0.3, c.aligned); // never zero out a high-weight engine entirely
+    weightedNum += c.score * c.weight * factor;
+    weightedDen += c.weight * 100;
+  }
+  const compositeConfidence = Math.min(95, Math.max(20, Math.round((weightedNum / weightedDen) * 100)));
+
+  // Trap penalties — if absorption or exhaustion detected, dock 10-15 pts
+  let confidence = compositeConfidence;
+  const trapBlockers = [];
+  if (ENG_absorption.detected) { confidence -= 12; trapBlockers.push(ENG_absorption.label); }
+  if (ENG_exhaustion.detected) { confidence -= 8; trapBlockers.push(ENG_exhaustion.label); }
+  // Multi-TF disagreement penalty
+  if (ENG_mtfConfirm.aligned <= 1) { confidence -= 10; trapBlockers.push(`MTF conflicting (${ENG_mtfConfirm.bull}↑/${ENG_mtfConfirm.bear}↓)`); }
+  confidence = Math.max(15, Math.min(95, confidence));
   const grade =
     confidence >= 90 ? 'A+' :
     confidence >= 80 ? 'A' :
@@ -442,6 +899,27 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
   const reasons = [];
   reasons.push(`${bullVotes} bullish strikes vs ${bearVotes} bearish (out of ${strikes.length})`);
   reasons.push(spot > vwap ? `Spot above VWAP (+${(spot - vwap).toFixed(1)})` : `Spot below VWAP (${(spot - vwap).toFixed(1)})`);
+  // V5 engine highlights — surface the loudest engine results
+  if (ENG_oiVelocity.label !== 'NORMAL' && ENG_oiVelocity.label !== 'QUIET') {
+    reasons.push(`OI velocity ${ENG_oiVelocity.label.toLowerCase()} (${ENG_oiVelocity.value}/min)`);
+  }
+  if (ENG_volumeVelocity.label === 'INSTITUTIONAL' || ENG_volumeVelocity.label === 'AGGRESSIVE') {
+    reasons.push(`Volume ${ENG_volumeVelocity.ratio}× baseline (${ENG_volumeVelocity.label.toLowerCase()})`);
+  }
+  if (ENG_vwapAcceptance.sideMin >= 15) {
+    reasons.push(`${ENG_vwapAcceptance.sideMin}m ${ENG_vwapAcceptance.side.toLowerCase()} VWAP — ${ENG_vwapAcceptance.label.toLowerCase()}`);
+  }
+  if (ENG_strikeMigration.bias !== 'NEUTRAL') {
+    reasons.push(`Walls migrating ${ENG_strikeMigration.bias.toLowerCase()} (R ${ENG_strikeMigration.resDirection.toLowerCase()}, S ${ENG_strikeMigration.supDirection.toLowerCase()})`);
+  }
+  if (ENG_gex.regime === 'NEGATIVE_GAMMA') {
+    reasons.push('Negative gamma regime — trending moves likely');
+  } else {
+    reasons.push('Positive gamma regime — pinning likely');
+  }
+  if (ENG_mtfConfirm.aligned >= 3) {
+    reasons.push(`MTF ${ENG_mtfConfirm.label.toLowerCase()} (${ENG_mtfConfirm.bull}↑/${ENG_mtfConfirm.bear}↓)`);
+  }
   if (flowDelta?.deltaPct != null) {
     reasons.push(`Delta ${flowDelta.deltaPct >= 0 ? '+' : ''}${flowDelta.deltaPct.toFixed(1)}%`);
   }
@@ -597,7 +1075,7 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
       grade,
       conviction,
       verdict,
-      reasons: reasons.slice(0, 6),
+      reasons: reasons.slice(0, 8),
     },
     pressure: {
       cePressure,                                  // 0..100
@@ -628,6 +1106,30 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
       topSupport,
       walls: Array.from(wallMap.entries()).map(([k, w]) => ({ strike: k, ...w })),
     },
+    breadth: {
+      advancing: breadth?.advancing ?? null,
+      declining: breadth?.declining ?? null,
+      advancePct: breadth?.advancePct ?? null,
+    },
+    // ── V5-grade institutional engines ────────────────────────────────
+    engines: {
+      oiVelocity:        ENG_oiVelocity,
+      volumeVelocity:    ENG_volumeVelocity,
+      vwapAcceptance:    ENG_vwapAcceptance,
+      wallStability:     ENG_wallStability,
+      strikeMigration:   ENG_strikeMigration,
+      ivTrend:           ENG_ivTrend,
+      gex:               ENG_gex,
+      dex:               ENG_dex,
+      absorption:        ENG_absorption,
+      exhaustion:        ENG_exhaustion,
+      pcWallRatio:       ENG_pcWallRatio,
+      expectedMove:      ENG_expectedMove,
+      mtfConfirm:        ENG_mtfConfirm,
+      instParticipation: ENG_instParticipation,
+    },
+    weights: components,
+    trapBlockers,
     bestStrike,
     mostVolume,
     strikes,

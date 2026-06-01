@@ -195,3 +195,77 @@
 .intelv2-root .text-white\/45 { color: rgba(255, 255, 255, 0.60); }
 .intelv2-root .text-white\/55 { color: rgba(255, 255, 255, 0.70); }
 .intelv2-root .text-white\/65 { color: rgba(255, 255, 255, 0.78); }
+
+
+/* ─────────────────────────────────────────────────────────────────────
+ * /intel-v4 dashboard — scale up everything for high-density single-card.
+ *  • Bumps base font + every Tailwind arbitrary size by ~3-4 px
+ *  • Default font weight medium so muted text stays legible
+ * ───────────────────────────────────────────────────────────────────── */
+.intelv4-root {
+  font-size: 15px;
+}
+
+.intelv4-root .text-\[8px\]   { font-size: 11px; }
+.intelv4-root .text-\[9px\]   { font-size: 12px; }
+.intelv4-root .text-\[10px\]  { font-size: 13px; }
+.intelv4-root .text-\[11px\]  { font-size: 14px; }
+.intelv4-root .text-\[12px\]  { font-size: 15px; }
+.intelv4-root .text-\[13px\]  { font-size: 16px; }
+.intelv4-root .text-\[14px\]  { font-size: 17px; }
+.intelv4-root .text-\[15px\]  { font-size: 18px; }
+.intelv4-root .text-\[16px\]  { font-size: 19px; }
+.intelv4-root .text-\[18px\]  { font-size: 22px; }
+.intelv4-root .text-\[20px\]  { font-size: 25px; }
+.intelv4-root .text-\[22px\]  { font-size: 27px; }
+.intelv4-root .text-\[24px\]  { font-size: 29px; }
+.intelv4-root .text-\[26px\]  { font-size: 31px; }
+.intelv4-root .text-\[28px\]  { font-size: 33px; }
+.intelv4-root .text-\[36px\]  { font-size: 42px; }
+.intelv4-root .text-\[42px\]  { font-size: 50px; }
+.intelv4-root .text-\[44px\]  { font-size: 52px; }
+
+.intelv4-root :where(span, div, li, td, th, label):not([class*="font-bold"]):not([class*="font-black"]):not([class*="font-semibold"]):not([class*="font-mono"]) {
+  font-weight: 500;
+}
+
+.intelv4-root .text-white\/35 { color: rgba(255, 255, 255, 0.55); }
+.intelv4-root .text-white\/45 { color: rgba(255, 255, 255, 0.62); }
+.intelv4-root .text-white\/55 { color: rgba(255, 255, 255, 0.72); }
+.intelv4-root .text-white\/65 { color: rgba(255, 255, 255, 0.80); }
+
+
+/* ─────────────────────────────────────────────────────────────────────
+ * /intel-v5 dashboard — Bloomberg-style font scale.
+ *  Mirrors V4's scale rules so all arbitrary-size utilities read big.
+ * ───────────────────────────────────────────────────────────────────── */
+.intelv5-root {
+  font-size: 15px;
+}
+
+.intelv5-root .text-\[8px\]   { font-size: 11px; }
+.intelv5-root .text-\[9px\]   { font-size: 12px; }
+.intelv5-root .text-\[10px\]  { font-size: 13px; }
+.intelv5-root .text-\[11px\]  { font-size: 14px; }
+.intelv5-root .text-\[12px\]  { font-size: 15px; }
+.intelv5-root .text-\[13px\]  { font-size: 16px; }
+.intelv5-root .text-\[14px\]  { font-size: 17px; }
+.intelv5-root .text-\[15px\]  { font-size: 18px; }
+.intelv5-root .text-\[16px\]  { font-size: 19px; }
+.intelv5-root .text-\[18px\]  { font-size: 22px; }
+.intelv5-root .text-\[20px\]  { font-size: 25px; }
+.intelv5-root .text-\[22px\]  { font-size: 27px; }
+.intelv5-root .text-\[24px\]  { font-size: 29px; }
+.intelv5-root .text-\[28px\]  { font-size: 33px; }
+.intelv5-root .text-\[32px\]  { font-size: 38px; }
+.intelv5-root .text-\[36px\]  { font-size: 42px; }
+.intelv5-root .text-\[44px\]  { font-size: 52px; }
+
+.intelv5-root :where(span, div, li, td, th, label):not([class*="font-bold"]):not([class*="font-black"]):not([class*="font-semibold"]):not([class*="font-mono"]) {
+  font-weight: 500;
+}
+
+.intelv5-root .text-white\/35 { color: rgba(255, 255, 255, 0.55); }
+.intelv5-root .text-white\/45 { color: rgba(255, 255, 255, 0.62); }
+.intelv5-root .text-white\/55 { color: rgba(255, 255, 255, 0.72); }
+.intelv5-root .text-white\/65 { color: rgba(255, 255, 255, 0.80); }

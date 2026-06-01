@@ -95,6 +95,30 @@ export interface V4Decision {
     topSupport:    { strike: number; tier: string; oi: number; oiChange: number; strength: "STRONG" | "MODERATE" | "WEAK" } | null;
     walls: Array<{ strike: number; type: "RESISTANCE" | "SUPPORT"; tier: string; tierIdx: number; oi: number; oiChange: number; strength: "STRONG" | "MODERATE" | "WEAK" }>;
   };
+  breadth?: {
+    advancing: number | null;
+    declining: number | null;
+    advancePct: number | null;
+  };
+  // ── V5-grade institutional engines ────────────────────────────────
+  engines?: {
+    oiVelocity:        { value: number; label: "AGGRESSIVE" | "STRONG" | "NORMAL" | "QUIET"; score: number; ageMin: number };
+    volumeVelocity:    { ratio: number; label: "AGGRESSIVE" | "INSTITUTIONAL" | "STRONG" | "NORMAL" | "QUIET"; score: number; totalNow: number };
+    vwapAcceptance:    { sideMin: number; side: "ABOVE" | "BELOW"; score: number; label: string };
+    wallStability:     { resistanceAgeMin: number; supportAgeMin: number; avgAgeMin: number; score: number; label: "ROCK SOLID" | "STABLE" | "FORMING" | "NEW" };
+    strikeMigration:   { resDirection: "RISING" | "FALLING" | "STABLE"; supDirection: "RISING" | "FALLING" | "STABLE"; bias: "BULLISH" | "BEARISH" | "NEUTRAL"; score: number; resDelta?: number; supDelta?: number };
+    ivTrend:           { ivChangePct: number; label: "EXPANDING" | "CONTRACTING" | "FLAT"; score: number };
+    gex:               { netGex: number; regime: "POSITIVE_GAMMA" | "NEGATIVE_GAMMA"; topGexStrike: number | null; score: number; interpretation: string };
+    dex:               { ceDex: number; peDex: number; netDex: number; skewPct: number; bias: "CE_HEAVY" | "PE_HEAVY" | "BALANCED" };
+    absorption:        { detected: boolean; priceChgPct?: number; label: string; score: number };
+    exhaustion:        { detected: boolean; label: string; score: number; volFading?: boolean; oiContracting?: boolean };
+    pcWallRatio:       { pe: number; ce: number; ratio: number; bias: "BULLISH FLOOR" | "BEARISH CEILING" | "BALANCED" };
+    expectedMove:      { sigma: number; upperBand: number; lowerBand: number; location: "WITHIN" | "NEAR_UPPER" | "NEAR_LOWER" | "ABOVE_UPPER" | "BELOW_LOWER" } | null;
+    mtfConfirm:        { reads: Array<{ tf: number; valid: boolean; bias: string }>; bull: number; bear: number; aligned: number; score: number; label: string };
+    instParticipation: { score: number; label: "EXTREME" | "HIGH" | "MODERATE" | "LOW" };
+  };
+  weights?: Record<string, { weight: number; score: number; aligned: number }>;
+  trapBlockers?: string[];
   bestStrike: { strike: number; side: string; score: number; reason: string } | null;
   mostVolume: { strike: number; volume: number } | null;
   strikes: V4Strike[];
