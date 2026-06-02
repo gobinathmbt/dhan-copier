@@ -30,7 +30,7 @@ function IntelV6Page() {
   const { data, loading, lastFetchAt, refetch } = useIntelV6Decision({ symbol, date, intervalMs: 3000 });
 
   return (
-    <div className="intelv6-root fixed inset-0 left-16 flex flex-col bg-black font-sans text-white">
+    <div className="intelv6-root fixed inset-0 left-3 flex flex-col bg-black font-sans text-white">
       <header className="flex items-center justify-between border-b border-white/10 bg-[#05070b] px-4 py-2">
         <div className="flex items-center gap-3">
           <span className="text-[15px] font-bold tracking-[0.18em] text-emerald-400">

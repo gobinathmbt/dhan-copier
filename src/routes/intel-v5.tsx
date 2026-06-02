@@ -31,7 +31,7 @@ function IntelV5Page() {
   const { data, loading, lastFetchAt, refetch } = useIntelV5Decision({ symbol, date, intervalMs: 3000 });
 
   return (
-    <div className="intelv5-root fixed inset-0 left-16 flex flex-col bg-[#070a0e] font-mono text-white">
+    <div className="intelv5-root fixed inset-0 left-3 flex flex-col bg-[#070a0e] font-mono text-white">
       <header className="flex items-center justify-between border-b border-white/[0.08] bg-[#0a0d12] px-5 py-2">
         <div className="flex items-center gap-3">
           <span className="text-[14px] font-bold tracking-[0.20em] text-emerald-400">

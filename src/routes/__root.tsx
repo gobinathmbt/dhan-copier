@@ -47,7 +47,7 @@ function RootComponent() {
         <div className="min-h-screen bg-background text-foreground">
           {authed && <Sidebar />}
           <TopBar />
-          <main className={authed ? "ml-16" : ""}>
+          <main className={authed ? "ml-3" : ""}>
             <Outlet />
           </main>
         </div>

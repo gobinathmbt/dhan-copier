@@ -44,7 +44,9 @@ export function Sidebar() {
   const isProd = mode === "production";
 
   return (
-    <aside className="fixed left-0 top-0 z-40 h-screen w-16 border-r border-border bg-card">
+    <aside className="group fixed left-0 top-0 z-50 h-screen w-16 -translate-x-[52px] border-r border-border bg-card transition-transform duration-200 ease-out hover:translate-x-0 hover:shadow-2xl hover:shadow-black/50">
+      {/* Thin grab handle shown while the bar is collapsed */}
+      <div className="pointer-events-none absolute right-0 top-1/2 h-10 w-1 -translate-y-1/2 rounded-l bg-primary/40 transition-opacity duration-200 group-hover:opacity-0" />
       <div className="flex h-full flex-col">
         {/* Logo */}
         <div className="flex h-16 items-center justify-center border-b border-border px-4">

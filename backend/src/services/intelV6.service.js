@@ -6,20 +6,27 @@
  *   GOLDEN RULE:
  *     Breadth tells the truth · CPR tells the location · Greeks confirm strength
  *
- *   Engines & institutional weights:
- *     1. MARKET BREADTH ENGINE   30%  — Advance/Decline → Extreme Bull … Extreme Bear
- *     2. CPR LOCATION            25%  — Above TC / Inside / Below BC
- *     3. CPR RELATIONSHIP        15%  — Today TC&BC vs Yesterday TC&BC (value migration)
- *     4. IT SECTOR STRENGTH      10%  — NIFTY IT tilt → Support / Drag
- *     5. GREEKS ENGINE (ATM)     10%  — CE vs PE dominance (Delta·Gamma·Vega·IV)
- *     6. VIX                     10%  — Falling = Risk On, Spiking = Risk Off
+ *   Engines & institutional weights (sum = 100):
+ *     0. AUCTION (FRVP)          20%  — POC/VAH/VAL location + acceptance
+ *     1. MARKET BREADTH ENGINE   25%  — Advance/Decline + heavyweight leadership
+ *     2. CPR LOCATION            20%  — Above TC / Inside / Below BC (+ FRVP alignment)
+ *     3. CPR RELATIONSHIP        ——  — folded into the CPR layer (value migration)
+ *     4. FLOW ENGINE             ——  — Delta + Futures Premium + Buyer/Seller flow
+ *     5. GREEKS ENGINE (ATM)     15%  — CE vs PE dominance + Premium Expansion Score
+ *     6. IT SECTOR STRENGTH      10%  — NIFTY IT tilt → Support / Drag
+ *     7. VIX                     10%  — Falling = Risk On, Spiking = Risk Off
+ *
+ *   Layer stack (institutional order — location first, then participation):
+ *     L0 Auction(FRVP) · L1 Breadth(+Leadership) · L2 IT · L3 CPR(+FRVP align)
+ *     L4 Flow · L5 Greeks(+Premium Expansion) · L6 VIX
+ *     L7 ALIGNMENT ENGINE (0..N aligned) · L8 Logic Matrix · L9 Final Verdict(graded)
  *
  *   Extra engines:
  *     • MARKET CHARACTER  — Breadth + CPR Width + VIX → Trend/Range/Expansion/Panic/Short-Cover
  *     • MARKET TREND VIEW — majority vote of Breadth + IT + CPR Location
  *
- *   Final Verdict is GREEKS-GATED: a directional BIAS upgrades to a BUY SETUP
- *   only when the Greeks engine confirms the same side.
+ *   Final Verdict is GREEKS-GATED + ALIGNMENT-GRADED: a directional BIAS upgrades
+ *   to a BUY SETUP only when Greeks confirm AND alignment is high enough.
  *
  * Endpoint: GET /api/intel-v6/decision?symbol=NIFTY_50[&date=YYYY-MM-DD]
  * ───────────────────────────────────────────────────────────────────── */
@@ -67,8 +74,11 @@ const IT_MEMBERS = {
   SENSEX:   ['INFY', 'TCS', 'HCLTECH', 'TECHM'],
 };
 
-/* Institutional engine weights (must sum to 100). */
-const WEIGHTS = { breadth: 30, cprLocation: 25, cprRelation: 15, it: 10, greeks: 10, vix: 10 };
+/* Institutional engine weights for the WEIGHTED net score.
+ * Location-first ordering per institutional feedback:
+ *   Auction(FRVP) 20 · Breadth 25 · CPR 20 · Flow 10 · Greeks 15 · IT 10 · VIX 10 */
+const WEIGHTS = { frvp: 20, breadth: 25, cpr: 20, flow: 10, greeks: 15, it: 10, vix: 10 };
+const WEIGHT_SUM = WEIGHTS.frvp + WEIGHTS.breadth + WEIGHTS.cpr + WEIGHTS.flow + WEIGHTS.greeks + WEIGHTS.it + WEIGHTS.vix;
 
 /**
  * Compute YESTERDAY's CPR (TC/BC) so we can detect true value migration.
@@ -113,6 +123,74 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
   const atm = v2.options?.atm ?? null;
   const ladder = Array.isArray(v2.ladder) ? v2.ladder : [];
 
+  // Flow / auction sources from V2
+  const flowDelta = v2.flow?.delta || {};
+  const futPremium = _safe(v2.futures?.premium);
+  const buyerSellerFlow = v2.dashboard?.buyerSellerFlow || null;
+  const frvpInst = v2.dashboard?.frvpInstitutional || null;
+  const frvpEng = frvpInst?.engine || null;
+  const vol = v2.flow?.volume || null;           // { poc, vah, val, hvns, lvns }
+  const priceAbovePoc = _safe(v2.dashboard?.priceAbovePoc, 50);
+  const heavyAlign = v2.dashboard?.heavyweightsAlignment || null;
+  const heavyTotalImpact = _safe(v2.dashboard?.heavyweightsTotalImpact);
+
+  /* ═══ L0. AUCTION STRUCTURE ENGINE (FRVP) — 20% ══════════════════════ */
+  // "Where is price?" answered first. POC / VAH / VAL + acceptance/rejection.
+  const poc = _safe(vol?.poc, _safe(frvpEng?.profile?.poc));
+  const vah = _safe(vol?.vah, _safe(frvpEng?.profile?.vah));
+  const val = _safe(vol?.val, _safe(frvpEng?.profile?.val));
+  const acc = frvpEng?.acceptance || {};
+  const acceptedAboveVah = !!acc.acceptedAboveVAH;
+  const acceptedBelowVal = !!acc.acceptedBelowVAL;
+  const rejectedAboveVah = !!acc.rejectedAboveVAH;   // bull trap
+  const rejectedBelowVal = !!acc.rejectedBelowVAL;   // bear trap
+
+  let auctionZone, auctionBias, auctionDesc;
+  if (vah && val && spot > vah) {
+    auctionZone = 'ABOVE VALUE';
+    auctionBias = rejectedAboveVah ? 'NEUTRAL' : 'BULLISH';
+    auctionDesc = acceptedAboveVah ? 'Accepted above value — initiative buyers'
+      : rejectedAboveVah ? 'Rejected above VAH — bull trap risk'
+      : 'Trading above value area';
+  } else if (vah && val && spot < val) {
+    auctionZone = 'BELOW VALUE';
+    auctionBias = rejectedBelowVal ? 'NEUTRAL' : 'BEARISH';
+    auctionDesc = acceptedBelowVal ? 'Accepted below value — initiative sellers'
+      : rejectedBelowVal ? 'Rejected below VAL — bear trap risk'
+      : 'Trading below value area';
+  } else if (poc && Number.isFinite(spot)) {
+    auctionZone = 'INSIDE VALUE';
+    // inside value: lean by which half of the value area price sits in
+    auctionBias = spot > poc ? 'BULLISH' : spot < poc ? 'BEARISH' : 'NEUTRAL';
+    auctionDesc = 'Inside value area — rotational / range conditions';
+  } else {
+    auctionZone = 'UNKNOWN';
+    auctionBias = 'NEUTRAL';
+    auctionDesc = 'Auction profile unavailable';
+  }
+  // Inside-value bias is weak — treat as neutral for the weighted vote to
+  // avoid over-counting rotational conditions.
+  const auctionVoteBias = auctionZone === 'INSIDE VALUE' ? 'NEUTRAL' : auctionBias;
+
+  const auctionEngine = {
+    poc: _round(poc, 2),
+    vah: _round(vah, 2),
+    val: _round(val, 2),
+    spot: _round(spot, 2),
+    zone: auctionZone,                       // ABOVE / INSIDE / BELOW VALUE
+    bias: auctionBias,
+    desc: auctionDesc,
+    priceAbovePocPct: priceAbovePoc,
+    acceptance: {
+      acceptedAboveVah, acceptedBelowVal, rejectedAboveVah, rejectedBelowVal,
+    },
+    scale: [
+      { range: 'ABOVE VAH',   label: 'BULLISH', tone: 'bull',    active: auctionZone === 'ABOVE VALUE' },
+      { range: 'INSIDE VALUE', label: 'NEUTRAL', tone: 'neutral', active: auctionZone === 'INSIDE VALUE' },
+      { range: 'BELOW VAL',   label: 'BEARISH', tone: 'bear',    active: auctionZone === 'BELOW VALUE' },
+    ],
+  };
+
   /* ═══ 1. MARKET BREADTH ENGINE (30%) ═════════════════════════════════ */
   const advancing = _safe(breadth.advancing);
   const declining = _safe(breadth.declining);
@@ -131,6 +209,14 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
     { label: 'EXTREME BEAR', tone: 'strongbear' };
   const breadthBias = breadthPct >= 55 ? 'BULLISH' : breadthPct < 45 ? 'BEARISH' : 'NEUTRAL';
 
+  // Heavyweight LEADERSHIP — participation (breadth) can disagree with the
+  // heavyweights actually moving the index. Track both.
+  const leadershipBias = heavyTotalImpact > 0.05 ? 'BULLISH' : heavyTotalImpact < -0.05 ? 'BEARISH' : 'NEUTRAL';
+  const leadershipLabel = leadershipBias === 'BULLISH' ? 'LEADERS BULLISH'
+    : leadershipBias === 'BEARISH' ? 'LEADERS BEARISH' : 'LEADERS MIXED';
+  const participationVsLeadership = breadthBias === leadershipBias ? 'CONFIRMED'
+    : leadershipBias === 'NEUTRAL' || breadthBias === 'NEUTRAL' ? 'PARTIAL' : 'DIVERGENT';
+
   const breadthEngine = {
     advancing, declining, unchanged,
     total: totalStocks,
@@ -139,6 +225,14 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
     zone: breadthZone.label,
     tone: breadthZone.tone,
     bias: breadthBias,
+    leadership: {
+      bias: leadershipBias,
+      label: leadershipLabel,
+      totalImpact: _round(heavyTotalImpact, 2),
+      alignment: heavyAlign?.score || null,        // e.g. "6/8"
+      alignLabel: heavyAlign?.label || null,
+      status: participationVsLeadership,           // CONFIRMED | PARTIAL | DIVERGENT
+    },
     scale: [
       { range: '≥ 75%',    label: 'EXTREME BULL', tone: 'strongbull', active: breadthZone.label === 'EXTREME BULL' },
       { range: '65 - 75%', label: 'STRONG BULL',  tone: 'strongbull', active: breadthZone.label === 'STRONG BULL' },
@@ -240,6 +334,7 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
     yesterday: yCpr ? { tc: _safe(yCpr.tc), bc: _safe(yCpr.bc), pivot: _safe(yCpr.pivot) } : null,
     priceLocation, territory: locationTerritory, locationSub, locationBias, locationBanner,
     relation: cprRelation,
+    alignment: cprFrvpAlignment,
     opening: {
       gapUp: [
         { cond: 'Above TC', verdict: 'Strong Bullish', sub: 'No Need CPR Touch', tone: 'bull', active: locationBias === 'BULLISH' },

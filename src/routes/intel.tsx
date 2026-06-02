@@ -35,7 +35,7 @@ function IntelPage() {
   const { data } = useIntelSnapshot({ symbol, intervalMs: 2000 });
 
   return (
-    <div className="fixed inset-0 left-16 flex flex-col bg-[#070a0e] text-white">
+    <div className="fixed inset-0 left-3 flex flex-col bg-[#070a0e] text-white">
       <TopHeader data={data} symbol={symbol} onSymbol={setSymbol} />
       <main className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden p-2">
         <StatusStrip data={data} />

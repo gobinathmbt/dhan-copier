@@ -35,7 +35,7 @@ function IntelV4Page() {
   });
 
   return (
-    <div className="intelv4-root fixed inset-0 left-16 flex flex-col bg-[#070a0e] font-mono text-white">
+    <div className="intelv4-root fixed inset-0 left-3 flex flex-col bg-[#070a0e] font-mono text-white">
       {/* Mini header — symbol toggle + date controls only */}
       <header className="flex items-center justify-between border-b border-white/[0.08] bg-[#0a0d12] px-4 py-2">
         <span className="text-[12px] font-bold tracking-[0.18em] text-emerald-400">

@@ -53,7 +53,7 @@ function IntelV2Page() {
   }, [symbol]);
 
   return (
-    <div className="intelv2-root fixed inset-0 left-16 flex flex-col bg-[#070a0e] text-white">
+    <div className="intelv2-root fixed inset-0 left-3 flex flex-col bg-[#070a0e] text-white">
       <TopHeaderV2
         data={data}
         symbol={symbol}
