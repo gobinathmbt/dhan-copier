@@ -2,23 +2,22 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { isAuthenticated } from "@/lib/auth";
 import { useIntelV6Decision } from "@/hooks/useIntelV6Decision";
-import type { V6Symbol, V6Decision, V6StrikeRow } from "@/lib/intelV6Types";
+import type { V6Symbol, V6Decision, V6ScaleRow, V6OpeningCol } from "@/lib/intelV6Types";
 
 export const Route = createFileRoute("/intel-v6")({
   component: IntelV6Page,
 });
 
 /**
- * INTEL V6 — PREMIUM INTELLIGENCE ENGINE (Option Greeks Engine)
+ * INTEL V6 — NIFTY MASTER ENGINE DASHBOARD
  * ========================================================================
- * Premium Behaviour layer that sits below the V5 structure verdict.
- *   • 4 Greek engines (Delta · Gamma · Theta · Vega)
- *   • Premium Power Score gauge
- *   • Greeks Momentum Matrix
- *   • Strike Dominance (ATM ± 5)
- *   • Futures & Breadth + Session & Risk
- *   • Option Buyer Action Plan + Greeks Summary rail
- *   • Final Verdict bar
+ * GREEKS + CPR + BREADTH + IT ENGINE → one institutional master verdict.
+ *   1. Market Breadth Engine
+ *   2. IT Sector Strength Engine
+ *   3. CPR Engine (width · levels · location · opening map · relation · trend)
+ *   4. Greeks Engine (ATM) + market reading
+ *   5. Complete Logic Matrix
+ *   6. Final Verdict + Trade Plan
  */
 function IntelV6Page() {
   const navigate = useNavigate();
@@ -31,23 +30,21 @@ function IntelV6Page() {
   const { data, loading, lastFetchAt, refetch } = useIntelV6Decision({ symbol, date, intervalMs: 3000 });
 
   return (
-    <div className="intelv6-root fixed inset-0 left-16 flex flex-col bg-[#060a10] font-mono text-white">
-      <header className="flex items-center justify-between border-b border-white/[0.08] bg-[#0a0e15] px-5 py-2">
+    <div className="intelv6-root fixed inset-0 left-16 flex flex-col bg-black font-sans text-white">
+      <header className="flex items-center justify-between border-b border-white/10 bg-[#05070b] px-4 py-2">
         <div className="flex items-center gap-3">
-          <span className="text-[14px] font-bold tracking-[0.20em] text-cyan-300">
-            INTEL <span className="rounded-sm bg-cyan-400/15 px-2 py-0.5 text-[12px]">V6</span>
+          <span className="text-[15px] font-bold tracking-[0.18em] text-emerald-400">
+            INTEL <span className="rounded-sm bg-emerald-400/15 px-1.5 py-0.5 text-[13px]">V6</span>
           </span>
-          <span className="text-[11px] uppercase tracking-[0.18em] text-white/55">
-            Premium Intelligence · Greeks Engine
-          </span>
+          <span className="text-[12px] uppercase tracking-[0.16em] text-white/50">Master Engine Dashboard</span>
         </div>
         <div className="flex items-center gap-2">
-          <div className="flex rounded-md bg-white/[0.04] p-0.5">
+          <div className="flex rounded-md bg-white/[0.05] p-0.5">
             {(["NIFTY_50", "SENSEX"] as const).map((s) => (
               <button
                 key={s}
                 onClick={() => setSymbol(s)}
-                className={`rounded px-3 py-1 text-[12px] font-bold tracking-wider transition-colors ${
+                className={`rounded px-3 py-1 text-[13px] font-bold tracking-wider transition-colors ${
                   symbol === s ? "bg-sky-500/20 text-sky-300" : "text-white/55 hover:text-white"
                 }`}
               >
@@ -60,579 +57,557 @@ function IntelV6Page() {
             value={date || todayIST()}
             max={todayIST()}
             onChange={(e) => setDate(e.target.value === todayIST() ? null : e.target.value)}
-            className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1 text-[12px] text-white/85 outline-none [color-scheme:dark]"
+            className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[13px] text-white/85 outline-none [color-scheme:dark]"
           />
           <button
             onClick={() => setDate(null)}
-            className={`rounded px-2 py-1 text-[11px] font-bold tracking-wider ${
-              !date ? "bg-emerald-500/20 text-emerald-400" : "bg-white/5 text-white/55"
-            }`}
+            className={`rounded px-2 py-1 text-[12px] font-bold tracking-wider ${!date ? "bg-emerald-500/20 text-emerald-400" : "bg-white/5 text-white/55"}`}
           >
             LIVE
           </button>
-          <button
-            onClick={() => refetch()}
-            disabled={loading}
-            className="rounded-md border border-white/[0.08] bg-white/[0.03] px-3 py-1 text-[12px] text-white/65"
-          >
+          <button onClick={() => refetch()} disabled={loading} className="rounded-md border border-white/10 bg-white/[0.04] px-3 py-1 text-[13px] text-white/65">
             {loading ? "…" : "↻"}
           </button>
-          <span className="text-[10px] text-white/45">
-            {lastFetchAt ? `${Math.round((Date.now() - lastFetchAt) / 1000)}s` : "—"}
-          </span>
+          <span className="text-[12px] text-white/45">{lastFetchAt ? `${Math.round((Date.now() - lastFetchAt) / 1000)}s` : "—"}</span>
         </div>
       </header>
 
-      <main className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3">
+      <main className="flex min-h-0 flex-1 flex-col overflow-y-auto p-2">
         {!data ? (
-          <div className="flex h-full items-center justify-center text-[14px] text-white/45">Loading V6…</div>
+          <div className="flex h-full items-center justify-center text-[16px] text-white/45">Loading Master Engine…</div>
         ) : !data.ok ? (
           <div className="rounded-md border border-rose-500/40 bg-rose-500/10 p-6 text-rose-300">
-            <div className="text-[13px] font-bold uppercase tracking-wider">Engine Error</div>
-            <div className="mt-2 text-[12px]">{(data as unknown as { error?: string }).error || "Unable to load."}</div>
+            <div className="text-[15px] font-bold uppercase tracking-wider">Engine Error</div>
+            <div className="mt-2 text-[14px]">{(data as unknown as { error?: string }).error || "Unable to load."}</div>
           </div>
         ) : (
-          <V6Dashboard data={data} />
+          <MasterDashboard data={data} />
         )}
       </main>
     </div>
   );
 }
 
-/* ─────────────────────────────────────────────────────────────────────
- * V6Dashboard — full layout matching the reference image.
- *   Row 1: [ Premium Intelligence (4 greek engines + power gauge) ]  [ Action Plan ]
- *   Row 2: [ Greeks Momentum Matrix strip ]
- *   Row 3: [ Strike Dominance ] [ Futures & Breadth ] [ Session & Risk ] [ Greeks Summary ]
- *   Row 4: [ Final Verdict bar + Trade Edge ]
- * ───────────────────────────────────────────────────────────────────── */
-function V6Dashboard({ data }: { data: V6Decision }) {
-  const verdictTone = toneFor(data.actionPlan.marketBias);
+/* ─── tone → color ──────────────────────────────────────────────────── */
+const TONE: Record<string, string> = {
+  strongbull: "#16c784",
+  bull: "#22c55e",
+  neutral: "#eab308",
+  bear: "#f97316",
+  strongbear: "#ef4444",
+};
+function tc(t: string): string {
+  return TONE[t] || (t === "BULLISH" ? "#22c55e" : t === "BEARISH" ? "#ef4444" : "#eab308");
+}
 
+/* ═══════════════════════════════════════════════════════════════════════
+ * MASTER DASHBOARD — grid matching the reference image.
+ * ═══════════════════════════════════════════════════════════════════════ */
+function MasterDashboard({ data }: { data: V6Decision }) {
   return (
-    <div className="flex w-full flex-col gap-3">
-      {/* ── TOP: Premium Intelligence panel + Action Plan ─────────────── */}
-      <div className="grid grid-cols-1 gap-3 xl:grid-cols-[1fr_320px]">
-        <PremiumIntelligencePanel data={data} />
-        <div className="flex flex-col gap-3">
-          <ActionPlanCard data={data} />
-          <GreeksSummaryCard data={data} />
+    <div className="flex w-full flex-col gap-2 pb-2">
+      <TitleBar data={data} />
+
+      {/* Row A: Breadth | IT Sector | CPR | CPR Relationship + Trend View */}
+      <div className="grid grid-cols-12 items-stretch gap-2">
+        <div className="col-span-3"><BreadthEngine data={data} /></div>
+        <div className="col-span-3"><ItEngine data={data} /></div>
+        <div className="col-span-3"><CprEngine data={data} /></div>
+        <div className="col-span-3 flex flex-col gap-2">
+          <div className="shrink-0"><CprRelationship data={data} /></div>
+          <div className="min-h-0 flex-1"><TrendView data={data} /></div>
         </div>
       </div>
 
-      {/* ── Greeks Momentum Matrix strip ──────────────────────────────── */}
-      <MomentumMatrixStrip data={data} />
+      {/* Row B: Greeks Engine (ATM) + Greeks Market Reading */}
+      <GreeksEngine data={data} />
 
-      {/* ── MIDDLE: Strike Dominance | Futures&Breadth | Session&Risk ─── */}
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr_300px_300px]">
-        <StrikeDominancePanel data={data} />
-        <FuturesBreadthPanel data={data} />
-        <SessionRiskPanel data={data} />
+      {/* Row C: Complete Logic Matrix | Final Verdict */}
+      <div className="grid grid-cols-12 items-stretch gap-2">
+        <div className="col-span-7"><LogicMatrix data={data} /></div>
+        <div className="col-span-5"><FinalVerdict data={data} /></div>
       </div>
 
-      {/* ── FINAL VERDICT bar ─────────────────────────────────────────── */}
-      <FinalVerdictBar data={data} tone={verdictTone} />
-
-      <div className="pb-1 text-center text-[10px] uppercase tracking-[0.18em] text-white/35">
-        This dashboard is for educational purpose only. Please consult your financial advisor before taking any trading decisions.
-      </div>
+      <GoldenRule data={data} />
     </div>
   );
 }
 
-/* ═══════════════ PREMIUM INTELLIGENCE PANEL ═══════════════════════════ */
-function PremiumIntelligencePanel({ data }: { data: V6Decision }) {
-  const g = data.greeks;
+/* ── Panel shell ─────────────────────────────────────────────────────── */
+function Panel({ title, accent = "#1e3a5f", children }: { title?: string; accent?: string; children: React.ReactNode }) {
   return (
-    <div className="rounded-xl border border-white/[0.08] bg-[#0a0e15] p-3">
-      <div className="mb-2 flex items-center gap-2">
-        <span className="text-[11px] font-bold uppercase tracking-[0.20em] text-cyan-300">
-          Premium Intelligence
-        </span>
-        <span className="text-[10px] uppercase tracking-[0.16em] text-white/40">(Greeks Engine)</span>
-      </div>
-
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr_1fr_1fr_1fr_220px]">
-        <GreekEngineCard
-          icon="📐"
-          title="DELTA ENGINE"
-          big={g.delta.value.toFixed(2)}
-          subTrend={g.delta.trend}
-          tag={g.delta.verdict}
-          tagTone={g.delta.quality === "FAKE" ? "#ef4444" : g.delta.bias === "BULLISH" ? "#22c55e" : "#ef4444"}
-          accent="#38bdf8"
-        />
-        <GreekEngineCard
-          icon="⚡"
-          title="GAMMA ENGINE"
-          big={g.gamma.level}
-          bigSize={26}
-          sub={g.gamma.index.toFixed(3)}
-          tag={g.gamma.verdict}
-          tagTone={g.gamma.level === "HIGH" ? "#f59e0b" : g.gamma.level === "MEDIUM" ? "#facc15" : "#94a3b8"}
-          accent="#f59e0b"
-        />
-        <GreekEngineCard
-          icon="⏳"
-          title="THETA ENGINE"
-          big={g.theta.value.toFixed(1)}
-          bigTone="#ef4444"
-          subStatic={g.theta.level === "FAST" ? "FAST" : g.theta.level === "MEDIUM" ? "MODERATE" : "SLOW"}
-          tag={g.theta.verdict}
-          tagTone={g.theta.level === "FAST" ? "#ef4444" : g.theta.level === "MEDIUM" ? "#f59e0b" : "#22c55e"}
-          accent="#f59e0b"
-        />
-        <GreekEngineCard
-          icon="🌪"
-          title="VEGA ENGINE"
-          big={g.vega.value.toFixed(2)}
-          subTrend={g.vega.trend === "RISING" ? "RISING" : g.vega.trend === "FALLING" ? "FALLING" : "FLAT"}
-          tag={g.vega.verdict}
-          tagTone={g.vega.state === "EXPANDING" ? "#22c55e" : g.vega.state === "CRUSH" ? "#ef4444" : "#94a3b8"}
-          accent="#22d3ee"
-        />
-        <PremiumPowerGauge data={data} />
-      </div>
+    <div className="flex h-full min-h-0 flex-col rounded border border-white/15 bg-[#0a0f17]">
+      {title ? (
+        <div className="rounded-t px-2 py-1.5 text-center text-[14px] font-bold uppercase tracking-[0.08em] text-cyan-300"
+          style={{ background: accent }}>
+          {title}
+        </div>
+      ) : null}
+      <div className="flex min-h-0 flex-1 flex-col gap-2 p-2">{children}</div>
     </div>
   );
 }
 
-/* ── Single Greek engine card ──────────────────────────────────────── */
-function GreekEngineCard({
-  icon, title, big, bigSize = 32, bigTone, sub, subTrend, subStatic, tag, tagTone, accent,
-}: {
-  icon: string;
-  title: string;
-  big: string;
-  bigSize?: number;
-  bigTone?: string;
-  sub?: string;
-  subTrend?: string;
-  subStatic?: string;
-  tag: string;
-  tagTone: string;
-  accent: string;
-}) {
-  const trendUp = subTrend === "RISING";
-  const trendDown = subTrend === "FALLING";
+/* ═══════════════ TITLE BAR ════════════════════════════════════════════ */
+function TitleBar({ data }: { data: V6Decision }) {
+  const h = data.header;
+  const chgTone = h.change >= 0 ? "#22c55e" : "#ef4444";
+  const vixTone = h.vixChangePct <= 0 ? "#22c55e" : "#ef4444";
+  const mode = h.marketMode;
+  const modeTone = mode.state === "RISK ON" ? "#22c55e" : mode.state === "RISK OFF" ? "#ef4444" : "#eab308";
   return (
-    <div className="flex flex-col rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5">
-      <div className="mb-1 flex items-center gap-1.5">
-        <span className="text-[13px]">{icon}</span>
-        <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-white/65">{title}</span>
+    <div className="grid grid-cols-12 items-stretch gap-2">
+      {/* date / time */}
+      <div className="col-span-2 flex flex-col justify-center rounded border border-white/15 bg-[#0a0f17] px-3 py-2">
+        <span className="text-[13px] tracking-wide text-white/60">DATE : <span className="text-white/85">{h.date}</span></span>
+        <span className="text-[13px] tracking-wide text-white/60">TIME : <span className="text-white/85">{h.time}</span></span>
       </div>
-      <div
-        className="font-mono font-black leading-none"
-        style={{ fontSize: bigSize, color: bigTone || "#e8fbff" }}
-      >
-        {big}
-      </div>
-      <div className="mt-1 flex h-4 items-center gap-1 text-[11px] font-bold uppercase tracking-wider">
-        {subTrend ? (
-          <span style={{ color: trendUp ? "#22c55e" : trendDown ? "#ef4444" : "#94a3b8" }}>
-            {subTrend} {trendUp ? "↑" : trendDown ? "↓" : "→"}
+
+      {/* title + index quote */}
+      <div className="col-span-7 flex flex-col items-center justify-center rounded border border-white/15 bg-[#0a0f17] px-2 py-2">
+        <div className="flex items-baseline gap-2">
+          <span className="text-[22px] font-black tracking-wide text-white">NIFTY MASTER ENGINE DASHBOARD</span>
+          <span className="text-[14px] font-bold tracking-wide text-cyan-300">( GREEKS + CPR + BREADTH + IT ENGINE )</span>
+        </div>
+        <div className="mt-1 flex items-center gap-3 rounded bg-black/40 px-4 py-1">
+          <span className="text-[15px] font-bold text-white/80">{h.indexName}</span>
+          <span className="font-mono text-[19px] font-black text-emerald-400">{h.spot.toLocaleString()}</span>
+          <span className="font-mono text-[15px] font-bold" style={{ color: chgTone }}>
+            {h.change >= 0 ? "+" : ""}{h.change.toFixed(2)} ({h.changePct >= 0 ? "+" : ""}{h.changePct.toFixed(2)}%)
           </span>
-        ) : subStatic ? (
-          <span className="text-white/65">{subStatic}</span>
-        ) : sub ? (
-          <span className="font-mono text-white/55">{sub}</span>
-        ) : null}
-      </div>
-      <div
-        className="mt-2 rounded-md border px-2 py-1.5 text-center text-[11px] font-black uppercase tracking-wider"
-        style={{ borderColor: `${tagTone}66`, background: `${tagTone}1a`, color: tagTone }}
-      >
-        {tag}
-      </div>
-      <div className="mt-1 h-0.5 w-full rounded-full" style={{ background: `${accent}55` }} />
-    </div>
-  );
-}
-
-/* ── Premium Power Score gauge (half-ring) ─────────────────────────── */
-function PremiumPowerGauge({ data }: { data: V6Decision }) {
-  const score = data.premiumPower.score;
-  const v = Math.max(0, Math.min(100, score));
-  // semicircle gauge
-  const R = 52;
-  const cx = 70;
-  const cy = 64;
-  const startAngle = Math.PI; // 180deg
-  const endAngle = 0;
-  const angle = startAngle + (endAngle - startAngle) * (v / 100);
-  const pt = (a: number, r: number) => ({ x: cx + r * Math.cos(a), y: cy - r * Math.sin(a) });
-  const arcPath = (a0: number, a1: number, r: number) => {
-    const p0 = pt(a0, r);
-    const p1 = pt(a1, r);
-    const large = Math.abs(a1 - a0) > Math.PI ? 1 : 0;
-    const sweep = a1 < a0 ? 1 : 0;
-    return `M ${p0.x} ${p0.y} A ${r} ${r} 0 ${large} ${sweep} ${p1.x} ${p1.y}`;
-  };
-  const tone = data.premiumPower.state === "AVOID" || data.premiumPower.state === "LOW EDGE"
-    ? "#ef4444"
-    : data.premiumPower.state === "TRADEABLE"
-      ? "#facc15"
-      : "#22c55e";
-  const needle = pt(angle, R - 6);
-
-  return (
-    <div className="flex flex-col items-center justify-center rounded-lg border border-emerald-400/30 bg-emerald-400/[0.04] p-2">
-      <span className="mb-1 text-[10px] font-bold uppercase tracking-[0.16em] text-white/65">
-        Premium Power Score
-      </span>
-      <div className="relative h-[78px] w-[140px]">
-        <svg viewBox="0 0 140 74" className="h-full w-full">
-          {/* track */}
-          <path d={arcPath(startAngle, endAngle, R)} fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="9" strokeLinecap="round" />
-          {/* red→amber→green segments under value */}
-          <path d={arcPath(startAngle, angle, R)} fill="none" stroke={tone} strokeWidth="9" strokeLinecap="round"
-            style={{ filter: `drop-shadow(0 0 4px ${tone}88)`, transition: "all .5s ease" }} />
-          {/* needle */}
-          <line x1={cx} y1={cy} x2={needle.x} y2={needle.y} stroke="#e8fbff" strokeWidth="2" />
-          <circle cx={cx} cy={cy} r="3.5" fill="#e8fbff" />
-        </svg>
-        <div className="absolute inset-x-0 top-3 flex flex-col items-center">
-          <span className="font-mono text-[30px] font-black leading-none" style={{ color: tone }}>
-            {v}
+          <span className="ml-2 text-[15px] font-bold text-white/55">VIX</span>
+          <span className="font-mono text-[16px] font-bold text-white/85">{h.vix.toFixed(2)}</span>
+          <span className="font-mono text-[14px] font-bold" style={{ color: vixTone }}>
+            ({h.vixChangePct >= 0 ? "+" : ""}{h.vixChangePct.toFixed(2)}%)
           </span>
-          <span className="text-[9px] font-bold uppercase tracking-wider text-white/45">/100</span>
         </div>
       </div>
-      <span className="mt-0.5 text-[9px] font-bold uppercase tracking-[0.16em] text-white/45">State</span>
-      <span className="text-center text-[12px] font-black uppercase leading-tight" style={{ color: tone }}>
-        {data.premiumPower.state}
-      </span>
-    </div>
-  );
-}
 
-/* ═══════════════ ACTION PLAN CARD ═════════════════════════════════════ */
-function ActionPlanCard({ data }: { data: V6Decision }) {
-  const ap = data.actionPlan;
-  const tone = toneFor(ap.marketBias);
-  const arrow = ap.marketBias === "BULLISH" ? "↗" : ap.marketBias === "BEARISH" ? "↘" : "→";
-  return (
-    <div className="rounded-xl border-2 bg-[#0a0e15] p-3" style={{ borderColor: `${tone}55` }}>
-      <div className="text-center">
-        <div className="text-[12px] font-bold uppercase tracking-[0.16em] text-white/85">
-          Option Buyer Action Plan
+      {/* market mode */}
+      <div className="col-span-3 flex items-center justify-center gap-3 rounded border-2 bg-[#0a0f17] px-3 py-2"
+        style={{ borderColor: `${modeTone}66` }}>
+        <div className="flex flex-col items-center">
+          <span className="text-[13px] font-bold uppercase tracking-wide text-white/55">Market Mode</span>
+          <span className="text-[17px] font-black uppercase tracking-wide text-white/90">{mode.label}</span>
+          <span className="text-[17px] font-black uppercase tracking-wide" style={{ color: modeTone }}>{mode.state}</span>
         </div>
-        <div className="text-[10px] uppercase tracking-[0.14em] text-white/45">{ap.setup}</div>
-      </div>
-
-      <div className="mt-3 rounded-lg border bg-black/20 p-3" style={{ borderColor: `${tone}66` }}>
-        <div className="text-center text-[10px] font-bold uppercase tracking-[0.18em] text-white/55">Action</div>
-        <div className="text-center font-mono text-[40px] font-black leading-none" style={{ color: tone, textShadow: `0 0 16px ${tone}44` }}>
-          {ap.action}
-        </div>
-
-        <div className="my-2.5 h-px w-full bg-white/10" />
-
-        <div className="text-center text-[10px] font-bold uppercase tracking-[0.18em] text-white/55">Market Bias</div>
-        <div className="flex items-center justify-center gap-2 text-[22px] font-black uppercase" style={{ color: tone }}>
-          {ap.marketBias} <span>{arrow}</span>
-        </div>
-
-        <div className="my-2.5 h-px w-full bg-white/10" />
-
-        <div className="text-center text-[10px] font-bold uppercase tracking-[0.18em] text-white/55">Confidence</div>
-        <div className="flex items-center justify-center gap-2">
-          <Stars value={ap.confidence} />
-          <span className="font-mono text-[15px] font-bold text-white/85">{ap.confidence.toFixed(1)} / 5</span>
-        </div>
+        <span className="text-[30px]">{mode.bias === "BULLISH" ? "🐂" : mode.bias === "BEARISH" ? "🐻" : "•"}</span>
       </div>
     </div>
   );
 }
 
-function Stars({ value }: { value: number }) {
-  const full = Math.floor(value);
-  const frac = value - full;
+/* ── Shared scale table (range → label rows, highlights the active one) ─ */
+function ScaleTable({ rows }: { rows: V6ScaleRow[] }) {
   return (
-    <div className="flex items-center gap-0.5">
-      {[0, 1, 2, 3, 4].map((i) => {
-        const fill = i < full ? 1 : i === full ? frac : 0;
+    <div className="flex flex-col gap-1">
+      {rows.map((r, i) => {
+        const color = tc(r.tone);
         return (
-          <span key={i} className="relative text-[18px] leading-none">
-            <span className="text-white/20">★</span>
-            <span
-              className="absolute inset-0 overflow-hidden text-amber-400"
-              style={{ width: `${fill * 100}%` }}
-            >
-              ★
+          <div
+            key={i}
+            className="flex items-center justify-between rounded px-2 py-1 text-[13px]"
+            style={{
+              background: r.active ? `${color}26` : "transparent",
+              border: `1px solid ${r.active ? `${color}88` : "rgba(255,255,255,0.07)"}`,
+            }}
+          >
+            <span className="text-white/65">{r.range}</span>
+            <span className="font-bold uppercase tracking-wide" style={{ color: r.active ? color : "rgba(255,255,255,0.45)" }}>
+              {r.label}
             </span>
-          </span>
+          </div>
         );
       })}
     </div>
   );
 }
 
-/* ═══════════════ GREEKS SUMMARY CARD (right rail) ═════════════════════ */
-function GreeksSummaryCard({ data }: { data: V6Decision }) {
-  const s = data.greeksSummary;
-  const rows: Array<{ label: string; value: string; tone: string; arrow?: string }> = [
-    { label: "Delta Trend", value: s.deltaTrend, tone: trendTone(s.deltaTrend), arrow: s.deltaTrend === "RISING" ? "↑" : s.deltaTrend === "FALLING" ? "↓" : "→" },
-    { label: "Gamma Level", value: s.gammaLevel, tone: s.gammaLevel === "HIGH" ? "#22c55e" : s.gammaLevel === "MEDIUM" ? "#facc15" : "#94a3b8" },
-    { label: "Theta Impact", value: s.thetaImpact, tone: s.thetaImpact === "LOW" ? "#22c55e" : s.thetaImpact === "MEDIUM" ? "#facc15" : "#ef4444" },
-    { label: "Vega Trend", value: s.vegaTrend, tone: s.vegaTrend === "EXPANDING" ? "#22c55e" : s.vegaTrend === "CRUSH" ? "#ef4444" : "#94a3b8" },
-    { label: "Premium Edge", value: s.premiumEdge, tone: s.premiumEdge === "HIGH" ? "#22c55e" : s.premiumEdge === "MEDIUM" ? "#facc15" : "#ef4444" },
-  ];
+/* ═══════════════ 1. MARKET BREADTH ENGINE ═════════════════════════════ */
+function BreadthEngine({ data }: { data: V6Decision }) {
+  const b = data.breadthEngine;
+  const color = tc(b.tone);
   return (
-    <div className="rounded-xl border border-white/[0.08] bg-[#0a0e15] p-3">
-      <div className="mb-2 text-[11px] font-bold uppercase tracking-[0.16em] text-white/85">Greeks Summary</div>
-      <div className="flex flex-col">
-        {rows.map((r, i) => (
-          <div
-            key={r.label}
-            className={`flex items-center justify-between py-2 ${i < rows.length - 1 ? "border-b border-white/[0.06]" : ""}`}
-          >
-            <span className="text-[12px] uppercase tracking-wide text-white/55">{r.label}</span>
-            <span className="text-[13px] font-black uppercase tracking-wider" style={{ color: r.tone }}>
-              {r.value} {r.arrow || ""}
-            </span>
-          </div>
-        ))}
+    <Panel title="1. MARKET BREADTH ENGINE">
+      <div className="grid grid-cols-3 gap-2 text-center">
+        <Stat label="ADVANCING STOCKS" value={b.advancing} tone="#22c55e" />
+        <Stat label="DECLINING STOCKS" value={b.declining} tone="#ef4444" />
+        <Stat label="UNCHANGED STOCKS" value={b.unchanged} tone="#94a3b8" />
       </div>
+      <div className="my-2 text-center text-[13px] text-white/65">
+        BREADTH % = {b.formula}
+      </div>
+      <div className="grid grid-cols-[150px_1fr] items-center gap-3">
+        <Gauge pct={b.pct} color={color} label={b.zone} />
+        <ScaleTable rows={b.scale} />
+      </div>
+    </Panel>
+  );
+}
+
+function Stat({ label, value, tone }: { label: string; value: number | string; tone: string }) {
+  return (
+    <div className="rounded border border-white/10 bg-white/[0.02] px-2 py-2">
+      <div className="text-[11px] font-bold uppercase leading-tight tracking-wide text-white/55">{label}</div>
+      <div className="font-mono text-[26px] font-black leading-none" style={{ color: tone }}>{value}</div>
     </div>
   );
 }
 
-/* ═══════════════ GREEKS MOMENTUM MATRIX STRIP ═════════════════════════ */
-function MomentumMatrixStrip({ data }: { data: V6Decision }) {
-  const m = data.momentumMatrix;
-  const cells: Array<{ value: string; tone: string; arrow: string }> = [
-    { value: m.delta.label === "STRONG" ? "Strong" : m.delta.label === "MODERATE" ? "Moderate" : "Weak", tone: trendTone(m.delta.trend), arrow: m.delta.trend === "RISING" ? "↑" : m.delta.trend === "FALLING" ? "↓" : "→" },
-    { value: m.gamma.label === "HIGH" ? "Gaining" : m.gamma.label === "MEDIUM" ? "Steady" : "Soft", tone: m.gamma.label === "HIGH" ? "#22c55e" : m.gamma.label === "MEDIUM" ? "#facc15" : "#94a3b8", arrow: m.gamma.trend === "RISING" ? "↑" : m.gamma.trend === "FALLING" ? "↓" : "→" },
-    { value: m.theta.label === "FAST" ? "Decay" : m.theta.label === "MEDIUM" ? "Decay" : "Slow", tone: m.theta.label === "FAST" ? "#ef4444" : m.theta.label === "MEDIUM" ? "#f59e0b" : "#22c55e", arrow: "↓" },
-    { value: m.vega.label === "EXPANDING" ? "Expanding" : m.vega.label === "CRUSH" ? "Crushing" : "Stable", tone: m.vega.label === "EXPANDING" ? "#22c55e" : m.vega.label === "CRUSH" ? "#ef4444" : "#94a3b8", arrow: m.vega.trend === "RISING" ? "↑" : m.vega.trend === "FALLING" ? "↓" : "→" },
-  ];
-  return (
-    <div className="flex flex-wrap items-center gap-x-8 gap-y-2 rounded-xl border border-white/[0.08] bg-[#0a0e15] px-4 py-2.5">
-      <span className="text-[11px] font-bold uppercase tracking-[0.16em] text-white/65">Greeks Momentum Matrix</span>
-      {cells.map((c, i) => (
-        <span key={i} className="text-[13px] font-black uppercase tracking-wider" style={{ color: c.tone }}>
-          {c.value} {c.arrow}
-        </span>
-      ))}
-      <div className="ml-auto flex items-center gap-2">
-        <span className="text-[11px] font-bold uppercase tracking-[0.16em] text-white/55">Momentum Score</span>
-        <span className="font-mono text-[18px] font-black text-cyan-300">{m.score}</span>
-        <span className="text-[11px] text-white/45">/ 100</span>
-      </div>
-    </div>
-  );
-}
-
-/* ═══════════════ STRIKE DOMINANCE PANEL (ATM ± 5) ═════════════════════ */
-function StrikeDominancePanel({ data }: { data: V6Decision }) {
-  const sd = data.strikeDominance;
-  return (
-    <div className="rounded-xl border border-white/[0.08] bg-[#0a0e15] p-3">
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-[11px] font-bold uppercase tracking-[0.16em] text-cyan-300">
-          Strike Dominance — ATM ± 5
-        </span>
-        <span className="text-[10px] uppercase tracking-[0.14em] text-white/45">
-          {sd.count} Strikes · {sd.step} Step
-        </span>
-      </div>
-      {sd.strikes.length === 0 ? (
-        <div className="py-6 text-center text-[12px] text-white/40">No strike data in window</div>
-      ) : (
-        <div className="flex gap-2 overflow-x-auto pb-1">
-          {sd.strikes.map((s) => (
-            <StrikeCard key={s.strike} row={s} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function StrikeCard({ row }: { row: V6StrikeRow }) {
-  const sideTone = row.side === "ATM" ? "#f59e0b" : row.side === "CE" ? "#22c55e" : "#ef4444";
-  const labelTone = row.label.startsWith("STRONG CE") ? "#22c55e"
-    : row.label.startsWith("STRONG PE") ? "#ef4444"
-    : row.label === "ATM ZONE" ? "#f59e0b"
-    : row.side === "CE" ? "#22c55e" : "#ef4444";
-  return (
-    <div
-      className="flex min-w-[120px] flex-1 flex-col rounded-lg border-2 bg-white/[0.02] p-2"
-      style={{ borderColor: row.isAtm ? "#f59e0b88" : "rgba(255,255,255,0.08)" }}
-    >
-      <div className="flex items-center justify-between">
-        <span className="font-mono text-[16px] font-black text-white/95">{row.strike}</span>
-        <span className="text-[10px] font-black uppercase tracking-wider" style={{ color: sideTone }}>
-          {row.side}
-        </span>
-      </div>
-
-      {/* CE vs PE favour split bar */}
-      <div className="mt-2 flex items-center justify-between text-[11px] font-bold">
-        <span className="text-emerald-400">{row.ceFavorPct}%</span>
-        <span className="text-rose-400">{row.peFavorPct}%</span>
-      </div>
-      <div className="mt-0.5 flex h-2 w-full overflow-hidden rounded-full bg-white/10">
-        <div className="h-full bg-emerald-500" style={{ width: `${row.ceFavorPct}%` }} />
-        <div className="h-full bg-rose-500" style={{ width: `${row.peFavorPct}%` }} />
-      </div>
-
-      {/* OI + change */}
-      <div className="mt-2 text-[10px] text-white/55">
-        OI {fmtOiCompact(row.oi)}{" "}
-        <span style={{ color: row.oiChangePct >= 0 ? "#22c55e" : "#ef4444" }}>
-          {row.oiChangePct >= 0 ? "+" : ""}{row.oiChangePct}%
-        </span>
-      </div>
-
-      <div
-        className="mt-1.5 rounded border px-1.5 py-1 text-center text-[10px] font-black uppercase tracking-wider"
-        style={{ borderColor: `${labelTone}55`, background: `${labelTone}18`, color: labelTone }}
-      >
-        {row.label}
-      </div>
-    </div>
-  );
-}
-
-/* ═══════════════ FUTURES & BREADTH PANEL ══════════════════════════════ */
-function FuturesBreadthPanel({ data }: { data: V6Decision }) {
-  const fb = data.futuresBreadth;
-  const futTone = fb.futPremium >= 0 ? "#22c55e" : "#ef4444";
-  const sentTone = toneFor(fb.sentiment);
-  const advTotal = fb.advDec.adv + fb.advDec.dec || 1;
-  const advRatio = Math.round((fb.advDec.adv / advTotal) * 100);
-  return (
-    <div className="rounded-xl border border-white/[0.08] bg-[#0a0e15] p-3">
-      <div className="mb-2 text-center text-[11px] font-bold uppercase tracking-[0.16em] text-sky-300">
-        Futures &amp; Breadth
-      </div>
-
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <div className="text-[10px] uppercase tracking-wide text-white/45">Futures Premium</div>
-          <div className="font-mono text-[24px] font-black leading-none" style={{ color: futTone }}>
-            {fb.futPremium >= 0 ? "+" : ""}{fb.futPremium.toFixed(2)}
-          </div>
-          <div className="mt-1 text-[10px] font-bold uppercase tracking-wide" style={{ color: futTone }}>
-            {fb.premiumState}
-          </div>
-        </div>
-        <div className="text-right">
-          <div className="text-[10px] uppercase tracking-wide text-white/45">Adv / Dec</div>
-          <div className="font-mono text-[18px] font-black leading-none">
-            <span className="text-emerald-400">{fb.advDec.adv}</span>
-            <span className="text-white/30"> / </span>
-            <span className="text-rose-400">{fb.advDec.dec}</span>
-          </div>
-          <div className="mt-1 text-[10px] font-bold uppercase tracking-wide text-white/55">{fb.advDec.label}</div>
-        </div>
-      </div>
-
-      {/* adv/dec bar */}
-      <div className="mt-2 flex h-2 w-full overflow-hidden rounded-full bg-white/10">
-        <div className="h-full bg-emerald-500" style={{ width: `${advRatio}%` }} />
-        <div className="h-full bg-rose-500" style={{ width: `${100 - advRatio}%` }} />
-      </div>
-
-      <div className="my-3 h-px w-full bg-white/10" />
-
-      <div className="text-[10px] uppercase tracking-wide text-white/45">Market Sentiment</div>
-      <div className="flex items-center gap-2 text-[24px] font-black uppercase" style={{ color: sentTone }}>
-        {fb.sentiment}
-        <span>{fb.sentiment === "BULLISH" ? "🐂" : fb.sentiment === "BEARISH" ? "🐻" : "•"}</span>
-      </div>
-    </div>
-  );
-}
-
-/* ═══════════════ SESSION & RISK PANEL ═════════════════════════════════ */
-function SessionRiskPanel({ data }: { data: V6Decision }) {
-  const ses = data.session;
-  const risk = data.risk;
-  const riskTone = risk.level === "LOW" ? "#22c55e" : risk.level === "MEDIUM" ? "#facc15" : "#ef4444";
-  const rewardTone = risk.reward === "HIGH" ? "#22c55e" : risk.reward === "MEDIUM" ? "#facc15" : "#ef4444";
-  const volTone = ses.volatility === "LOW" ? "#22c55e" : ses.volatility === "MEDIUM" || ses.volatility === "MODERATE" ? "#facc15" : "#ef4444";
-  return (
-    <div className="rounded-xl border border-white/[0.08] bg-[#0a0e15] p-3">
-      <div className="mb-2 text-center text-[11px] font-bold uppercase tracking-[0.16em] text-white/85">
-        Session &amp; Risk
-      </div>
-
-      <div className="grid grid-cols-3 gap-2 border-b border-white/[0.06] pb-3">
-        <MiniStat label="Day" value={ses.day} />
-        <MiniStat label="Time" value={ses.time} />
-        <MiniStat label="Volatility" value={ses.volatility} tone={volTone} />
-      </div>
-
-      <div className="mt-3 grid grid-cols-2 gap-3">
-        <div className="flex flex-col items-center gap-1 rounded-lg border border-white/[0.07] bg-white/[0.02] py-3">
-          <span className="text-[10px] uppercase tracking-wide text-white/45">Risk Level</span>
-          <span className="text-[20px] font-black uppercase" style={{ color: riskTone }}>{risk.level}</span>
-          <span className="text-[14px]">🛡</span>
-        </div>
-        <div className="flex flex-col items-center gap-1 rounded-lg border border-white/[0.07] bg-white/[0.02] py-3">
-          <span className="text-[10px] uppercase tracking-wide text-white/45">Reward Potential</span>
-          <span className="text-[20px] font-black uppercase" style={{ color: rewardTone }}>{risk.reward}</span>
-          <span className="text-[14px]">🚀</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function MiniStat({ label, value, tone }: { label: string; value: string; tone?: string }) {
+/* half-circle gauge with big % + zone label below */
+function Gauge({ pct, color, label }: { pct: number; color: string; label: string }) {
+  const v = Math.max(0, Math.min(100, pct));
+  const R = 40, cx = 50, cy = 48;
+  const a0 = Math.PI, a1 = 0;
+  const ang = a0 + (a1 - a0) * (v / 100);
+  const pt = (a: number, r: number) => ({ x: cx + r * Math.cos(a), y: cy - r * Math.sin(a) });
+  const arc = (s: number, e: number, r: number) => {
+    const p0 = pt(s, r), p1 = pt(e, r);
+    const large = Math.abs(e - s) > Math.PI ? 1 : 0;
+    const sweep = e < s ? 1 : 0;
+    return `M ${p0.x} ${p0.y} A ${r} ${r} 0 ${large} ${sweep} ${p1.x} ${p1.y}`;
+  };
   return (
     <div className="flex flex-col items-center">
-      <span className="text-[9px] uppercase tracking-wide text-white/45">{label}</span>
-      <span className="text-[13px] font-black uppercase" style={{ color: tone || "#e8fbff" }}>{value}</span>
+      <div className="relative h-[70px] w-[130px]">
+        <svg viewBox="0 0 100 52" className="h-full w-full">
+          <path d={arc(a0, a1, R)} fill="none" stroke="rgba(255,255,255,0.10)" strokeWidth="8" strokeLinecap="round" />
+          <path d={arc(a0, ang, R)} fill="none" stroke={color} strokeWidth="8" strokeLinecap="round"
+            style={{ filter: `drop-shadow(0 0 3px ${color})`, transition: "all .5s ease" }} />
+        </svg>
+        <div className="absolute inset-x-0 bottom-0 text-center">
+          <span className="font-mono text-[26px] font-black" style={{ color }}>{v}%</span>
+        </div>
+      </div>
+      <span className="mt-1 text-center text-[14px] font-black uppercase leading-tight tracking-wide" style={{ color }}>{label}</span>
     </div>
   );
 }
 
-/* ═══════════════ FINAL VERDICT BAR ════════════════════════════════════ */
-function FinalVerdictBar({ data, tone }: { data: V6Decision; tone: string }) {
-  const edge = data.verdict.tradeEdge;
-  const edgeTone = edge === "STRONG" ? "#22c55e" : edge === "MODERATE" ? "#facc15" : "#ef4444";
+/* ═══════════════ 2. IT SECTOR STRENGTH ENGINE ═════════════════════════ */
+function ItEngine({ data }: { data: V6Decision }) {
+  const it = data.itEngine;
+  const color = tc(it.tone);
   return (
-    <div
-      className="grid grid-cols-1 items-center gap-3 rounded-xl border-2 bg-[#0a0e15] px-5 py-3 lg:grid-cols-[1fr_auto]"
-      style={{ borderColor: `${tone}55` }}
-    >
-      <div className="text-center lg:text-left">
-        <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-white/45">Final Verdict</div>
-        <div className="text-[15px] font-black uppercase tracking-wide text-white/85">{data.verdict.line}</div>
-        <div className="mt-0.5 flex items-center justify-center gap-2 lg:justify-start">
-          <span className="text-[18px]">{data.actionPlan.marketBias === "BULLISH" ? "🐂" : data.actionPlan.marketBias === "BEARISH" ? "🐻" : "•"}</span>
-          <span className="text-[18px] font-black uppercase tracking-wide" style={{ color: tone }}>
-            {data.verdict.headline}
-          </span>
-        </div>
-      </div>
-      <div className="flex items-center justify-center gap-3 rounded-lg border px-5 py-2" style={{ borderColor: `${edgeTone}55`, background: `${edgeTone}12` }}>
-        <span className="text-[11px] font-bold uppercase tracking-[0.16em] text-white/55">Trade Edge</span>
-        <span className="flex items-center gap-1 text-[22px] font-black uppercase" style={{ color: edgeTone }}>
-          💎 {edge}
+    <Panel title="2. IT SECTOR STRENGTH ENGINE">
+      <div className="mb-2 flex items-center justify-between rounded border border-white/10 bg-white/[0.02] px-3 py-2">
+        <span className="text-[16px] font-bold uppercase tracking-wide text-white/70">NIFTY IT</span>
+        <span className="flex items-center gap-1 font-mono text-[26px] font-black" style={{ color }}>
+          {it.changePct >= 0 ? "+" : ""}{it.changePct}% {it.changePct >= 0 ? "↑" : "↓"}
         </span>
       </div>
+      <ScaleTable rows={it.scale} />
+      <div className="mt-2 rounded border px-2 py-2 text-center text-[16px] font-black uppercase tracking-wide"
+        style={{ borderColor: `${tc(it.bias)}66`, background: `${tc(it.bias)}1a`, color: tc(it.bias) }}>
+        {it.summary}
+      </div>
+    </Panel>
+  );
+}
+
+/* ═══════════════ 3. CPR ENGINE ════════════════════════════════════════ */
+function CprEngine({ data }: { data: V6Decision }) {
+  const c = data.cprEngine;
+  const widthTone = tc(c.width.tone);
+  const locTone = tc(c.locationBias);
+  const lv = c.levels;
+  return (
+    <Panel title="3. CPR ENGINE">
+      <div className="grid grid-cols-3 gap-1.5">
+        {/* CPR WIDTH */}
+        <div className="flex flex-col items-center rounded border border-white/10 bg-white/[0.02] px-1.5 py-1.5">
+          <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">CPR WIDTH</span>
+          <span className="text-[18px] font-black uppercase" style={{ color: widthTone }}>{c.width.label}</span>
+          <span className="mt-0.5 text-center text-[11px] leading-tight text-white/55">{c.width.headline}</span>
+          <span className="text-center text-[11px] font-bold leading-tight" style={{ color: widthTone }}>{c.width.sub}</span>
+        </div>
+        {/* CPR LEVELS */}
+        <div className="flex flex-col justify-center rounded border border-white/10 bg-white/[0.02] px-1.5 py-1.5">
+          <span className="mb-1 text-center text-[11px] font-bold uppercase tracking-wide text-white/50">CPR LEVELS</span>
+          <LevelRow k="R3" v={lv.r3} />
+          <LevelRow k="TC (R2)" v={lv.tc} hl="#22c55e" />
+          <LevelRow k="PIVOT" v={lv.pivot} hl="#eab308" />
+          <LevelRow k="BC (S2)" v={lv.bc} hl="#f97316" />
+          <LevelRow k="S3" v={lv.s3} />
+        </div>
+        {/* PRICE LOCATION */}
+        <div className="flex flex-col items-center justify-center rounded border border-white/10 bg-white/[0.02] px-1.5 py-1.5">
+          <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">PRICE LOCATION</span>
+          <span className="mt-1 text-[17px] font-black uppercase leading-tight" style={{ color: locTone }}>{c.priceLocation}</span>
+          <span className="mt-1 text-center text-[12px] font-bold uppercase leading-tight" style={{ color: locTone }}>{c.territory}</span>
+          <span className="text-center text-[11px] leading-tight text-white/55">{c.locationSub}</span>
+        </div>
+      </div>
+
+      {/* location banner */}
+      <div className="my-1.5 rounded border px-2 py-1.5 text-center text-[14px] font-black uppercase tracking-wide"
+        style={{ borderColor: `${locTone}66`, background: `${locTone}1a`, color: locTone }}>
+        {c.locationBanner}
+      </div>
+
+      {/* OPENING SCENARIO ENGINE */}
+      <div className="rounded border border-white/10 bg-black/30 p-1.5">
+        <div className="mb-1.5 text-center text-[12px] font-bold uppercase tracking-[0.12em] text-cyan-300">Opening Scenario Engine</div>
+        <div className="grid grid-cols-3 gap-1.5">
+          <OpeningCol head="GAP UP OPEN" cols={c.opening.gapUp} />
+          <OpeningCol head="FLAT OPEN" cols={c.opening.flat} />
+          <OpeningCol head="GAP DOWN OPEN" cols={c.opening.gapDown} />
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+function LevelRow({ k, v, hl }: { k: string; v: number; hl?: string }) {
+  return (
+    <div className="flex items-center justify-between text-[12px] leading-snug">
+      <span className="text-white/55">{k}</span>
+      <span className="font-mono font-bold" style={{ color: hl || "rgba(255,255,255,0.85)" }}>
+        {v ? v.toLocaleString(undefined, { maximumFractionDigits: 0 }) : "—"}
+      </span>
+    </div>
+  );
+}
+
+function OpeningCol({ head, cols }: { head: string; cols: V6OpeningCol[] }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-center text-[11px] font-bold uppercase tracking-wide text-white/55">{head}</span>
+      {cols.map((o, i) => {
+        const color = tc(o.tone);
+        return (
+          <div key={i} className="rounded border px-1.5 py-1 text-center"
+            style={{ borderColor: o.active ? `${color}99` : "rgba(255,255,255,0.1)", background: o.active ? `${color}1f` : "transparent" }}>
+            <div className="text-[11px] font-bold uppercase" style={{ color: o.active ? color : "rgba(255,255,255,0.6)" }}>{o.cond}</div>
+            <div className="text-[10px] leading-tight text-white/65">{o.verdict}</div>
+            <div className="text-[10px] leading-tight text-white/45">{o.sub}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ═══════════════ CPR RELATIONSHIP ═════════════════════════════════════ */
+function CprRelationship({ data }: { data: V6Decision }) {
+  const r = data.cprEngine.relation;
+  const color = tc(r.bias);
+  return (
+    <Panel title="CPR RELATIONSHIP" accent="#3a2a5f">
+      <div className="flex flex-1 flex-col items-center justify-center py-2">
+        <span className="text-[20px] font-black uppercase tracking-wide" style={{ color }}>{r.label}</span>
+        <span className="mt-1.5 text-[14px] font-bold uppercase text-white/70">{r.l1}</span>
+        <span className="text-[14px] uppercase text-white/55">{r.l2}</span>
+      </div>
+    </Panel>
+  );
+}
+
+/* ═══════════════ MARKET TREND VIEW ════════════════════════════════════ */
+function TrendView({ data }: { data: V6Decision }) {
+  const tv = data.trendView;
+  return (
+    <Panel title="MARKET TREND VIEW" accent="#1e3a5f">
+      <div className="flex flex-1 flex-col justify-between gap-2">
+        {tv.rows.map((row, i) => {
+          const color = tc(row.tone);
+          const arrow = row.dir === "UP" ? "⬆" : row.dir === "DOWN" ? "⬇" : "⊖";
+          return (
+            <div key={i} className="flex shrink-0 items-center gap-3 rounded border px-2 py-2"
+              style={{ borderColor: row.active ? `${color}88` : "rgba(255,255,255,0.08)", background: row.active ? `${color}18` : "transparent" }}>
+              <span className="text-[24px] leading-none" style={{ color: row.active ? color : "rgba(255,255,255,0.35)" }}>{arrow}</span>
+              <div className="flex flex-col">
+                <span className="text-[15px] font-black uppercase tracking-wide" style={{ color: row.active ? color : "rgba(255,255,255,0.55)" }}>{row.label}</span>
+                <span className="text-[12px] leading-tight text-white/55">{row.l1} · {row.l2}</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Panel>
+  );
+}
+
+/* ═══════════════ 4. GREEKS ENGINE (ATM) ═══════════════════════════════ */
+function GreeksEngine({ data }: { data: V6Decision }) {
+  const g = data.greeksEngine;
+  return (
+    <Panel title="4. GREEKS ENGINE ( ATM )">
+      <div className="grid h-full grid-cols-12 gap-2">
+        <div className="col-span-2"><GreekCard name="DELTA" value={fmtSigned(g.delta.value, 2)} trend={g.delta.trend} sub={g.delta.control} subTone={tc(g.delta.bias)} scale={g.delta.scale} /></div>
+        <div className="col-span-2"><GreekCard name="GAMMA" value={fmtSigned(g.gamma.value, 3)} trend={g.gamma.trend} sub={g.gamma.state} subTone="#22c55e" scale={g.gamma.scale} /></div>
+        <div className="col-span-2"><GreekCard name="VEGA" value={fmtSigned(g.vega.value, 3)} trend={g.vega.trend} sub={g.vega.state} subTone="#22c55e" scale={g.vega.scale} /></div>
+        <div className="col-span-2"><GreekCard name="THETA" value={fmtSigned(g.theta.value, 3)} trend={g.theta.trend} sub={`${g.theta.decay} · ${g.theta.friendly}`} subTone={g.theta.friendly === "BUYER EDGE" || g.theta.friendly === "BUYER FRIENDLY" ? "#22c55e" : g.theta.decay === "HIGH DECAY" ? "#ef4444" : "#eab308"} scale={g.theta.scale} /></div>
+        <div className="col-span-4"><GreeksReading data={data} /></div>
+      </div>
+    </Panel>
+  );
+}
+
+function GreekCard({
+  name, value, trend, sub, subTone, scale,
+}: {
+  name: string; value: string; trend: string; sub: string; subTone: string; scale: V6ScaleRow[];
+}) {
+  const trendUp = trend === "RISING";
+  const trendDown = trend === "FALLING";
+  const valTone = name === "THETA" ? "#ef4444" : "#22c55e";
+  return (
+    <div className="flex h-full flex-col rounded border border-white/12 bg-white/[0.02] p-2">
+      <div className="text-center text-[14px] font-black uppercase tracking-wide text-white/75">{name}</div>
+      <div className="flex items-center justify-center gap-1">
+        <span className="font-mono text-[28px] font-black leading-none" style={{ color: valTone }}>{value}</span>
+        <span className="text-[20px]" style={{ color: trendUp ? "#22c55e" : trendDown ? "#ef4444" : "#94a3b8" }}>
+          {trendUp ? "⬆" : trendDown ? "⬇" : "→"}
+        </span>
+      </div>
+      <div className="text-center text-[12px] font-bold uppercase leading-tight" style={{ color: trendUp ? "#22c55e" : trendDown ? "#ef4444" : "#94a3b8" }}>
+        {trend}
+      </div>
+      <div className="mb-1.5 text-center text-[11px] font-bold uppercase leading-tight" style={{ color: subTone }}>{sub}</div>
+      <ScaleTable rows={scale} />
+    </div>
+  );
+}
+
+function GreeksReading({ data }: { data: V6Decision }) {
+  const rows = data.greeksEngine.reading;
+  return (
+    <div className="flex h-full flex-col rounded border border-white/12 bg-white/[0.02] p-2">
+      <div className="mb-2 text-center text-[14px] font-black uppercase tracking-[0.10em] text-cyan-300">Greeks Market Reading</div>
+      <div className="flex flex-1 flex-col justify-around gap-1.5">
+        {rows.map((r, i) => {
+          const color = tc(r.tone);
+          const [left, right] = splitReading(r.text);
+          return (
+            <div key={i} className="flex items-center justify-between rounded px-2 py-1.5 text-[12px]"
+              style={{ background: r.active ? `${color}1f` : "rgba(255,255,255,0.02)", border: `1px solid ${r.active ? `${color}77` : "rgba(255,255,255,0.06)"}` }}>
+              <span className="text-white/70">{left}</span>
+              <span className="font-bold uppercase" style={{ color }}>{right}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+function splitReading(text: string): [string, string] {
+  const idx = text.indexOf("=");
+  if (idx < 0) return [text, ""];
+  return [text.slice(0, idx + 1), text.slice(idx + 1).trim()];
+}
+
+/* ═══════════════ 5. COMPLETE LOGIC MATRIX ═════════════════════════════ */
+function LogicMatrix({ data }: { data: V6Decision }) {
+  const lm = data.logicMatrix;
+  const condTone = tc(lm.conditionBias);
+  return (
+    <Panel title="5. COMPLETE LOGIC MATRIX ( FINAL VIEW )">
+      <div className="grid h-full grid-cols-[1fr_auto] gap-3">
+        {/* left: engine rows */}
+        <div className="flex flex-1 flex-col justify-around gap-1">
+          {lm.rows.map((row, i) => {
+            const color = tc(row.tone);
+            return (
+              <div key={i} className="grid grid-cols-[120px_1fr_auto] items-center gap-2 rounded px-2 py-1.5 text-[13px]"
+                style={{ background: "rgba(255,255,255,0.02)" }}>
+                <span className="font-bold uppercase tracking-wide text-white/60">{row.engine}</span>
+                <span className={`font-mono ${row.greeks ? "text-[11px]" : ""} font-bold`} style={{ color }}>{row.value}</span>
+                <span className="text-right font-bold uppercase" style={{ color }}>{row.verdict}</span>
+              </div>
+            );
+          })}
+          <div className="mt-1 rounded border px-2 py-1.5 text-center text-[14px] font-black uppercase tracking-wide"
+            style={{ borderColor: `${condTone}66`, background: `${condTone}1a`, color: condTone }}>
+            MARKET CONDITION : {lm.condition}
+          </div>
+        </div>
+
+        {/* right: logic summary checklist */}
+        <div className="flex w-[230px] flex-col justify-center rounded border border-white/10 bg-black/30 p-2">
+          <span className="mb-2 text-center text-[13px] font-bold uppercase tracking-wide text-white/55">Logic Summary</span>
+          {lm.summary.map((s, i) => (
+            <div key={i} className="flex items-center gap-2 py-0.5 text-[13px]">
+              <span className="text-[15px]" style={{ color: s.ok ? "#22c55e" : "#64748b" }}>{s.ok ? "✔" : "○"}</span>
+              <span className="uppercase" style={{ color: s.ok ? "rgba(255,255,255,0.8)" : "rgba(255,255,255,0.4)" }}>{s.label}</span>
+            </div>
+          ))}
+          <div className="mt-2 rounded px-2 py-1 text-center text-[13px] font-black uppercase tracking-wide"
+            style={{ background: lm.allAlign ? "#22c55e22" : "#eab30822", color: lm.allAlign ? "#22c55e" : "#eab308" }}>
+            {lm.alignText}
+          </div>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+/* ═══════════════ 6. FINAL VERDICT ═════════════════════════════════════ */
+function FinalVerdict({ data }: { data: V6Decision }) {
+  const fv = data.finalVerdict;
+  const color = tc(fv.bias);
+  return (
+    <Panel title="6. FINAL VERDICT">
+      <div className="flex h-full flex-col justify-around">
+        <div className="text-center font-black uppercase leading-none tracking-wide"
+          style={{ color, fontSize: 48, textShadow: `0 0 16px ${color}44` }}>
+          {fv.setup}
+        </div>
+        <div className="my-2 flex items-center justify-center gap-2">
+          <Stars value={fv.stars} />
+          <span className="ml-2 text-[15px] font-bold uppercase text-white/70">Confidence Level :</span>
+          <span className="font-mono text-[18px] font-black" style={{ color }}>{fv.confidenceText}</span>
+        </div>
+
+        <div className="grid grid-cols-4 gap-2">
+          {fv.cells.map((c, i) => {
+            const cTone = tc(c.tone);
+            const arrow = c.icon === "up" ? "⬆" : c.icon === "down" ? "⬇" : c.label === "MOMENTUM" ? "📈" : c.label === "MARKET MODE" ? "🐂" : "";
+            return (
+              <div key={i} className="flex flex-col items-center rounded border border-white/10 bg-white/[0.02] px-1.5 py-2">
+                <span className="text-[12px] font-bold uppercase tracking-wide text-white/50">{c.label}</span>
+                <span className="text-[17px] font-black uppercase" style={{ color: cTone }}>{c.value}</span>
+                {arrow ? <span className="text-[16px]" style={{ color: cTone }}>{arrow}</span> : null}
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="mt-2 flex items-center justify-center gap-3 rounded border px-3 py-2.5"
+          style={{ borderColor: `${color}66`, background: `${color}14` }}>
+          <span className="text-[15px] font-bold uppercase tracking-wide text-white/70">TRADE PLAN :</span>
+          <span className="text-[19px] font-black uppercase tracking-wide" style={{ color }}>{fv.tradePlan}</span>
+          <span className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-500 text-[13px] text-black">✓</span>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+function Stars({ value }: { value: number }) {
+  return (
+    <div className="flex items-center gap-0.5">
+      {[0, 1, 2, 3, 4].map((i) => (
+        <span key={i} className="text-[24px] leading-none" style={{ color: i < value ? "#22c55e" : "rgba(255,255,255,0.2)" }}>★</span>
+      ))}
+    </div>
+  );
+}
+
+/* ═══════════════ GOLDEN RULE ══════════════════════════════════════════ */
+function GoldenRule({ data }: { data: V6Decision }) {
+  return (
+    <div className="rounded border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 text-center">
+      <span className="text-[13px] font-black uppercase tracking-[0.10em] text-amber-300">GOLDEN RULE : </span>
+      <span className="text-[13px] uppercase tracking-wide text-white/70">{data.goldenRule}</span>
     </div>
   );
 }
 
 /* ─── helpers ─────────────────────────────────────────────────────── */
-function toneFor(bias: string): string {
-  return bias === "BULLISH" ? "#22c55e" : bias === "BEARISH" ? "#ef4444" : "#facc15";
-}
-function trendTone(t: string): string {
-  return t === "RISING" ? "#22c55e" : t === "FALLING" ? "#ef4444" : "#94a3b8";
-}
-function fmtOiCompact(n: number): string {
-  const a = Math.abs(n);
-  if (a >= 1e7) return `${(n / 1e7).toFixed(2)} Cr`;
-  if (a >= 1e5) return `${(n / 1e5).toFixed(2)} L`;
-  if (a >= 1e3) return `${(n / 1e3).toFixed(0)} K`;
-  return `${Math.round(n)}`;
+function fmtSigned(n: number, d: number): string {
+  const v = Number(n.toFixed(d));
+  return `${v >= 0 ? "+" : ""}${v}`;
 }
 function todayIST(): string {
   const ist = new Date(Date.now() + 5.5 * 3600 * 1000);

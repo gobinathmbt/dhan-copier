@@ -80,7 +80,7 @@ function IntelV2Page() {
           <div className="col-span-3 min-h-0"><PremiumMomentumCard data={data} /></div>
           <div className="col-span-3 min-h-0"><TradeStrategyCard data={data} /></div>
         </div>
-        <Row1bTradeBoard data={data} />
+        {/* <Row1bTradeBoard data={data} /> */}
         <Row2InstitutionalFlow data={data} />
         <Row3ConfirmationLayer data={data} />
         <Row4StructureContext data={data} />

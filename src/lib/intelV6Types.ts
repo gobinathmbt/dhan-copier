@@ -1,152 +1,141 @@
 /* ─────────────────────────────────────────────────────────────────────
- * INTEL V6 — Premium Intelligence (Greeks) Engine response shape
+ * INTEL V6 — NIFTY MASTER ENGINE DASHBOARD response shape
+ *   GREEKS + CPR + BREADTH + IT ENGINE
  * ───────────────────────────────────────────────────────────────────── */
 
 export type V6Symbol = "NIFTY_50" | "SENSEX" | "BANKNIFTY";
 export type V6Bias = "BULLISH" | "BEARISH" | "NEUTRAL";
-export type V6Trend = "RISING" | "FALLING" | "FLAT";
+export type V6Tone = "strongbull" | "bull" | "neutral" | "bear" | "strongbear";
 
-export interface V6DeltaEngine {
-  value: number;
-  level: "STRONG" | "MODERATE" | "WEAK";
-  trend: V6Trend;
-  bias: "BULLISH" | "BEARISH";
-  quality: "REAL" | "FAKE" | "BUILDING";
-  verdict: string;
-  score: number;
-  narrative: string;
-}
-
-export interface V6GammaEngine {
-  value: number;
-  index: number;
-  level: "HIGH" | "MEDIUM" | "LOW";
-  trend: V6Trend;
-  verdict: string;
-  score: number;
-  narrative: string;
-}
-
-export interface V6ThetaEngine {
-  value: number;
-  level: "FAST" | "MEDIUM" | "SLOW";
-  trend: V6Trend;
-  verdict: string;
-  decayWinning: boolean;
-  score: number;
-  narrative: string;
-}
-
-export interface V6VegaEngine {
-  value: number;
-  iv: number;
-  level: "RISING" | "FALLING" | "FLAT";
-  state: "EXPANDING" | "CRUSH" | "STABLE";
-  trend: V6Trend;
-  verdict: string;
-  score: number;
-  narrative: string;
-}
-
-export interface V6StrikeRow {
-  strike: number;
-  isAtm: boolean;
-  side: "CE" | "PE" | "ATM";
-  dominantPct: number;
-  ceFavorPct: number;
-  peFavorPct: number;
-  oi: number;
-  oiChangePct: number;
+export interface V6ScaleRow {
+  range: string;
   label: string;
+  tone: string;
+  active: boolean;
+}
+
+export interface V6MarketMode {
+  label: string;
+  state: "RISK ON" | "RISK OFF" | "NEUTRAL";
+  bias: V6Bias;
+}
+
+export interface V6Header {
+  date: string;
+  time: string;
+  indexName: string;
+  spot: number;
+  change: number;
+  changePct: number;
+  vix: number;
+  vixChangePct: number;
+  marketMode: V6MarketMode;
+}
+
+export interface V6BreadthEngine {
+  advancing: number;
+  declining: number;
+  unchanged: number;
+  total: number;
+  pct: number;
+  formula: string;
+  zone: string;
+  tone: string;
+  bias: V6Bias;
+  scale: V6ScaleRow[];
+}
+
+export interface V6ItEngine {
+  changePct: number;
+  members: Array<{ symbol: string; changePct: number }>;
+  zone: string;
+  tone: string;
+  bias: V6Bias;
+  summary: string;
+  scale: V6ScaleRow[];
+}
+
+export interface V6OpeningCol {
+  cond: string;
+  verdict: string;
+  sub: string;
+  tone: string;
+  active: boolean;
+}
+
+export interface V6CprEngine {
+  width: { label: string; headline: string; sub: string; tone: string };
+  widthPct: number;
+  levels: {
+    r3: number; tc: number; pivot: number; bc: number; s3: number;
+    r1: number; r2: number; s1: number; s2: number;
+  };
+  priceLocation: string;
+  territory: string;
+  locationSub: string;
+  locationBias: V6Bias;
+  locationBanner: string;
+  relation: { label: string; l1: string; l2: string; bias: V6Bias };
+  opening: { gapUp: V6OpeningCol[]; flat: V6OpeningCol[]; gapDown: V6OpeningCol[] };
+}
+
+export interface V6TrendView {
+  active: V6Bias;
+  rows: Array<{ dir: string; label: string; l1: string; l2: string; tone: string; active: boolean }>;
+}
+
+export interface V6GreekBlock {
+  value: number;
+  trend: string;
+  scale: V6ScaleRow[];
+}
+
+export interface V6GreeksEngine {
+  delta: V6GreekBlock & { bias: V6Bias; control: string };
+  gamma: V6GreekBlock & { state: string };
+  vega: V6GreekBlock & { iv: number; state: string };
+  theta: V6GreekBlock & { decay: string; friendly: string };
+  allPositive: boolean;
+  reading: Array<{ text: string; tone: string; active: boolean }>;
+}
+
+export interface V6LogicMatrix {
+  rows: Array<{ engine: string; value: string; verdict: string; tone: string; greeks?: boolean }>;
+  condition: string;
+  conditionBias: V6Bias;
+  summary: Array<{ label: string; ok: boolean }>;
+  allAlign: boolean;
+  alignText: string;
+}
+
+export interface V6FinalVerdict {
+  setup: string;
+  bias: V6Bias;
+  stars: number;
+  confidence: number;
+  confidenceText: string;
+  cells: Array<{ label: string; value: string; icon?: string; tone: string }>;
+  tradePlan: string;
 }
 
 export interface V6Decision {
   ok: boolean;
   version: "v6";
   symbol: V6Symbol;
+  displayName: string;
   date: string;
   isToday: boolean;
   at: number;
 
-  spotPrice: number;
-  vwap: number;
-  atm: number | null;
-  futPremium: number;
-  activeSide: "CE" | "PE";
-
-  greeks: {
-    delta: V6DeltaEngine;
-    gamma: V6GammaEngine;
-    theta: V6ThetaEngine;
-    vega: V6VegaEngine;
-  };
-
-  premiumPower: {
-    score: number;
-    state: "NUCLEAR EXPANSION" | "STRONG EXPANSION" | "TRADEABLE" | "LOW EDGE" | "AVOID";
-    buyerEdge: "YES" | "WEAK" | "NO";
-    behaviour: "EXPANDING" | "NEUTRAL" | "DECAYING";
-    components: { delta: number; gamma: number; vega: number; theta: number };
-    weights: { delta: number; gamma: number; vega: number; theta: number };
-  };
-
-  momentumMatrix: {
-    score: number;
-    delta: { label: string; trend: V6Trend };
-    gamma: { label: string; trend: V6Trend };
-    theta: { label: string; trend: string };
-    vega: { label: string; trend: V6Trend };
-  };
-
-  greeksSummary: {
-    deltaTrend: V6Trend;
-    gammaLevel: "HIGH" | "MEDIUM" | "LOW";
-    thetaImpact: "HIGH" | "MEDIUM" | "LOW";
-    vegaTrend: "EXPANDING" | "CRUSH" | "STABLE";
-    premiumEdge: "HIGH" | "MEDIUM" | "LOW";
-  };
-
-  strikeDominance: {
-    step: number;
-    count: number;
-    atm: number | null;
-    strikes: V6StrikeRow[];
-    bias: V6Bias;
-    dominantPct: number;
-    ceFavorCount?: number;
-    peFavorCount?: number;
-  };
-
-  futuresBreadth: {
-    futPremium: number;
-    premiumState: "PREMIUM POSITIVE" | "PREMIUM NEGATIVE" | "PREMIUM FLAT";
-    advDec: { adv: number; dec: number; advPct: number; decPct: number; label: string };
-    sentiment: V6Bias;
-  };
-
-  session: { day: string; time: string; live: boolean; volatility: string };
-  risk: { level: "LOW" | "MEDIUM" | "HIGH"; reward: "LOW" | "MEDIUM" | "HIGH" };
-
-  structure: {
-    bias: V6Bias;
-    premium: "EXPANDING" | "NEUTRAL" | "DECAYING";
-    dominance: V6Bias;
-  };
-
-  verdict: {
-    line: string;
-    headline: string;
-    tradeEdge: "STRONG" | "MODERATE" | "WEAK";
-  };
-
-  actionPlan: {
-    setup: string;
-    action: "BUY CE" | "BUY PE" | "WAIT";
-    marketBias: V6Bias;
-    confidence: number;
-    confidencePct: number;
-    stars: number;
-  };
+  header: V6Header;
+  breadthEngine: V6BreadthEngine;
+  itEngine: V6ItEngine;
+  cprEngine: V6CprEngine;
+  trendView: V6TrendView;
+  greeksEngine: V6GreeksEngine;
+  logicMatrix: V6LogicMatrix;
+  finalVerdict: V6FinalVerdict;
+  goldenRule: string;
 
   debug?: Record<string, unknown>;
 }

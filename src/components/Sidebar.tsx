@@ -17,9 +17,11 @@ const NAV_ITEMS = [
   { to: "/intel-v2", label: "Intel V2 Console", icon: Radio },
   // Intel V3 Ultimate — hidden. Re-enable by uncommenting.
   // { to: "/intel-v3", label: "Intel V3 Ultimate",  icon: Crosshair },
-  { to: "/intel-v4", label: "Intel V4 Decision",  icon: Zap },
-  { to: "/intel-v5", label: "Intel V5 Verdict",   icon: Crosshair },
-  { to: "/intel-v6", label: "Intel V6 Greeks Engine", icon: Sigma },
+  // Intel V4 Decision — hidden. Re-enable by uncommenting.
+  // { to: "/intel-v4", label: "Intel V4 Decision",  icon: Zap },
+  // Intel V5 Verdict — hidden. Re-enable by uncommenting.
+  // { to: "/intel-v5", label: "Intel V5 Verdict",   icon: Crosshair },
+  { to: "/intel-v6", label: "Intel V6 Master Engine", icon: Sigma },
   { to: "/nifty50", label: "Nifty 50", icon: Target },
   { to: "/scalping", label: "Intraday Scalping Algo AI", icon: Brain },
   { to: "/accounts", label: "Accounts", icon: Users },
