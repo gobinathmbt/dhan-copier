@@ -324,6 +324,31 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
     }
   }
 
+  // 3c. CPR + FRVP ALIGNMENT — removes fake breakouts.
+  //   Above TC + Above VAH  = Strong Bull
+  //   Above TC + Inside     = Weak Bull
+  //   Below BC + Below VAL  = Strong Bear
+  //   Below BC + Inside     = Weak Bear
+  let cprFrvpAlignment;
+  if (locationBias === 'BULLISH' && auctionZone === 'ABOVE VALUE') {
+    cprFrvpAlignment = { label: 'STRONG BULL', strength: 'STRONG', bias: 'BULLISH', desc: 'Above TC + Above Value' };
+  } else if (locationBias === 'BULLISH') {
+    cprFrvpAlignment = { label: 'WEAK BULL', strength: 'WEAK', bias: 'BULLISH', desc: auctionZone === 'BELOW VALUE' ? 'Above TC but below value — divergent' : 'Above TC, inside value' };
+  } else if (locationBias === 'BEARISH' && auctionZone === 'BELOW VALUE') {
+    cprFrvpAlignment = { label: 'STRONG BEAR', strength: 'STRONG', bias: 'BEARISH', desc: 'Below BC + Below Value' };
+  } else if (locationBias === 'BEARISH') {
+    cprFrvpAlignment = { label: 'WEAK BEAR', strength: 'WEAK', bias: 'BEARISH', desc: auctionZone === 'ABOVE VALUE' ? 'Below BC but above value — divergent' : 'Below BC, inside value' };
+  } else {
+    cprFrvpAlignment = { label: 'NO EDGE', strength: 'NONE', bias: 'NEUTRAL', desc: 'Inside CPR — wait for direction' };
+  }
+
+  // Combined CPR layer bias (location + relation + FRVP alignment). Used for
+  // the weighted vote so the 20% CPR weight reflects all three reads.
+  const cprVotes = [locationBias, cprRelation.bias, cprFrvpAlignment.bias].filter(b => b !== 'NEUTRAL');
+  const cprBullVotes = cprVotes.filter(b => b === 'BULLISH').length;
+  const cprBearVotes = cprVotes.filter(b => b === 'BEARISH').length;
+  const cprBias = cprBullVotes > cprBearVotes ? 'BULLISH' : cprBearVotes > cprBullVotes ? 'BEARISH' : 'NEUTRAL';
+
   const cprEngine = {
     width: cprWidth,
     widthPct: _safe(cpr.widthPct),
@@ -463,6 +488,32 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
   const greeksNegative = greeksSide === 'PE' && dGammaTrend !== 'FALLING' && dVegaTrend !== 'FALLING' && dThetaAbs <= 15;
   const greeksConfirm = greeksPositive || greeksNegative; // greeks are taking a clear, healthy side
 
+  // ── PREMIUM EXPANSION SCORE (0..100) — easier to read than raw greeks ──
+  //   Delta rising (35) + Gamma rising (25) + Vega rising (25) + Theta low (15)
+  //   computed for the DOMINANT side.
+  const pexDeltaRise = dDeltaTrend === 'RISING';
+  const pexGammaRise = dGammaTrend === 'RISING';
+  const pexVegaRise = dVegaTrend === 'RISING';
+  const pexThetaLow = dThetaAbs <= 8;
+  const premiumScore = _clamp(Math.round(
+    (pexDeltaRise ? 35 : dDeltaTrend === 'FLAT' ? 15 : 0) +
+    (pexGammaRise ? 25 : dGammaTrend === 'FLAT' ? 10 : 0) +
+    (pexVegaRise ? 25 : dVegaTrend === 'FLAT' ? 10 : 0) +
+    (pexThetaLow ? 15 : dThetaAbs <= 15 ? 7 : 0)
+  ), 0, 100);
+  const premiumState = premiumScore >= 65 ? 'EXPANDING' : premiumScore >= 40 ? 'NEUTRAL' : 'DECAYING';
+  const premiumExpansion = {
+    score: premiumScore,
+    state: premiumState,                         // EXPANDING | NEUTRAL | DECAYING
+    side: showSide,
+    components: {
+      delta: pexDeltaRise ? 'RISING' : dDeltaTrend,
+      gamma: pexGammaRise ? 'RISING' : dGammaTrend,
+      vega: pexVegaRise ? 'RISING' : dVegaTrend,
+      theta: pexThetaLow ? 'LOW' : dThetaAbs <= 15 ? 'MEDIUM' : 'HIGH',
+    },
+  };
+
   const greeksReading = [
     { text: 'CE DOMINANCE > PE = CALL BUYERS ACTIVE', tone: 'bull', active: greeksSide === 'CE' },
     { text: 'PE DOMINANCE > CE = PUT BUYERS ACTIVE', tone: 'bear', active: greeksSide === 'PE' },
@@ -486,6 +537,7 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
     gamma: gammaEngine,
     vega: vegaEngine,
     theta: thetaEngine,
+    premiumExpansion,
     allPositive: greeksPositive,
     reading: greeksReading,
   };
@@ -494,6 +546,40 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
   // VIX falling = risk-on (bullish for index buyers); spiking = risk-off.
   const vixBias = vixChangePct <= -1 ? 'BULLISH' : vixChangePct >= 4 ? 'BEARISH' : 'NEUTRAL';
   const vixTrend = vixChangePct <= -2 ? 'FALLING' : vixChangePct >= 4 ? 'RISING' : 'FLAT';
+
+  /* ═══ L4. FLOW CONFIRMATION ENGINE (10%) ═════════════════════════════ */
+  // Delta + Futures Premium + Buyer/Seller Flow → one flow verdict.
+  const deltaPct = _safe(flowDelta.deltaPct);
+  const deltaFlowBias = deltaPct > 8 ? 'BULLISH' : deltaPct < -8 ? 'BEARISH' : 'NEUTRAL';
+  const futFlowBias = futPremium > 5 ? 'BULLISH' : futPremium < -5 ? 'BEARISH' : 'NEUTRAL';
+  // Buyer/Seller flow — average CE+PE buyers% from V2 (buyers entering both legs).
+  const bsBuyersPct = buyerSellerFlow
+    ? Math.round((_safe(buyerSellerFlow.ce?.buyersPct, 50) + _safe(buyerSellerFlow.pe?.buyersPct, 50)) / 2)
+    : 50;
+  const bsFlowBias = bsBuyersPct >= 58 ? 'BULLISH' : bsBuyersPct <= 42 ? 'BEARISH' : 'NEUTRAL';
+
+  const flowBullVotes = [deltaFlowBias, futFlowBias, bsFlowBias].filter(b => b === 'BULLISH').length;
+  const flowBearVotes = [deltaFlowBias, futFlowBias, bsFlowBias].filter(b => b === 'BEARISH').length;
+  const flowBias = flowBullVotes >= 2 && flowBullVotes > flowBearVotes ? 'BULLISH'
+    : flowBearVotes >= 2 && flowBearVotes > flowBullVotes ? 'BEARISH'
+    : 'NEUTRAL';
+  const flowLabel = flowBias === 'BULLISH' ? 'FLOW BULLISH'
+    : flowBias === 'BEARISH' ? 'FLOW BEARISH' : 'FLOW NEUTRAL';
+  const flowEngine = {
+    bias: flowBias,
+    label: flowLabel,
+    deltaPct: _round(deltaPct, 2),
+    futPremium: _round(futPremium, 2),
+    buyersPct: bsBuyersPct,
+    components: [
+      { key: 'DELTA',    value: `${deltaPct >= 0 ? '+' : ''}${_round(deltaPct, 1)}%`, bias: deltaFlowBias, tone: deltaFlowBias === 'BULLISH' ? 'bull' : deltaFlowBias === 'BEARISH' ? 'bear' : 'neutral' },
+      { key: 'FUT PREM',  value: `${futPremium >= 0 ? '+' : ''}${_round(futPremium, 1)}`, bias: futFlowBias, tone: futFlowBias === 'BULLISH' ? 'bull' : futFlowBias === 'BEARISH' ? 'bear' : 'neutral' },
+      { key: 'BUYERS',   value: `${bsBuyersPct}%`, bias: bsFlowBias, tone: bsFlowBias === 'BULLISH' ? 'bull' : bsFlowBias === 'BEARISH' ? 'bear' : 'neutral' },
+    ],
+    desc: flowBias === 'BULLISH' ? 'Buyers in control — delta+, premium+, buyers dominant'
+      : flowBias === 'BEARISH' ? 'Sellers in control — delta-, discount, sellers dominant'
+      : 'Two-sided flow — no clear initiative',
+  };
 
   /* ═══ MARKET TREND VIEW (Breadth + IT + CPR Location vote) ═══════════ */
   const trendBias = (() => {
@@ -553,16 +639,18 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
     bias: trendBias,
   };
 
-  /* ═══ 5. WEIGHTED VERDICT + LOGIC MATRIX ═════════════════════════════ */
+  /* ═══ L5/WEIGHTED VERDICT + L7 ALIGNMENT + L8 LOGIC MATRIX ═══════════ */
   const contrib = (bias, w) => (bias === 'BULLISH' ? w : bias === 'BEARISH' ? -w : 0);
-  const netScore = _round(
+  const rawNet =
+    contrib(auctionVoteBias, WEIGHTS.frvp) +
     contrib(breadthBias, WEIGHTS.breadth) +
-    contrib(locationBias, WEIGHTS.cprLocation) +
-    contrib(cprRelation.bias, WEIGHTS.cprRelation) +
-    contrib(itBias, WEIGHTS.it) +
+    contrib(cprBias, WEIGHTS.cpr) +
+    contrib(flowBias, WEIGHTS.flow) +
     contrib(greeksBias, WEIGHTS.greeks) +
-    contrib(vixBias, WEIGHTS.vix), 0
-  ); // range -100..+100
+    contrib(itBias, WEIGHTS.it) +
+    contrib(vixBias, WEIGHTS.vix);
+  // Normalise to ±100 (weights nominal-sum may differ from 100).
+  const netScore = _round((rawNet / WEIGHT_SUM) * 100, 0);
   const absNet = Math.abs(netScore);
 
   const conditionBias = netScore >= 20 ? 'BULLISH' : netScore <= -20 ? 'BEARISH' : 'NEUTRAL';
@@ -580,73 +668,107 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
     marketCondition = 'MIXED SIGNALS — WAIT FOR ALIGNMENT';
   }
 
-  // Bull / bear checklist (display + alignment)
-  const engineBiases = [
-    { key: 'BREADTH',      bias: breadthBias },
-    { key: 'CPR LOCATION', bias: locationBias },
-    { key: 'CPR RELATION', bias: cprRelation.bias },
-    { key: 'IT SECTOR',    bias: itBias },
-    { key: 'GREEKS',       bias: greeksBias },
-    { key: 'VIX',          bias: vixBias },
+  /* ═══ L7. ALIGNMENT ENGINE — 0..6 engines agreeing ══════════════════ */
+  // The single most useful read: how many of the 6 directional engines
+  // agree with the dominant side. (Flow & FRVP included; CPR combined.)
+  const alignEngines = [
+    { key: 'FRVP',    bias: auctionVoteBias },
+    { key: 'BREADTH', bias: breadthBias },
+    { key: 'CPR',     bias: cprBias },
+    { key: 'FLOW',    bias: flowBias },
+    { key: 'GREEKS',  bias: greeksBias },
+    { key: 'VIX',     bias: vixBias },
   ];
-  const bullCount = engineBiases.filter(e => e.bias === 'BULLISH').length;
-  const bearCount = engineBiases.filter(e => e.bias === 'BEARISH').length;
-  const allBull = bullCount === engineBiases.length;
-  const allBear = bearCount === engineBiases.length;
+  const alignBull = alignEngines.filter(e => e.bias === 'BULLISH').length;
+  const alignBear = alignEngines.filter(e => e.bias === 'BEARISH').length;
+  const dominantSide = alignBull > alignBear ? 'BULLISH' : alignBear > alignBull ? 'BEARISH' : 'NEUTRAL';
+  const alignCount = dominantSide === 'BULLISH' ? alignBull : dominantSide === 'BEARISH' ? alignBear : Math.max(alignBull, alignBear);
+  const alignTotal = alignEngines.length; // 6
+  const alignGrade =
+    alignCount >= 6 ? { label: 'INSTITUTIONAL SETUP', tier: 'A+', tone: dominantSide === 'BEARISH' ? 'strongbear' : 'strongbull' } :
+    alignCount === 5 ? { label: 'HIGH CONVICTION', tier: 'A', tone: dominantSide === 'BEARISH' ? 'bear' : 'bull' } :
+    alignCount === 4 ? { label: 'TRADABLE', tier: 'B', tone: dominantSide === 'BEARISH' ? 'bear' : 'bull' } :
+    alignCount === 3 ? { label: 'WAIT', tier: 'C', tone: 'neutral' } :
+    { label: 'NO TRADE', tier: 'D', tone: 'neutral' };
+  const alignmentEngine = {
+    count: alignCount,
+    total: alignTotal,
+    dominantSide,
+    grade: alignGrade.tier,
+    gradeLabel: alignGrade.label,
+    tone: alignGrade.tone,
+    text: `${alignCount} / ${alignTotal} ALIGNED`,
+    rows: alignEngines.map(e => ({
+      engine: e.key,
+      bias: e.bias,
+      aligned: dominantSide !== 'NEUTRAL' && e.bias === dominantSide,
+      tone: e.bias === 'BULLISH' ? 'bull' : e.bias === 'BEARISH' ? 'bear' : 'neutral',
+    })),
+  };
+
+  const allBull = alignBull === alignTotal;
+  const allBear = alignBear === alignTotal;
 
   const logicMatrix = {
     netScore,
     weights: WEIGHTS,
     rows: [
-      { engine: 'BREADTH',      weight: WEIGHTS.breadth,     value: `${breadthPct}%`, verdict: breadthZone.label, tone: breadthZone.tone },
-      { engine: 'CPR LOCATION', weight: WEIGHTS.cprLocation, value: priceLocation, verdict: locationTerritory, tone: locationBias === 'BULLISH' ? 'bull' : locationBias === 'BEARISH' ? 'bear' : 'neutral' },
-      { engine: 'CPR RELATION', weight: WEIGHTS.cprRelation, value: cprRelation.label.replace(' CPR', ''), verdict: cprRelation.bias === 'BULLISH' ? 'BULLISH STRUCTURE' : cprRelation.bias === 'BEARISH' ? 'BEARISH STRUCTURE' : 'NEUTRAL', tone: cprRelation.bias === 'BULLISH' ? 'bull' : cprRelation.bias === 'BEARISH' ? 'bear' : 'neutral' },
-      { engine: 'IT SECTOR',    weight: WEIGHTS.it,          value: `${itChangePct >= 0 ? '+' : ''}${itChangePct}%`, verdict: itBias === 'BULLISH' ? 'SUPPORTING' : itBias === 'BEARISH' ? 'DRAGGING' : 'NEUTRAL', tone: itZone.tone },
-      { engine: 'GREEKS (ATM)', weight: WEIGHTS.greeks,      value: `CE ${ceScore} / PE ${peScore}`, verdict: greeksSide === 'CE' ? 'CE DOMINANT' : greeksSide === 'PE' ? 'PE DOMINANT' : 'BALANCED', tone: greeksBias === 'BULLISH' ? 'bull' : greeksBias === 'BEARISH' ? 'bear' : 'neutral', greeks: true },
-      { engine: 'VIX',          weight: WEIGHTS.vix,         value: `${_round(vix, 2)} (${vixChangePct >= 0 ? '+' : ''}${_round(vixChangePct, 2)}%)`, verdict: vixBias === 'BULLISH' ? 'RISK ON' : vixBias === 'BEARISH' ? 'RISK OFF' : 'STABLE', tone: vixBias === 'BULLISH' ? 'bull' : vixBias === 'BEARISH' ? 'bear' : 'neutral' },
+      { engine: 'AUCTION (FRVP)', weight: WEIGHTS.frvp,    value: auctionZone, verdict: auctionBias === 'BULLISH' ? 'ABOVE VALUE' : auctionBias === 'BEARISH' ? 'BELOW VALUE' : 'INSIDE', tone: auctionBias === 'BULLISH' ? 'bull' : auctionBias === 'BEARISH' ? 'bear' : 'neutral' },
+      { engine: 'BREADTH',        weight: WEIGHTS.breadth, value: `${breadthPct}%`, verdict: breadthZone.label, tone: breadthZone.tone },
+      { engine: 'CPR',            weight: WEIGHTS.cpr,     value: `${priceLocation} · ${cprFrvpAlignment.label}`, verdict: cprBias === 'BULLISH' ? 'BULLISH' : cprBias === 'BEARISH' ? 'BEARISH' : 'NEUTRAL', tone: cprBias === 'BULLISH' ? 'bull' : cprBias === 'BEARISH' ? 'bear' : 'neutral' },
+      { engine: 'FLOW',           weight: WEIGHTS.flow,    value: `Δ ${deltaPct >= 0 ? '+' : ''}${_round(deltaPct, 1)} · Buy ${bsBuyersPct}%`, verdict: flowLabel.replace('FLOW ', ''), tone: flowBias === 'BULLISH' ? 'bull' : flowBias === 'BEARISH' ? 'bear' : 'neutral' },
+      { engine: 'GREEKS (ATM)',   weight: WEIGHTS.greeks,  value: `CE ${ceScore} / PE ${peScore} · PEX ${premiumScore}`, verdict: greeksSide === 'CE' ? 'CE DOMINANT' : greeksSide === 'PE' ? 'PE DOMINANT' : 'BALANCED', tone: greeksBias === 'BULLISH' ? 'bull' : greeksBias === 'BEARISH' ? 'bear' : 'neutral', greeks: true },
+      { engine: 'IT SECTOR',      weight: WEIGHTS.it,      value: `${itChangePct >= 0 ? '+' : ''}${itChangePct}%`, verdict: itBias === 'BULLISH' ? 'SUPPORTING' : itBias === 'BEARISH' ? 'DRAGGING' : 'NEUTRAL', tone: itZone.tone },
+      { engine: 'VIX',            weight: WEIGHTS.vix,     value: `${_round(vix, 2)} (${vixChangePct >= 0 ? '+' : ''}${_round(vixChangePct, 2)}%)`, verdict: vixBias === 'BULLISH' ? 'RISK ON' : vixBias === 'BEARISH' ? 'RISK OFF' : 'STABLE', tone: vixBias === 'BULLISH' ? 'bull' : vixBias === 'BEARISH' ? 'bear' : 'neutral' },
     ],
     condition: marketCondition,
     conditionBias,
     summary: [
+      { label: 'AUCTION LOCATED',   ok: auctionVoteBias !== 'NEUTRAL' },
       { label: 'BREADTH ALIGNED',   ok: breadthBias !== 'NEUTRAL' },
-      { label: 'CPR LOCATION SET',  ok: locationBias !== 'NEUTRAL' },
-      { label: 'VALUE MIGRATING',   ok: cprRelation.bias !== 'NEUTRAL' },
-      { label: 'IT CONFIRMING',     ok: itBias !== 'NEUTRAL' },
+      { label: 'CPR + FRVP ALIGN',  ok: cprFrvpAlignment.strength === 'STRONG' },
+      { label: 'FLOW CONFIRMING',   ok: flowBias !== 'NEUTRAL' },
       { label: 'GREEKS CONFIRMING', ok: greeksConfirm },
+      { label: 'PREMIUM EXPANDING', ok: premiumState === 'EXPANDING' },
     ],
     allAlign: allBull || allBear,
-    alignText: allBull || allBear ? 'ALL SYSTEMS ALIGN' : `${Math.max(bullCount, bearCount)} / ${engineBiases.length} ALIGNED`,
+    alignText: alignmentEngine.text,
   };
 
-  /* ═══ FINAL VERDICT — GREEKS-GATED ═══════════════════════════════════ */
-  // Direction confidence from the weighted net score; only call a BUY SETUP
-  // when the Greeks engine confirms the same side.
-  const confidence10 = _clamp(Math.round(3 + (absNet / 100) * 6 + (vix < 14 ? 0.5 : 0)), 1, 10);
-  const stars = _clamp(Math.round(absNet / 20), 1, 5);
+  /* ═══ L9. FINAL VERDICT — GREEKS-GATED + ALIGNMENT-GRADED ════════════ */
+  // Confidence blends net-score strength with alignment depth.
+  const confidence10 = _clamp(
+    _round(3 + (absNet / 100) * 4 + (alignCount / alignTotal) * 2.5 + (vix < 14 ? 0.5 : 0), 1),
+    1, 10
+  );
+  const stars = _clamp(Math.round(alignCount * 0.85), 1, 5);
   const strengthLabel = absNet >= 60 ? 'STRONG' : absNet >= 35 ? 'MODERATE' : absNet >= 20 ? 'MILD' : 'WEAK';
 
+  // A BUY SETUP requires: directional condition + greeks confirm the side +
+  // at least 4/6 engines aligned (Tradable). Otherwise it stays a BIAS.
+  const alignmentOk = alignCount >= 4;
   let setup, setupBias, tradePlan, greeksGate;
   if (conditionBias === 'BULLISH') {
     setupBias = 'BULLISH';
-    if (greeksBias === 'BULLISH') {
+    if (greeksBias === 'BULLISH' && alignmentOk) {
       setup = 'CE BUY SETUP';
-      tradePlan = absNet >= 60 ? 'BUY CE ON DIP' : 'BUY CE ON CONFIRMATION';
+      tradePlan = (alignCount >= 5 && absNet >= 55) ? 'BUY CE ON DIP' : 'BUY CE ON CONFIRMATION';
       greeksGate = 'CONFIRMED';
     } else {
       setup = 'BULLISH BIAS';
-      tradePlan = 'AWAIT GREEKS CONFIRMATION';
-      greeksGate = 'PENDING';
+      tradePlan = greeksBias !== 'BULLISH' ? 'AWAIT GREEKS CONFIRMATION' : 'AWAIT ALIGNMENT';
+      greeksGate = greeksBias === 'BULLISH' ? 'ALIGN-PENDING' : 'PENDING';
     }
   } else if (conditionBias === 'BEARISH') {
     setupBias = 'BEARISH';
-    if (greeksBias === 'BEARISH') {
+    if (greeksBias === 'BEARISH' && alignmentOk) {
       setup = 'PE BUY SETUP';
-      tradePlan = absNet >= 60 ? 'BUY PE ON RISE' : 'BUY PE ON CONFIRMATION';
+      tradePlan = (alignCount >= 5 && absNet >= 55) ? 'BUY PE ON RISE' : 'BUY PE ON CONFIRMATION';
       greeksGate = 'CONFIRMED';
     } else {
       setup = 'BEARISH BIAS';
-      tradePlan = 'AWAIT GREEKS CONFIRMATION';
-      greeksGate = 'PENDING';
+      tradePlan = greeksBias !== 'BEARISH' ? 'AWAIT GREEKS CONFIRMATION' : 'AWAIT ALIGNMENT';
+      greeksGate = greeksBias === 'BEARISH' ? 'ALIGN-PENDING' : 'PENDING';
     }
   } else {
     setupBias = 'NEUTRAL';
@@ -658,11 +780,20 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
   const finalVerdict = {
     setup,
     bias: setupBias,
-    greeksGate,                       // CONFIRMED | PENDING | N/A
+    greeksGate,                       // CONFIRMED | ALIGN-PENDING | PENDING | N/A
     netScore,
     stars,
     confidence: confidence10,
     confidenceText: `${confidence10} / 10`,
+    // Quality grade block (alignment + premium + flow) per institutional feedback
+    quality: {
+      alignment: `${alignCount}/${alignTotal}`,
+      grade: alignGrade.tier,
+      gradeLabel: alignGrade.label,
+      premiumState,                   // EXPANDING | NEUTRAL | DECAYING
+      flowState: flowBias === 'BULLISH' ? 'BUYERS ACTIVE' : flowBias === 'BEARISH' ? 'SELLERS ACTIVE' : 'TWO-SIDED',
+      auctionZone,
+    },
     cells: [
       { label: 'TREND',       value: trendBias === 'BULLISH' ? 'UP' : trendBias === 'BEARISH' ? 'DOWN' : 'FLAT', icon: trendBias === 'BULLISH' ? 'up' : trendBias === 'BEARISH' ? 'down' : 'flat', tone: trendBias === 'BULLISH' ? 'bull' : trendBias === 'BEARISH' ? 'bear' : 'neutral' },
       { label: 'STRENGTH',    value: strengthLabel, tone: absNet >= 60 ? 'bull' : absNet >= 35 ? 'neutral' : 'bear' },
@@ -699,17 +830,24 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
     breadthEngine,
     itEngine,
     cprEngine,
+    auctionEngine,
+    flowEngine,
     trendView,
     greeksEngine,
     marketCharacter,
+    alignmentEngine,
     logicMatrix,
     finalVerdict,
 
-    goldenRule: 'BREADTH TELLS THE TRUTH · CPR TELLS THE LOCATION · GREEKS CONFIRM THE STRENGTH',
+    goldenRule: 'AUCTION TELLS LOCATION · BREADTH TELLS TRUTH · FLOW + GREEKS CONFIRM STRENGTH',
 
     debug: {
-      netScore, bullCount, bearCount, conditionBias, greeksGate,
-      greeksSide, ceScore, peScore,
+      netScore, rawNet, weightSum: WEIGHT_SUM,
+      alignBull, alignBear, alignCount, dominantSide,
+      conditionBias, greeksGate,
+      greeksSide, ceScore, peScore, premiumScore, premiumState,
+      auctionZone, auctionBias, flowBias, cprBias,
+      leadershipBias, participationVsLeadership,
       cprRelationMethod: cprRelation.method,
       trendBias, character: marketCharacter.label,
       itMembersFound: itStocks.length,

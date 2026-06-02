@@ -8,14 +8,24 @@ This document explains **every function and every piece of logic** used in the I
 Master Engine Dashboard — the data it consumes, the thresholds for each engine, the
 weighted scoring, the greeks-gated verdict, and how the frontend renders it.
 
-> **v2 upgrade note (institutional feedback):** the engine now uses
-> (1) **true CPR value migration** (today TC&BC vs yesterday TC&BC),
-> (2) **finer breadth tiers** (56% = *Mild Bull*, not Neutral),
-> (3) **CE-vs-PE greeks dominance** instead of a single ATM greek,
-> (4) a **Market Character engine** (Trend / Range / Expansion / Panic / Short-Covering),
-> (5) a **greeks-gated Final Verdict** (a directional *bias* becomes a *BUY SETUP* only
-> when greeks confirm), and (6) a **weighted decision** (Breadth 30 · CPR-Location 25 ·
-> CPR-Relation 15 · IT 10 · Greeks 10 · VIX 10).
+> **v3 upgrade note (institutional layering):** V6 now adds three institutional
+> layers on top of the prior engines — **L0 Auction (FRVP)**, **L4 Flow Confirmation**,
+> and **L7 Alignment Engine** — plus **heavyweight leadership** in Breadth, a
+> **CPR + FRVP alignment** read, and a **Premium Expansion Score** in Greeks. The
+> Final Verdict is now both **greeks-gated AND alignment-graded**.
+>
+> **New weighted decision (location-first):**
+> `Auction/FRVP 20 · Breadth 25 · CPR 20 · Flow 10 · Greeks 15 · IT 10 · VIX 10`
+> (net score normalised to ±100). The CPR weight now bundles location + value
+> migration + FRVP alignment.
+>
+> **Layer stack:** L0 Auction → L1 Breadth(+Leadership) → L2 IT → L3 CPR(+FRVP align) →
+> L4 Flow → L5 Greeks(+Premium Expansion) → L6 VIX → **L7 Alignment (0–6)** →
+> L8 Logic Matrix → L9 Final Verdict (graded).
+>
+> **Earlier upgrades retained:** true CPR value migration (today TC&BC vs yesterday),
+> finer breadth tiers (56% = Mild Bull), CE-vs-PE greeks dominance, Market Character
+> engine, greeks-gated verdict.
 
 ---
 
@@ -402,3 +412,81 @@ STARS:       clamp(round(|net|/20), 1, 5)
 
 *This dashboard is for educational purposes only. Always consult a financial advisor
 before trading.*
+
+
+---
+
+## 20. v3 Institutional Layers (detailed)
+
+### L0 — Auction Structure Engine (FRVP) · weight 20%
+**Answers "where is price?" before "who is buying?".** Reads POC / VAH / VAL (from V2
+`flow.volume` or the FRVP institutional engine profile) + acceptance/rejection.
+- `spot > VAH` → **ABOVE VALUE** → BULLISH (NEUTRAL if rejected above VAH = bull trap)
+- `spot < VAL` → **BELOW VALUE** → BEARISH (NEUTRAL if rejected below VAL = bear trap)
+- else → **INSIDE VALUE** → leans by POC half, but **votes NEUTRAL** (rotational).
+- Exposes acceptance flags: acceptedAboveVAH / acceptedBelowVAL / rejected (trap) flags.
+
+### Breadth + Heavyweight Leadership
+Breadth still gives participation %, but now also reports **leadership** from V2
+`heavyweightsTotalImpact`:
+- `> +0.05 pts` → LEADERS BULLISH · `< −0.05` → LEADERS BEARISH · else MIXED.
+- `status`: **CONFIRMED** (breadth == leadership), **DIVERGENT** (opposite), or **PARTIAL**.
+- Catches the "breadth 60% but HDFC/ICICI/RELIANCE red" case (participation ≠ leadership).
+
+### L3 — CPR + FRVP Alignment
+Removes fake breakouts by combining CPR location with auction zone:
+| CPR location | Auction | Result |
+|--------------|---------|--------|
+| Above TC | Above VAH | **STRONG BULL** |
+| Above TC | Inside/Below | **WEAK BULL** |
+| Below BC | Below VAL | **STRONG BEAR** |
+| Below BC | Inside/Above | **WEAK BEAR** |
+| Inside CPR | — | **NO EDGE** |
+
+The **combined CPR bias** (location + value migration + FRVP alignment, majority vote)
+drives the 20% CPR weight.
+
+### L4 — Flow Confirmation Engine · weight 10%
+Fuses three real-flow reads (majority vote, ≥2 agree):
+- **Delta** — V2 `flow.delta.deltaPct`: `>+8 bull`, `<−8 bear`.
+- **Futures Premium** — `>+5 bull`, `<−5 bear`.
+- **Buyer/Seller flow** — avg CE+PE buyers% from V2 `buyerSellerFlow`: `≥58 bull`, `≤42 bear`.
+Output: FLOW BULLISH / BEARISH / NEUTRAL.
+
+### L5 — Greeks + Premium Expansion Score
+On top of CE-vs-PE dominance, a single readable **Premium Expansion Score (0–100)** for
+the dominant side:
+`Delta rising 35 + Gamma rising 25 + Vega rising 25 + Theta low(≤8) 15` (flat trends get
+partial credit). → **EXPANDING ≥65 · NEUTRAL ≥40 · DECAYING <40.**
+
+### L7 — Alignment Engine (the headline read)
+Counts how many of the **6 directional engines** (FRVP, Breadth, CPR, Flow, Greeks, VIX)
+agree with the dominant side:
+- **6/6 → INSTITUTIONAL SETUP (A+)** · **5/6 → HIGH CONVICTION (A)** ·
+  **4/6 → TRADABLE (B)** · **3/6 → WAIT (C)** · **<3 → NO TRADE (D)**.
+Shown as a per-engine ✓/✗ grid.
+
+### Weighted Net Score (normalised)
+```
+rawNet = Σ contrib(bias, weight)   // weights: FRVP20 Breadth25 CPR20 Flow10 Greeks15 IT10 VIX10
+netScore = round(rawNet / 110 × 100)        // → ±100
+condition: ≥+20 BULLISH · ≤−20 BEARISH · else NEUTRAL
+```
+
+### L9 — Final Verdict (greeks-gated + alignment-graded)
+A directional condition becomes a **BUY SETUP** only when **both**:
+1. Greeks confirm the same side, **and**
+2. Alignment ≥ **4/6** (Tradable).
+
+Otherwise it stays a **BIAS** with gate `PENDING` (greeks disagree) or `ALIGN-PENDING`
+(greeks agree but alignment < 4). The verdict now carries a **quality block**:
+`alignment (n/6 + grade) · premium state · flow state · auction zone`.
+- **Confidence /10** = `3 + |net|/100×4 + alignCount/6×2.5 + (VIX<14 ? 0.5)`.
+- **Stars** = `round(alignCount × 0.85)`.
+
+### New response fields
+`auctionEngine`, `flowEngine`, `alignmentEngine`, `breadthEngine.leadership`,
+`cprEngine.alignment`, `greeksEngine.premiumExpansion`, `finalVerdict.quality`.
+
+### Golden Rule (updated)
+> *AUCTION TELLS LOCATION · BREADTH TELLS TRUTH · FLOW + GREEKS CONFIRM STRENGTH*

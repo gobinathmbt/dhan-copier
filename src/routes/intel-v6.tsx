@@ -108,6 +108,13 @@ function MasterDashboard({ data }: { data: V6Decision }) {
     <div className="flex w-full flex-col gap-2 pb-2">
       <TitleBar data={data} />
 
+      {/* Row 0 (institutional priority): Auction(FRVP) | Flow | Alignment */}
+      <div className="grid grid-cols-12 items-stretch gap-2">
+        <div className="col-span-4"><AuctionEngine data={data} /></div>
+        <div className="col-span-4"><FlowEngine data={data} /></div>
+        <div className="col-span-4"><AlignmentEngine data={data} /></div>
+      </div>
+
       {/* Row A: Breadth | IT Sector | CPR | CPR Relationship + Trend View */}
       <div className="grid grid-cols-12 items-stretch gap-2">
         <div className="col-span-3"><BreadthEngine data={data} /></div>
@@ -226,6 +233,108 @@ function ScaleTable({ rows }: { rows: V6ScaleRow[] }) {
   );
 }
 
+/* ═══════════════ L0. AUCTION (FRVP) ENGINE ════════════════════════════ */
+function AuctionEngine({ data }: { data: V6Decision }) {
+  const a = data.auctionEngine;
+  const color = tc(a.bias);
+  const acc = a.acceptance;
+  const accTag = acc.acceptedAboveVah ? { t: "ACCEPTED ABOVE VAH", c: "#22c55e" }
+    : acc.acceptedBelowVal ? { t: "ACCEPTED BELOW VAL", c: "#ef4444" }
+    : acc.rejectedAboveVah ? { t: "REJECTED @ VAH — TRAP", c: "#f97316" }
+    : acc.rejectedBelowVal ? { t: "REJECTED @ VAL — TRAP", c: "#f97316" }
+    : { t: "NO ACCEPTANCE SIGNAL", c: "#94a3b8" };
+  return (
+    <Panel title="L0 · AUCTION ENGINE (FRVP)" accent="#1e4d4a">
+      <div className="flex items-center justify-between rounded border border-white/10 bg-white/[0.02] px-3 py-2">
+        <span className="text-[13px] font-bold uppercase tracking-wide text-white/60">Price Location</span>
+        <span className="text-[20px] font-black uppercase" style={{ color }}>{a.zone}</span>
+      </div>
+      <div className="grid grid-cols-3 gap-2 text-center">
+        <LevelChip label="VAH" v={a.vah} tone="#22c55e" />
+        <LevelChip label="POC" v={a.poc} tone="#eab308" />
+        <LevelChip label="VAL" v={a.val} tone="#ef4444" />
+      </div>
+      <div className="rounded border px-2 py-1.5 text-center text-[12px] font-bold uppercase tracking-wide"
+        style={{ borderColor: `${accTag.c}66`, background: `${accTag.c}1a`, color: accTag.c }}>
+        {accTag.t}
+      </div>
+      <div className="text-center text-[12px] leading-tight text-white/65">{a.desc}</div>
+    </Panel>
+  );
+}
+
+function LevelChip({ label, v, tone }: { label: string; v: number; tone: string }) {
+  return (
+    <div className="rounded border border-white/10 bg-white/[0.02] px-1 py-1.5">
+      <div className="text-[10px] font-bold uppercase tracking-wide text-white/50">{label}</div>
+      <div className="font-mono text-[15px] font-black" style={{ color: tone }}>
+        {v ? v.toLocaleString(undefined, { maximumFractionDigits: 0 }) : "—"}
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════ L4. FLOW CONFIRMATION ENGINE ══════════════════════════ */
+function FlowEngine({ data }: { data: V6Decision }) {
+  const f = data.flowEngine;
+  const color = tc(f.bias);
+  return (
+    <Panel title="L4 · FLOW ENGINE" accent="#2a3a5f">
+      <div className="rounded border px-2 py-2 text-center text-[20px] font-black uppercase tracking-wide"
+        style={{ borderColor: `${color}66`, background: `${color}1a`, color }}>
+        {f.label}
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        {f.components.map((c, i) => {
+          const cc = tc(c.tone);
+          return (
+            <div key={i} className="flex flex-col items-center rounded border border-white/10 bg-white/[0.02] px-1 py-1.5">
+              <span className="text-[10px] font-bold uppercase tracking-wide text-white/50">{c.key}</span>
+              <span className="font-mono text-[15px] font-black" style={{ color: cc }}>{c.value}</span>
+              <span className="text-[10px] font-bold uppercase" style={{ color: cc }}>{c.bias === "BULLISH" ? "BULL" : c.bias === "BEARISH" ? "BEAR" : "NEU"}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="text-center text-[12px] leading-tight text-white/65">{f.desc}</div>
+    </Panel>
+  );
+}
+
+/* ═══════════════ L7. ALIGNMENT ENGINE ══════════════════════════════════ */
+function AlignmentEngine({ data }: { data: V6Decision }) {
+  const a = data.alignmentEngine;
+  const color = tc(a.tone);
+  return (
+    <Panel title="L7 · ALIGNMENT ENGINE" accent="#4a2a5f">
+      <div className="flex items-center justify-center gap-3">
+        <span className="font-mono text-[34px] font-black leading-none" style={{ color }}>{a.count}</span>
+        <span className="text-[18px] font-bold text-white/45">/ {a.total}</span>
+        <div className="flex flex-col">
+          <span className="text-[16px] font-black uppercase" style={{ color }}>{a.gradeLabel}</span>
+          <span className="text-[11px] font-bold uppercase tracking-wide text-white/55">Grade {a.grade} · {a.dominantSide}</span>
+        </div>
+      </div>
+      <div className="grid grid-cols-3 gap-1">
+        {a.rows.map((r, i) => {
+          const rc = tc(r.tone);
+          return (
+            <div key={i} className="flex items-center justify-between rounded border px-1.5 py-1"
+              style={{ borderColor: r.aligned ? `${rc}88` : "rgba(255,255,255,0.08)", background: r.aligned ? `${rc}18` : "transparent" }}>
+              <span className="text-[11px] font-bold uppercase tracking-wide" style={{ color: r.aligned ? rc : "rgba(255,255,255,0.5)" }}>{r.engine}</span>
+              <span className="text-[12px]" style={{ color: rc }}>{r.aligned ? "✓" : r.bias === "NEUTRAL" ? "·" : "✗"}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="rounded px-2 py-1 text-center text-[11px] font-black uppercase tracking-wide"
+        style={{ background: `${color}1a`, color }}>
+        6/6 INSTITUTIONAL · 5/6 HIGH · 4/6 TRADABLE · 3/6 WAIT
+      </div>
+    </Panel>
+  );
+}
+
 /* ═══════════════ 1. MARKET BREADTH ENGINE ═════════════════════════════ */
 function BreadthEngine({ data }: { data: V6Decision }) {
   const b = data.breadthEngine;
@@ -243,6 +352,21 @@ function BreadthEngine({ data }: { data: V6Decision }) {
       <div className="grid grid-cols-[150px_1fr] items-center gap-3">
         <Gauge pct={b.pct} color={color} label={b.zone} />
         <ScaleTable rows={b.scale} />
+      </div>
+      {/* Heavyweight leadership row */}
+      <div className="mt-1 flex items-center justify-between rounded border px-2 py-1.5"
+        style={{ borderColor: `${tc(b.leadership.bias)}55`, background: `${tc(b.leadership.bias)}12` }}>
+        <span className="text-[11px] font-bold uppercase tracking-wide text-white/55">Leadership</span>
+        <span className="text-[12px] font-black uppercase" style={{ color: tc(b.leadership.bias) }}>
+          {b.leadership.label}{b.leadership.alignment ? ` · ${b.leadership.alignment}` : ""}
+        </span>
+        <span className="rounded px-1.5 py-0.5 text-[10px] font-black uppercase"
+          style={{
+            background: b.leadership.status === "CONFIRMED" ? "#22c55e22" : b.leadership.status === "DIVERGENT" ? "#ef444422" : "#eab30822",
+            color: b.leadership.status === "CONFIRMED" ? "#22c55e" : b.leadership.status === "DIVERGENT" ? "#ef4444" : "#eab308",
+          }}>
+          {b.leadership.status}
+        </span>
       </div>
     </Panel>
   );
@@ -346,6 +470,14 @@ function CprEngine({ data }: { data: V6Decision }) {
       <div className="my-1.5 rounded border px-2 py-1.5 text-center text-[14px] font-black uppercase tracking-wide"
         style={{ borderColor: `${locTone}66`, background: `${locTone}1a`, color: locTone }}>
         {c.locationBanner}
+      </div>
+
+      {/* CPR + FRVP alignment badge */}
+      <div className="flex items-center justify-between rounded border px-2 py-1.5"
+        style={{ borderColor: `${tc(c.alignment.bias)}55`, background: `${tc(c.alignment.bias)}12` }}>
+        <span className="text-[11px] font-bold uppercase tracking-wide text-white/55">CPR + FRVP</span>
+        <span className="text-[13px] font-black uppercase" style={{ color: tc(c.alignment.bias) }}>{c.alignment.label}</span>
+        <span className="text-[10px] uppercase text-white/55">{c.alignment.desc}</span>
       </div>
 
       {/* OPENING SCENARIO ENGINE */}
@@ -469,6 +601,9 @@ function GreeksEngine({ data }: { data: V6Decision }) {
         </span>
       </div>
 
+      {/* Premium Expansion Score */}
+      <PremiumExpansionBar pex={g.premiumExpansion} />
+
       <div className="grid grid-cols-12 gap-2">
         <div className="col-span-2"><GreekCard name="DELTA" value={fmtSigned(g.delta.value, 2)} trend={g.delta.trend} sub={g.delta.control} subTone={tc(g.delta.bias)} scale={g.delta.scale} /></div>
         <div className="col-span-2"><GreekCard name="GAMMA" value={fmtSigned(g.gamma.value, 3)} trend={g.gamma.trend} sub={g.gamma.state} subTone="#22c55e" scale={g.gamma.scale} /></div>
@@ -484,6 +619,23 @@ function dominancePct(ce: number, pe: number): number {
   const tot = ce + pe;
   if (tot <= 0) return 50;
   return Math.round((ce / tot) * 100);
+}
+
+function PremiumExpansionBar({ pex }: { pex: V6Decision["greeksEngine"]["premiumExpansion"] }) {
+  const color = pex.state === "EXPANDING" ? "#22c55e" : pex.state === "DECAYING" ? "#ef4444" : "#eab308";
+  return (
+    <div className="flex items-center gap-3 rounded border border-white/10 bg-black/30 px-3 py-1.5">
+      <span className="text-[12px] font-bold uppercase tracking-wide text-white/55">Premium Expansion ({pex.side})</span>
+      <div className="relative h-2.5 flex-1 overflow-hidden rounded-full bg-white/10">
+        <div className="h-full rounded-full" style={{ width: `${pex.score}%`, background: color, transition: "width .5s ease" }} />
+      </div>
+      <span className="font-mono text-[15px] font-black" style={{ color }}>{pex.score}</span>
+      <span className="rounded px-2 py-0.5 text-[12px] font-black uppercase tracking-wide"
+        style={{ background: `${color}1f`, border: `1px solid ${color}77`, color }}>
+        {pex.state}
+      </span>
+    </div>
+  );
 }
 
 function GreekCard({
@@ -629,6 +781,16 @@ function FinalVerdict({ data }: { data: V6Decision }) {
           <span className="font-mono text-[18px] font-black" style={{ color }}>{fv.confidenceText}</span>
         </div>
 
+        {/* Quality grade block — alignment + premium + flow */}
+        <div className="grid grid-cols-3 gap-1.5">
+          <QualityCell label="Alignment" value={`${fv.quality.alignment} · ${fv.quality.grade}`} sub={fv.quality.gradeLabel}
+            tone={fv.quality.grade === "A+" || fv.quality.grade === "A" ? "#22c55e" : fv.quality.grade === "B" ? "#eab308" : "#94a3b8"} />
+          <QualityCell label="Premium" value={fv.quality.premiumState}
+            tone={fv.quality.premiumState === "EXPANDING" ? "#22c55e" : fv.quality.premiumState === "DECAYING" ? "#ef4444" : "#eab308"} />
+          <QualityCell label="Flow" value={fv.quality.flowState}
+            tone={fv.quality.flowState.includes("BUYERS") ? "#22c55e" : fv.quality.flowState.includes("SELLERS") ? "#ef4444" : "#eab308"} />
+        </div>
+
         <div className="grid grid-cols-4 gap-2">
           {fv.cells.map((c, i) => {
             const cTone = tc(c.tone);
@@ -662,6 +824,16 @@ function Stars({ value }: { value: number }) {
       {[0, 1, 2, 3, 4].map((i) => (
         <span key={i} className="text-[24px] leading-none" style={{ color: i < value ? "#22c55e" : "rgba(255,255,255,0.2)" }}>★</span>
       ))}
+    </div>
+  );
+}
+
+function QualityCell({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone: string }) {
+  return (
+    <div className="flex flex-col items-center rounded border border-white/10 bg-white/[0.02] px-1 py-1.5">
+      <span className="text-[10px] font-bold uppercase tracking-wide text-white/50">{label}</span>
+      <span className="text-center text-[12px] font-black uppercase leading-tight" style={{ color: tone }}>{value}</span>
+      {sub ? <span className="text-[9px] uppercase text-white/45">{sub}</span> : null}
     </div>
   );
 }
