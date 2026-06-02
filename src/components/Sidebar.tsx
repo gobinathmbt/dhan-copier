@@ -10,7 +10,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 const NAV_ITEMS = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
   // { to: "/chart", label: "Chart", icon: LineChart },
-  { to: "/custom-chart", label: "Chart", icon: LineChart },
+  // { to: "/custom-chart", label: "Chart", icon: LineChart },
   // { to: "/trade", label: "Order", icon: ClipboardList },
   // Intel V1 (legacy) — hidden. Re-enable by uncommenting.
   // { to: "/intel", label: "Intel Terminal", icon: Radar },
@@ -22,10 +22,10 @@ const NAV_ITEMS = [
   // Intel V5 Verdict — hidden. Re-enable by uncommenting.
   // { to: "/intel-v5", label: "Intel V5 Verdict",   icon: Crosshair },
   { to: "/intel-v6", label: "Intel V6 Master Engine", icon: Sigma },
-  { to: "/nifty50", label: "Nifty 50", icon: Target },
+  // { to: "/nifty50", label: "Nifty 50", icon: Target },
   { to: "/scalping", label: "Intraday Scalping Algo AI", icon: Brain },
-  { to: "/accounts", label: "Accounts", icon: Users },
-  { to: "/logs", label: "Logs", icon: ScrollText },
+  // { to: "/accounts", label: "Accounts", icon: Users },
+  // { to: "/logs", label: "Logs", icon: ScrollText },
 ] as const;
 
 export function Sidebar() {
