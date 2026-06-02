@@ -1,5 +1,5 @@
 import { Link, useLocation, useNavigate, useRouter } from "@tanstack/react-router";
-import { Activity, LayoutDashboard, LineChart, Users, ScrollText, LogOut, Wifi, WifiOff, Target, Brain, Radio, Zap, Crosshair } from "lucide-react";
+import { Activity, LayoutDashboard, LineChart, Users, ScrollText, LogOut, Wifi, WifiOff, Target, Brain, Radio, Zap, Crosshair, Sigma } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useModeStore } from "@/stores/mode.store";
 import { clearToken } from "@/lib/auth";
@@ -19,6 +19,7 @@ const NAV_ITEMS = [
   // { to: "/intel-v3", label: "Intel V3 Ultimate",  icon: Crosshair },
   { to: "/intel-v4", label: "Intel V4 Decision",  icon: Zap },
   { to: "/intel-v5", label: "Intel V5 Verdict",   icon: Crosshair },
+  { to: "/intel-v6", label: "Intel V6 Greeks Engine", icon: Sigma },
   { to: "/nifty50", label: "Nifty 50", icon: Target },
   { to: "/scalping", label: "Intraday Scalping Algo AI", icon: Brain },
   { to: "/accounts", label: "Accounts", icon: Users },
