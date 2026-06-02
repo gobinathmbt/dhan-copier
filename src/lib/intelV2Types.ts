@@ -729,6 +729,71 @@ export interface IntelV2Snapshot {
       scalpingScore: number;
       volSurge: boolean;
     };
+    premiumEfficiency?: {
+      ready: boolean;
+      score: number | null;
+      label: "EXPLOSIVE" | "HEALTHY" | "WEAK" | "DEAD" | "FLAT" | "WARMING UP";
+      tone: "bull" | "bear" | "warn" | "neutral";
+      side: "CE" | "PE" | null;
+      actualMovePct: number;
+      expectedMovePct: number;
+      spotMove: number;
+      baselineAgeSec?: number;
+      historyDepth: number;
+      interpretation: string;
+    };
+    deltaPersistence?: {
+      ready: boolean;
+      state: string;
+      tone: "bull" | "bear" | "warn" | "neutral";
+      bias: "bullish" | "bearish" | "neutral";
+      series: number[];
+      sameSignPct: number;
+      avg: number;
+      interpretation: string;
+    };
+    strikeMigration?: {
+      ready: boolean;
+      bias: "bullish" | "bearish" | "neutral";
+      tone: "bull" | "bear" | "warn" | "neutral";
+      ceWallTrend: "RISING" | "FALLING" | "STABLE";
+      peWallTrend: "RISING" | "FALLING" | "STABLE";
+      callWall: number;
+      putWall: number;
+      ceDrift: number;
+      peDrift: number;
+      ceTrail: number[];
+      peTrail: number[];
+      windowMin?: number;
+      interpretation: string;
+    };
+    premiumTrap?: {
+      probability: number;
+      level: "LOW" | "MEDIUM" | "HIGH";
+      tone: "bull" | "bear" | "warn" | "neutral";
+      reasons: string[];
+      interpretation: string;
+    };
+    wallBreak?: {
+      resistance: null | {
+        strike: number; side: "CE"; oi: number; oiChange: number;
+        distancePct: number; strength: number; breakProbability: number;
+        tone: "bull" | "bear" | "warn";
+      };
+      support: null | {
+        strike: number; side: "PE"; oi: number; oiChange: number;
+        distancePct: number; strength: number; breakProbability: number;
+        tone: "bull" | "bear" | "warn";
+      };
+    };
+    optionBuyerQuality?: {
+      score: number;
+      action: "AGGRESSIVE BUY" | "BUY DIPS" | "WATCH" | "AVOID";
+      tone: "bull" | "bear" | "warn" | "neutral";
+      side: "CE" | "PE" | "NEUTRAL";
+      breakdown: Array<{ k: string; pts: number }>;
+      interpretation: string;
+    };
     bestTradePick: null | {
       ce: null | {
         side: "CE";

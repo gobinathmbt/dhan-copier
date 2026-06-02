@@ -56,6 +56,28 @@ const _premiumHistory = new Map(); // symbol → [{ t, ceLtp, peLtp, atm }]
 const PREMIUM_HISTORY_MAX = 240;   // ~12 min @ 3s polling
 const PREMIUM_HISTORY_TTL_MS = 30 * 60_000; // drop samples older than 30m
 
+// ── Option-buyer behaviour history (V2 institutional upgrades) ─────────────
+// All three share the same ring-buffer pattern: per-symbol, age-pruned,
+// length-capped. They power:
+//   • Premium Efficiency  — actual vs expected premium move (spot move × |delta|)
+//   • Delta Persistence   — is buying/selling sustained across bars or a spike?
+//   • Strike Migration    — are the CE/PE OI walls drifting up or down over time?
+const _efficiencyHistory = new Map(); // symbol → [{ t, spot, ceLtp, peLtp, ceDelta, peDelta }]
+const _deltaHistory      = new Map(); // symbol → [{ t, deltaPct }]
+const _wallHistory       = new Map(); // symbol → [{ t, callWall, putWall }]
+const OB_HISTORY_MAX = 240;
+const OB_HISTORY_TTL_MS = 40 * 60_000;
+
+function _pushHistory(map, key, sample, max = OB_HISTORY_MAX, ttl = OB_HISTORY_TTL_MS) {
+  const now = sample.t || Date.now();
+  const list = map.get(key) || [];
+  list.push(sample);
+  while (list.length && (now - list[0].t) > ttl) list.shift();
+  while (list.length > max) list.shift();
+  map.set(key, list);
+  return list;
+}
+
 // ── Constituents ──────────────────────────────────────────────────────────
 const HEAVYWEIGHTS = {
   NIFTY_50: [
@@ -1853,6 +1875,378 @@ function _smartMoneyBias({ deltaBias, peWriting, ceWriting }) {
   return 'neutral';
 }
 
+/* ═════════════════════════════════════════════════════════════════════════
+ * OPTION-BUYER INSTITUTIONAL ENGINES (V2 upgrades)
+ *   These answer the questions a professional option buyer actually asks:
+ *     • Is premium responding to the move? (Premium Efficiency)
+ *     • Is buying sustained or a spike?    (Delta Persistence)
+ *     • Are institutions shifting walls?   (Strike Migration)
+ *     • Is this a premium trap?            (Premium Trap Probability)
+ *     • How breakable is the wall?         (Wall Break Probability)
+ *     • One number: should I buy?          (Option Buyer Quality Score)
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * PREMIUM EFFICIENCY ENGINE
+ * Compares the ACTUAL ATM premium move to the EXPECTED move implied by the
+ * spot move and the option's delta over a ~6-min window.
+ *   expectedΔpremium ≈ |Δspot| × |delta|
+ *   efficiency% = actualΔpremium / expectedΔpremium × 100
+ * Evaluated for the side that SHOULD be gaining given the spot direction
+ * (spot up → CE; spot down → PE).
+ */
+function _premiumEfficiency(symbolKey, atm, spot, atmBlk, push = true) {
+  const ceLtp = _safe(atmBlk?.atmCall?.ltp);
+  const peLtp = _safe(atmBlk?.atmPut?.ltp);
+  const ceDelta = Math.abs(_safe(atmBlk?.atmCall?.delta, 0.5));
+  const peDelta = Math.abs(_safe(atmBlk?.atmPut?.delta, 0.5));
+  const now = Date.now();
+  const key = `${symbolKey}|${atm}`;
+
+  let trail = _efficiencyHistory.get(key) || [];
+  if (push && ceLtp > 0 && peLtp > 0 && Number.isFinite(spot)) {
+    trail = _pushHistory(_efficiencyHistory, key,
+      { t: now, spot, ceLtp, peLtp, ceDelta, peDelta });
+  }
+
+  const TARGET_MS = 6 * 60_000;
+  let base = null;
+  if (trail.length >= 3) {
+    const targetT = now - TARGET_MS;
+    let best = trail[0], bestDist = Math.abs(best.t - targetT);
+    for (let i = 1; i < trail.length - 1; i++) {
+      const d = Math.abs(trail[i].t - targetT);
+      if (d < bestDist) { bestDist = d; best = trail[i]; }
+    }
+    base = best;
+  }
+
+  if (!base) {
+    return {
+      ready: false, score: null, label: 'WARMING UP', tone: 'neutral',
+      side: null, actualMovePct: 0, expectedMovePct: 0,
+      spotMove: 0, interpretation: 'Collecting premium history…',
+      historyDepth: trail.length,
+    };
+  }
+
+  const spotMove = spot - base.spot;
+  const side = spotMove >= 0 ? 'CE' : 'PE';
+  const curLtp   = side === 'CE' ? ceLtp : peLtp;
+  const baseLtp  = side === 'CE' ? base.ceLtp : base.peLtp;
+  const delta    = side === 'CE' ? ceDelta : peDelta;
+
+  // expected absolute premium change = |spot move| × delta
+  const expectedAbs = Math.abs(spotMove) * delta;
+  const actualAbs   = curLtp - baseLtp; // signed — should be + if move is real
+  const expectedMovePct = baseLtp > 0 ? (expectedAbs / baseLtp) * 100 : 0;
+  const actualMovePct   = baseLtp > 0 ? (actualAbs / baseLtp) * 100 : 0;
+
+  let efficiency = expectedAbs > 0.05 ? (actualAbs / expectedAbs) * 100 : null;
+  // If spot barely moved, efficiency is undefined/noisy — report neutral.
+  const negligibleMove = Math.abs(spotMove) < Math.max(3, spot * 0.0004);
+
+  let score, label, tone, interpretation;
+  if (negligibleMove || efficiency == null) {
+    score = null; label = 'FLAT'; tone = 'neutral';
+    interpretation = 'Spot barely moved — efficiency not meaningful.';
+  } else {
+    score = _round(efficiency, 0);
+    if (efficiency >= 120) { label = 'EXPLOSIVE'; tone = 'bull'; interpretation = 'Premium expanding faster than the move — buyers well paid.'; }
+    else if (efficiency >= 90) { label = 'HEALTHY'; tone = 'bull'; interpretation = 'Premium tracking the move efficiently.'; }
+    else if (efficiency >= 70) { label = 'WEAK'; tone = 'warn'; interpretation = 'Premium lagging the move — buyers underpaid.'; }
+    else { label = 'DEAD'; tone = 'bear'; interpretation = 'Premium not responding — theta/IV killing the trade.'; }
+  }
+
+  return {
+    ready: true,
+    score,                                 // efficiency % (null when flat)
+    label,                                 // EXPLOSIVE | HEALTHY | WEAK | DEAD | FLAT
+    tone,
+    side,                                  // side that should be gaining
+    actualMovePct: _round(actualMovePct, 1),
+    expectedMovePct: _round(expectedMovePct, 1),
+    spotMove: _round(spotMove, 1),
+    baselineAgeSec: Math.round((now - base.t) / 1000),
+    historyDepth: trail.length,
+    interpretation,
+  };
+}
+
+/**
+ * DELTA PERSISTENCE ENGINE
+ * One delta spike means nothing. Track the last N deltaPct samples and
+ * decide whether buying/selling is SUSTAINED or just a temporary spike.
+ */
+function _deltaPersistence(symbolKey, deltaPct, push = true) {
+  const now = Date.now();
+  let trail = _deltaHistory.get(symbolKey) || [];
+  if (push && Number.isFinite(deltaPct)) {
+    trail = _pushHistory(_deltaHistory, symbolKey, { t: now, deltaPct });
+  }
+  const recent = trail.slice(-10).map(s => s.deltaPct);
+  const series = recent.map(v => _round(v, 1));
+
+  if (recent.length < 4) {
+    return {
+      ready: false, state: 'WARMING UP', tone: 'neutral', bias: 'neutral',
+      series, sameSignPct: 0, avg: _round(deltaPct, 1),
+      interpretation: 'Collecting delta history…',
+    };
+  }
+
+  const avg = recent.reduce((a, b) => a + b, 0) / recent.length;
+  const bias = avg > 6 ? 'bullish' : avg < -6 ? 'bearish' : 'neutral';
+  // fraction of recent samples that share the dominant sign
+  const dominantSign = avg >= 0 ? 1 : -1;
+  const sameSign = recent.filter(v => Math.sign(v) === dominantSign && Math.abs(v) >= 3).length;
+  const sameSignPct = Math.round((sameSign / recent.length) * 100);
+
+  let state, tone;
+  if (sameSignPct >= 70 && Math.abs(avg) >= 8) {
+    state = dominantSign > 0 ? 'PERSISTENT BUYING' : 'PERSISTENT SELLING';
+    tone = dominantSign > 0 ? 'bull' : 'bear';
+  } else if (sameSignPct >= 55 && Math.abs(avg) >= 5) {
+    state = dominantSign > 0 ? 'BUILDING BUYING' : 'BUILDING SELLING';
+    tone = dominantSign > 0 ? 'bull' : 'bear';
+  } else if (Math.abs(recent[recent.length - 1]) >= 12 && sameSignPct < 50) {
+    state = 'TEMPORARY SPIKE';
+    tone = 'warn';
+  } else {
+    state = 'CHOPPY / NEUTRAL';
+    tone = 'neutral';
+  }
+
+  return {
+    ready: true,
+    state,                                 // PERSISTENT BUYING/SELLING | BUILDING… | TEMPORARY SPIKE | CHOPPY
+    tone,
+    bias,
+    series,                                // last ≤10 deltaPct values for a sparkline
+    sameSignPct,
+    avg: _round(avg, 1),
+    interpretation:
+      state.startsWith('PERSISTENT') ? 'Sustained one-sided flow — trustworthy.'
+      : state === 'TEMPORARY SPIKE' ? 'Single-bar spike — do not chase.'
+      : state.startsWith('BUILDING') ? 'Flow building — watch for confirmation.'
+      : 'Two-sided/erratic flow — low conviction.',
+  };
+}
+
+/**
+ * STRIKE MIGRATION ENGINE
+ * Tracks the dominant CE-OI wall and PE-OI wall over time. If the CE wall
+ * drifts higher the market is making room above (bullish); if it drifts
+ * lower, resistance is tightening (bearish). Mirror for PE (support).
+ */
+function _strikeMigration(symbolKey, callWall, putWall, push = true) {
+  const now = Date.now();
+  let trail = _wallHistory.get(symbolKey) || [];
+  if (push && Number.isFinite(callWall) && Number.isFinite(putWall)) {
+    trail = _pushHistory(_wallHistory, symbolKey, { t: now, callWall, putWall });
+  }
+  if (trail.length < 3) {
+    return {
+      ready: false, bias: 'neutral', tone: 'neutral',
+      ceWallTrend: 'STABLE', peWallTrend: 'STABLE',
+      callWall, putWall, ceDrift: 0, peDrift: 0,
+      ceTrail: trail.map(s => s.callWall), peTrail: trail.map(s => s.putWall),
+      interpretation: 'Collecting wall history…',
+    };
+  }
+  const first = trail[0];
+  const last = trail[trail.length - 1];
+  const ceDrift = last.callWall - first.callWall;   // + = resistance moving up
+  const peDrift = last.putWall - first.putWall;      // + = support moving up
+  const ceWallTrend = ceDrift > 0 ? 'RISING' : ceDrift < 0 ? 'FALLING' : 'STABLE';
+  const peWallTrend = peDrift > 0 ? 'RISING' : peDrift < 0 ? 'FALLING' : 'STABLE';
+
+  // Both walls rising = institutions repositioning higher = bullish
+  let bias, tone, interpretation;
+  if (ceDrift > 0 && peDrift >= 0) {
+    bias = 'bullish'; tone = 'bull';
+    interpretation = 'Resistance & support migrating higher — institutional bullish repositioning.';
+  } else if (ceDrift < 0 && peDrift <= 0) {
+    bias = 'bearish'; tone = 'bear';
+    interpretation = 'Resistance & support migrating lower — institutional bearish repositioning.';
+  } else if (ceDrift > 0 && peDrift < 0) {
+    bias = 'neutral'; tone = 'warn';
+    interpretation = 'Walls widening — range expanding, direction unclear.';
+  } else if (ceDrift < 0 && peDrift > 0) {
+    bias = 'neutral'; tone = 'warn';
+    interpretation = 'Walls compressing — squeeze building.';
+  } else {
+    bias = 'neutral'; tone = 'neutral';
+    interpretation = 'Walls stable — no repositioning yet.';
+  }
+
+  return {
+    ready: true,
+    bias, tone,
+    ceWallTrend, peWallTrend,
+    callWall: last.callWall, putWall: last.putWall,
+    ceDrift, peDrift,
+    ceTrail: trail.slice(-12).map(s => s.callWall),
+    peTrail: trail.slice(-12).map(s => s.putWall),
+    windowMin: Math.round((last.t - first.t) / 60000),
+    interpretation,
+  };
+}
+
+/**
+ * PREMIUM TRAP PROBABILITY
+ * Detects the classic option-buyer trap: spot moves the "right" way but the
+ * premium does NOT expand (or even falls). High probability = avoid the chase.
+ */
+function _premiumTrapProbability(efficiency, deltaPersist, spotChangePct) {
+  let prob = 0;
+  const reasons = [];
+  // Spot moved meaningfully but premium efficiency is poor
+  if (efficiency?.ready && Math.abs(spotChangePct) > 0.1) {
+    if (efficiency.label === 'DEAD') { prob += 50; reasons.push('Premium dead vs move'); }
+    else if (efficiency.label === 'WEAK') { prob += 30; reasons.push('Premium lagging move'); }
+  }
+  // Price up but premium move negative on the gaining side
+  if (efficiency?.ready && efficiency.actualMovePct < 0 && Math.abs(efficiency.spotMove) > 0) {
+    prob += 25; reasons.push('Premium falling into the move');
+  }
+  // Delta spike without persistence = fake initiative
+  if (deltaPersist?.ready && deltaPersist.state === 'TEMPORARY SPIKE') {
+    prob += 20; reasons.push('Delta spike not sustained');
+  }
+  prob = Math.max(0, Math.min(100, prob));
+  const level = prob >= 60 ? 'HIGH' : prob >= 30 ? 'MEDIUM' : 'LOW';
+  const tone = level === 'HIGH' ? 'bear' : level === 'MEDIUM' ? 'warn' : 'bull';
+  return {
+    probability: prob, level, tone,
+    reasons,
+    interpretation:
+      level === 'HIGH' ? 'High trap risk — move not backed by premium. Avoid chasing.'
+      : level === 'MEDIUM' ? 'Some trap risk — wait for premium confirmation.'
+      : 'Low trap risk — premium behaviour supports the move.',
+  };
+}
+
+/**
+ * WALL BREAK PROBABILITY
+ * For the nearest CE (resistance) and PE (support) walls, estimate how
+ * likely price is to break through, from OI strength, fresh OIΔ (writers
+ * defending vs unwinding), distance to spot, and delta-flow direction.
+ */
+function _wallBreakProbability(atmBlk, spot, deltaPct, strikes) {
+  const mk = (strike, side) => {
+    if (!Number.isFinite(strike)) return null;
+    const row = (strikes || []).find(s => Number(s.strike) === Number(strike));
+    const leg = side === 'CE' ? (row?.call || row?.ce) : (row?.put || row?.pe);
+    const oi = _safe(leg?.oi);
+    const oiChg = _safe(leg?.oiChange ?? leg?.oiChg);
+    const dist = Math.abs(strike - spot);
+    const distPct = spot > 0 ? (dist / spot) * 100 : 1;
+
+    // Strength 0..100 — high OI + fresh writing + far from spot = stronger wall
+    let strength = 40;
+    if (oi >= 5_000_000) strength += 25; else if (oi >= 2_000_000) strength += 15; else if (oi >= 800_000) strength += 8;
+    if (oiChg > 0) strength += 15;          // writers defending → stronger
+    else if (oiChg < 0) strength -= 15;      // unwinding → weaker
+    if (distPct > 0.6) strength += 10; else if (distPct < 0.2) strength -= 12; // near spot = pressured
+    // Flow pushing INTO the wall weakens it
+    if (side === 'CE' && deltaPct > 8) strength -= 12;
+    if (side === 'PE' && deltaPct < -8) strength -= 12;
+    strength = Math.max(5, Math.min(95, Math.round(strength)));
+    const breakProb = 100 - strength;
+    return {
+      strike, side,
+      oi, oiChange: oiChg,
+      distancePct: _round(distPct, 2),
+      strength,
+      breakProbability: breakProb,
+      tone: breakProb >= 55 ? 'bull' : breakProb <= 30 ? 'bear' : 'warn',
+    };
+  };
+  return {
+    resistance: mk(atmBlk?.callWall, 'CE'),
+    support: mk(atmBlk?.putWall, 'PE'),
+  };
+}
+
+/**
+ * OPTION BUYER QUALITY SCORE (0..100)
+ * Single number fusing the institutional option-buyer factors so a user
+ * doesn't have to read every card.
+ *   FRVP acceptance · Delta persistence · Premium efficiency · Volume/regime ·
+ *   Strike migration · Theta drag (IV health).
+ */
+function _optionBuyerQuality({
+  efficiency, deltaPersist, migration, frvpEngine, atmBlk, regimeBlk, verdict,
+}) {
+  let score = 0;
+  const parts = [];
+
+  // 1. Premium efficiency (0..30) — the single most important factor
+  if (efficiency?.ready && efficiency.score != null) {
+    const e = efficiency.score;
+    const pts = e >= 120 ? 30 : e >= 90 ? 24 : e >= 70 ? 14 : 4;
+    score += pts; parts.push({ k: 'Premium Efficiency', pts });
+  } else { parts.push({ k: 'Premium Efficiency', pts: 0 }); }
+
+  // 2. Delta persistence (0..20)
+  if (deltaPersist?.ready) {
+    const s = deltaPersist.state;
+    const pts = s.startsWith('PERSISTENT') ? 20 : s.startsWith('BUILDING') ? 12 : s === 'TEMPORARY SPIKE' ? 2 : 6;
+    score += pts; parts.push({ k: 'Delta Persistence', pts });
+  } else { parts.push({ k: 'Delta Persistence', pts: 0 }); }
+
+  // 3. FRVP acceptance / dominance (0..18)
+  const acc = frvpEngine?.acceptance;
+  const dom = frvpEngine?.dominance;
+  let frvpPts = 0;
+  if (acc?.acceptedAboveVAH || acc?.acceptedBelowVAL) frvpPts += 10;
+  if (dom?.dominantSide === 'BUYERS' || dom?.dominantSide === 'SELLERS') frvpPts += 8;
+  score += frvpPts; parts.push({ k: 'FRVP Acceptance', pts: frvpPts });
+
+  // 4. Strike migration (0..12)
+  if (migration?.ready && migration.bias !== 'neutral') {
+    score += 12; parts.push({ k: 'Strike Migration', pts: 12 });
+  } else { parts.push({ k: 'Strike Migration', pts: 0 }); }
+
+  // 5. Volume / regime (0..10)
+  let regPts = 0;
+  if (regimeBlk?.dayType === 'TREND DAY') regPts += 10;
+  else if (regimeBlk?.volatility === 'HIGH') regPts += 6;
+  else regPts += 3;
+  score += regPts; parts.push({ k: 'Regime', pts: regPts });
+
+  // 6. IV / theta health (0..10) — avoid dead or overheated IV
+  const iv = _safe(atmBlk?.atmIv);
+  let ivPts = 0;
+  if (iv >= 12 && iv <= 30) ivPts = 10;
+  else if (iv >= 8 && iv < 12) ivPts = 6;
+  else if (iv > 30 && iv <= 45) ivPts = 5;
+  else ivPts = 1;
+  score += ivPts; parts.push({ k: 'IV Health', pts: ivPts });
+
+  score = Math.max(0, Math.min(100, Math.round(score)));
+  let action, tone;
+  if (score >= 80) { action = 'AGGRESSIVE BUY'; tone = 'bull'; }
+  else if (score >= 65) { action = 'BUY DIPS'; tone = 'bull'; }
+  else if (score >= 50) { action = 'WATCH'; tone = 'warn'; }
+  else { action = 'AVOID'; tone = 'bear'; }
+
+  // Direction the quality favours = verdict side
+  const side = verdict?.side === 'CE' || verdict?.side === 'PE' ? verdict.side : 'NEUTRAL';
+
+  return {
+    score, action, tone, side,
+    breakdown: parts,
+    interpretation:
+      score >= 80 ? `High-quality ${side} setup — premium behaviour supports aggressive entry.`
+      : score >= 65 ? `Decent ${side} setup — buy on dips, not breakouts.`
+      : score >= 50 ? 'Mixed quality — wait for a cleaner signal.'
+      : 'Low quality — premium/structure not aligned, avoid.',
+  };
+}
+
+
 function _regimeFromCandles(c1m, c5m, c15m) {
   if (!c1m?.length) return { regime: 'unknown', dayType: 'UNKNOWN', volatility: 'UNKNOWN' };
   const closes = c1m.map(c => c.close);
@@ -3139,6 +3533,22 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
     };
   })();
 
+  // ── OPTION-BUYER INSTITUTIONAL ENGINES (V2 upgrades) ─────────────────
+  // Premium Efficiency · Delta Persistence · Strike Migration ·
+  // Premium Trap Probability · Wall Break Probability · Buyer Quality Score.
+  const premiumEfficiency = _premiumEfficiency(SYMBOL, atm, spotPrice, atmBlk);
+  const deltaPersistence  = _deltaPersistence(SYMBOL, _safe(delta.deltaPct));
+  const strikeMigration   = _strikeMigration(SYMBOL, atmBlk.callWall, atmBlk.putWall);
+  const premiumTrap       = _premiumTrapProbability(premiumEfficiency, deltaPersistence, spotChangePct);
+  const wallBreak         = _wallBreakProbability(atmBlk, spotPrice, _safe(delta.deltaPct), strikes);
+  const optionBuyerQuality = _optionBuyerQuality({
+    efficiency: premiumEfficiency,
+    deltaPersist: deltaPersistence,
+    migration: strikeMigration,
+    frvpEngine: frvpInstitutional?.engine,
+    atmBlk, regimeBlk, verdict,
+  });
+
   // ── TRADE STRATEGY ENGINE ───────────────────────────────────────────
   // Classifies the current setup into one of 5 actionable strategies:
   //   🟢 BUY_ON_DIP_CE      — bullish trend pullback (buy near support)
@@ -4238,6 +4648,13 @@ async function getSnapshot({ symbol = 'NIFTY_50', date } = {}) {
       tradeBoard,
       heroZero,
       premiumMomentum,
+      // ── Option-buyer institutional engines (V2 upgrades) ─────────────
+      premiumEfficiency,
+      deltaPersistence,
+      strikeMigration,
+      premiumTrap,
+      wallBreak,
+      optionBuyerQuality,
       tradeStrategy,
       executionEngine,
       marketStory,

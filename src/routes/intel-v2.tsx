@@ -12,6 +12,7 @@ import { ExecutionEngineCard } from "@/components/intelv2/dash/ExecutionEngineCa
 import { AccelerationCard } from "@/components/intelv2/dash/AccelerationCard";
 import { PremiumMomentumCard } from "@/components/intelv2/dash/PremiumMomentumCard";
 import { TradeStrategyCard } from "@/components/intelv2/dash/TradeStrategyCard";
+import { OptionBuyerEngineCard } from "@/components/intelv2/dash/OptionBuyerEngineCard";
 import { MarketStoryCard } from "@/components/intelv2/dash/MarketStoryCard";
 import { FiiDiiCard } from "@/components/intelv2/dash/FiiDiiCard";
 import { Row2InstitutionalFlow } from "@/components/intelv2/dash/Row2InstitutionalFlow";
@@ -70,7 +71,7 @@ function IntelV2Page() {
         <Row1MasterDecision data={data} />
         {/* AI Execution Engine — final decision brain (single source of truth)
             paired with CE/PE Acceleration twin-meter card on the LEFT. */}
-        <div className="grid h-[230px] grid-cols-10 gap-2">
+        <div className="grid h-[440px] grid-cols-10 gap-2">
           <div className="col-span-3 min-h-0"><AccelerationCard data={data} /></div>
           <div className="col-span-7 min-h-0"><ExecutionEngineCard data={data} /></div>
         </div>
@@ -80,6 +81,9 @@ function IntelV2Page() {
           <div className="col-span-3 min-h-0"><PremiumMomentumCard data={data} /></div>
           <div className="col-span-3 min-h-0"><TradeStrategyCard data={data} /></div>
         </div>
+        {/* Option Buyer Engine — premium efficiency · delta persistence · strike
+            migration · trap risk · wall break · buyer quality (institutional). */}
+        <div className="min-h-[300px]"><OptionBuyerEngineCard data={data} /></div>
         {/* <Row1bTradeBoard data={data} /> */}
         <Row2InstitutionalFlow data={data} />
         <Row3ConfirmationLayer data={data} />
