@@ -81,6 +81,48 @@ export interface V6FlowEngine {
   desc: string;
 }
 
+export interface V6StrikeMomentum {
+  ready: boolean;
+  score: number;
+  ceScore?: number;
+  peScore?: number;
+  side: "CE" | "PE" | "NEUTRAL";
+  bias: V6Bias;
+  state: string;
+  tone: string;
+  strikes: Array<{
+    strike: number;
+    isAtm: boolean;
+    cePremPct?: number;
+    pePremPct?: number;
+    ceMom: number;
+    peMom: number;
+    side: "CE" | "PE" | "NEU";
+  }>;
+  baselineAgeSec?: number;
+  historyDepth?: number;
+  desc: string;
+}
+
+export interface V6GammaRegime {
+  regime: "NEGATIVE GAMMA" | "POSITIVE GAMMA" | "NEUTRAL GAMMA";
+  premium: "EXPANSION" | "DECAY" | "MIXED";
+  bias: V6Bias;
+  tone: string;
+  score: number;
+  atmGamma: number;
+  desc: string;
+}
+
+export interface V6TimeOfDay {
+  phase: string;
+  label: string;
+  multiplier: number;
+  tone: string;
+  buyerFriendly: boolean;
+  desc: string;
+}
+
 export interface V6AlignmentEngine {
   count: number;
   total: number;
@@ -188,7 +230,7 @@ export interface V6MarketCharacter {
 
 export interface V6LogicMatrix {
   netScore: number;
-  weights: { breadth: number; cprLocation: number; cprRelation: number; it: number; greeks: number; vix: number };
+  weights: { frvp: number; breadth: number; cpr: number; flow: number; strikeMomentum: number; greeks: number; it: number; vix: number; gamma: number };
   rows: Array<{ engine: string; weight: number; value: string; verdict: string; tone: string; greeks?: boolean }>;
   condition: string;
   conditionBias: V6Bias;
@@ -212,6 +254,10 @@ export interface V6FinalVerdict {
     premiumState: "EXPANDING" | "NEUTRAL" | "DECAYING";
     flowState: string;
     auctionZone: string;
+    strikeMomentum: string;
+    gammaRegime: string;
+    timePhase: string;
+    timeMultiplier: number;
   };
   cells: Array<{ label: string; value: string; icon?: string; tone: string }>;
   tradePlan: string;
@@ -232,6 +278,9 @@ export interface V6Decision {
   cprEngine: V6CprEngine;
   auctionEngine: V6AuctionEngine;
   flowEngine: V6FlowEngine;
+  strikeMomentum: V6StrikeMomentum;
+  gammaRegime: V6GammaRegime;
+  timeOfDay: V6TimeOfDay;
   trendView: V6TrendView;
   greeksEngine: V6GreeksEngine;
   marketCharacter: V6MarketCharacter;

@@ -166,6 +166,89 @@ Rounds spot to the nearest strike step → ATM strike.
 
 ---
 
+## 3.5 Option-Buyer Institutional Engines (v2 upgrades)
+
+> These answer the question a professional option buyer actually asks — *"is this
+> move worth chasing?"* — rather than just *"is the market bullish or bearish?"*.
+> Option buyers make money when **premium expands faster than theta decay**, not from
+> being directionally correct. No new indicators were added; all six build on data V2
+> already produces, plus three small per-symbol ring-buffer histories.
+
+### Shared history infra
+`_pushHistory(map, key, sample, max, ttl)` — generic age-pruned, length-capped ring
+buffer. Three buffers (40-min TTL, 240 samples):
+- `_efficiencyHistory` — `{ t, spot, ceLtp, peLtp, ceDelta, peDelta }`
+- `_deltaHistory` — `{ t, deltaPct }`
+- `_wallHistory` — `{ t, callWall, putWall }`
+
+> History-based engines (Efficiency, Persistence, Migration) read **WARMING UP** until
+> the buffers fill from live 3-second polling (a few minutes), then activate. Wall
+> Break and Quality Score work on the first tick.
+
+### ⭐ `_premiumEfficiency(symbol, atm, spot, atmBlk)` — Tier 1
+**Question:** *Is premium actually responding to the move?*
+**Logic:** Picks a baseline sample ~6 min old. Determines the side that *should* be
+gaining (`spotMove ≥ 0 → CE`, else `PE`). Computes:
+```
+expectedΔpremium = |spotMove| × |delta|
+actualΔpremium   = curLtp − baseLtp
+efficiency%      = actualΔ / expectedΔ × 100
+```
+| Efficiency | Label | Meaning |
+|------------|-------|---------|
+| ≥ 120% | EXPLOSIVE | premium expanding faster than the move — buyers well paid |
+| 90–120% | HEALTHY | premium tracking the move |
+| 70–90% | WEAK | premium lagging — buyers underpaid |
+| < 70% | DEAD | premium not responding — theta/IV killing it |
+If spot barely moved (< ~0.04%) → **FLAT** (efficiency not meaningful).
+
+### ⭐ `_deltaPersistence(symbol, deltaPct)` — Tier 1
+**Question:** *Is buying/selling sustained or just a spike?*
+**Logic:** Keeps last 10 `deltaPct` samples; computes `avg` and `sameSignPct` (fraction
+of recent samples sharing the dominant sign with |value| ≥ 3).
+- `sameSignPct ≥ 70 & |avg| ≥ 8` → **PERSISTENT BUYING/SELLING**
+- `sameSignPct ≥ 55 & |avg| ≥ 5` → **BUILDING BUYING/SELLING**
+- latest |value| ≥ 12 but `sameSignPct < 50` → **TEMPORARY SPIKE** (don't chase)
+- else → **CHOPPY / NEUTRAL**
+Returns a 10-point series for the sparkline.
+
+### ⭐ `_strikeMigration(symbol, callWall, putWall)` — Tier 1
+**Question:** *Are institutions shifting their walls?*
+**Logic:** Tracks the dominant CE-OI and PE-OI walls over time; compares first vs last:
+- both rising → **BULLISH** (repositioning higher)
+- both falling → **BEARISH**
+- CE up & PE down → walls widening (range expanding) → neutral/warn
+- CE down & PE up → walls compressing (squeeze) → neutral/warn
+Returns wall trails + drift + window minutes.
+
+### `_premiumTrapProbability(efficiency, deltaPersist, spotChangePct)` — Tier 2
+**Question:** *Is this a premium trap (price moves, premium doesn't)?*
+**Logic:** Adds risk points: DEAD efficiency +50 / WEAK +30; premium falling into the
+move +25; delta TEMPORARY SPIKE +20. → **LOW (<30) · MEDIUM (30–59) · HIGH (≥60)** with
+reasons.
+
+### `_optionBuyerQuality({...})` — Tier 2
+**Question (one number):** *Should I buy?*
+**Logic:** Fuses six factors (0–100): Premium Efficiency (0–30) + Delta Persistence
+(0–20) + FRVP acceptance/dominance (0–18) + Strike Migration (0–12) + Regime (0–10) +
+IV health (0–10).
+| Score | Action |
+|-------|--------|
+| ≥ 80 | AGGRESSIVE BUY |
+| 65–79 | BUY DIPS |
+| 50–64 | WATCH |
+| < 50 | AVOID |
+Returns the per-factor breakdown so the score is transparent.
+
+### `_wallBreakProbability(atmBlk, spot, deltaPct, strikes)` — Tier 3
+**Question:** *How breakable is the wall?*
+**Logic:** For the nearest CE (resistance) & PE (support) walls, computes **strength
+(5–95)** from base 40 + OI size (+8/+15/+25) + fresh OIΔ (writers defending +15 /
+unwinding −15) + distance to spot (far +10 / near −12) − flow pushing into the wall
+(−12). **breakProbability = 100 − strength.**
+
+---
+
 ## 4. `getSnapshot({ symbol, date })` — orchestration flow
 
 1. **Resolve date** — validate `YYYY-MM-DD`; weekend → previous trading day; check cache.
@@ -215,6 +298,12 @@ Each is an inline builder in `getSnapshot`. Brief logic summary per section:
 | **tradeBoard** | 4 glance cards: Best Option Buy, Alternate Scenario, Risk Gauge, Execution Context (with mini key levels). |
 | **heroZero** | High-risk sniper banner. Scores **6 boolean signals per side** (Above VAH/Below VAL +2, Above/Below VWAP +2, premium expanding right side +2, dominance ≥65% +1, delta ≥±10% +1, volume burst >1.5× +1; max 9). **Hero fires at ≥7** → HERO_CE / HERO_PE, else ZERO; also flags bull/bear traps. |
 | **premiumMomentum** | Real CE/PE premium velocity from FRVP engine's premium-velocity state → expansion/contraction read. |
+| **premiumEfficiency** ⭐ | Actual vs expected premium move (`actualΔ / (|spotMove|×delta)`) → EXPLOSIVE / HEALTHY / WEAK / DEAD / FLAT. (history-based) |
+| **deltaPersistence** ⭐ | Last-10 deltaPct → PERSISTENT BUYING/SELLING vs TEMPORARY SPIKE vs CHOPPY (sameSign% + avg). (history-based) |
+| **strikeMigration** ⭐ | CE/PE OI wall drift over time → bullish (both rising) / bearish (both falling) / widening / compressing. (history-based) |
+| **premiumTrap** | Trap probability from poor efficiency + premium falling into the move + unsustained delta → LOW/MEDIUM/HIGH. |
+| **wallBreak** | Per-wall strength (OI + fresh OIΔ + distance + flow) and breakProbability for resistance (CE) & support (PE). |
+| **optionBuyerQuality** | One 0–100 score (efficiency + persistence + FRVP + migration + regime + IV) → AGGRESSIVE BUY / BUY DIPS / WATCH / AVOID. |
 | **tradeStrategy** | Chosen strategy (Breakout / Buy Dip / Sell Rise / Reversal) with target strike, confidence, and the 4 firing reasons. |
 | **executionEngine** | "AI Execution Engine" card — time-of-day phase (Pre-market / Open Drive / Mid / Power Hour), final action (BUY CE/PE/WAIT), entry type, votes, mode (HERO/NORMAL/AVOID), invalidation rules. |
 | **marketStory** | Narrative paragraph fusing HeroZero, FRVP engine, S/R, verdict, delta, market direction, VWAP, futures into plain-English lines + headline. |
@@ -266,6 +355,9 @@ candles + option chain + macro
         │
         ├─ ladder + _tradePlan + _bestTradePicks
         ├─ heroZero (6-signal sniper)  ·  tradeStrategy  ·  executionEngine
+        ├─ OPTION-BUYER LAYER (v2 upgrades):
+        │     premiumEfficiency → deltaPersistence → strikeMigration
+        │     → premiumTrap → wallBreak → optionBuyerQuality (0–100 verdict)
         └─ trap detection · no-trade conditions · market story
 ```
 
@@ -274,8 +366,8 @@ candles + option chain + macro
 ## 8. Frontend
 
 - **Route:** `src/routes/intel-v2.tsx` polls `/api/intel-v2/snapshot` (3s live, once for history) via the snapshot hook; renders all cards from `dashboard.*`.
-- **Components:** `src/components/intelv2/**` (e.g. `dash/ExecutionEngineCard.tsx`, dashboard cards, headers).
-- **Types:** `src/lib/intelV2Types.ts` mirrors the response shape above.
+- **Components:** `src/components/intelv2/**` (e.g. `dash/ExecutionEngineCard.tsx`, dashboard cards, headers). The six option-buyer engines render in **`dash/OptionBuyerEngineCard.tsx`** (one card: Buyer Quality headline + Premium Efficiency · Premium Trap · Delta Persistence sparkline · Strike Migration · Wall Break).
+- **Types:** `src/lib/intelV2Types.ts` mirrors the response shape above (incl. `dashboard.premiumEfficiency / deltaPersistence / strikeMigration / premiumTrap / wallBreak / optionBuyerQuality`).
 
 ---
 
@@ -293,7 +385,71 @@ AUCTION:        breadth·0.4 + delta·0.4 + vol·0.2 → ≥75 Strong · ≥55 M
 FUTURES BASIS:  Forward−Spot; SENSEX uses put-call parity K+CE−PE
 LIVE TICK:      used only if < 5s old, else candle close
 CACHE:          800ms live · 60s historical · macro 60s
+
+── OPTION-BUYER ENGINES (v2 upgrades) ──
+PREMIUM EFFICIENCY:  actualΔ / (|spotMove|×delta) → ≥120 EXPLOSIVE · 90-120 HEALTHY · 70-90 WEAK · <70 DEAD
+DELTA PERSISTENCE:   last-10 deltaPct; sameSign≥70 & |avg|≥8 PERSISTENT · ≥55 BUILDING · spike&<50 TEMPORARY · else CHOPPY
+STRIKE MIGRATION:    both walls↑ BULLISH · both↓ BEARISH · widen/compress NEUTRAL
+PREMIUM TRAP:        DEAD+50 / WEAK+30 / premium-falling+25 / delta-spike+20 → <30 LOW · 30-59 MED · ≥60 HIGH
+BUYER QUALITY 0-100: Eff30 + Persist20 + FRVP18 + Migration12 + Regime10 + IV10 → ≥80 AGG BUY · 65-79 BUY DIPS · 50-64 WATCH · <50 AVOID
+WALL BREAK:          strength 5-95 (OI + fresh OIΔ + distance + flow); breakProb = 100 − strength
+HISTORY BUFFERS:     40-min TTL, 240 samples; engines WARM UP over first few live polls
 ```
+
+---
+
+## 10. Live Output Snapshot (NIFTY 50 · 2026-05-27)
+
+Real `GET /api/intel-v2/snapshot` output (trimmed to the key + new engine fields).
+History-based engines show *WARMING UP* here because this was a historical replay
+(single cached snapshot); in live mode they activate after a few 3-second polls.
+
+```jsonc
+{
+  "ok": true, "version": "v2", "symbol": "NIFTY_50", "date": "2026-05-27",
+  "spot":    { "ltp": 23924.25, "change": 4.65, "changePct": 0.02, "vwap": 23903.23 },
+  "futures": { "ltp": 24010, "premium": 85.75, "basisState": "premium" },
+  "options": { "atm": 23900, "maxPain": 24000, "atmIv": 12.95, "callWall": 24000, "putWall": 23900 },
+  "flow": {
+    "oi":    { "pcr": 0.92, "ceTotal": 33651605, "peTotal": 30899180, "ceWriting": false, "peWriting": false },
+    "delta": { "deltaPct": 26.59, "bias": "bullish" }
+  },
+  "verdict": { "side": "CE", "verdict": "BULLISH", "cePct": 60.1, "pePct": 39.9 },
+
+  "dashboard": {
+    "premiumEfficiency": { "ready": false, "label": "WARMING UP", "side": null,
+                           "interpretation": "Collecting premium history…", "historyDepth": 1 },
+    "deltaPersistence":  { "ready": false, "state": "WARMING UP", "series": [26.6], "avg": 26.6 },
+    "strikeMigration":   { "ready": false, "ceWallTrend": "STABLE", "peWallTrend": "STABLE",
+                           "callWall": 24000, "putWall": 23900, "ceDrift": 0, "peDrift": 0 },
+    "premiumTrap":       { "probability": 0, "level": "LOW", "tone": "bull",
+                           "interpretation": "Low trap risk — premium behaviour supports the move." },
+    "wallBreak": {
+      "resistance": { "strike": 24000, "oi": 8895250, "oiChange": 3052660,
+                      "distancePct": 0.32, "strength": 68, "breakProbability": 32 },
+      "support":    { "strike": 23900, "oi": 5949840, "oiChange": 2969135,
+                      "distancePct": 0.10, "strength": 68, "breakProbability": 32 }
+    },
+    "optionBuyerQuality": {
+      "score": 20, "action": "AVOID", "side": "CE",
+      "breakdown": [
+        { "k": "Premium Efficiency", "pts": 0 }, { "k": "Delta Persistence", "pts": 0 },
+        { "k": "FRVP Acceptance", "pts": 0 },    { "k": "Strike Migration", "pts": 0 },
+        { "k": "Regime", "pts": 10 },            { "k": "IV Health", "pts": 10 }
+      ],
+      "interpretation": "Low quality — premium/structure not aligned, avoid."
+    }
+  }
+}
+```
+
+> Reading it: structure is mildly bullish (verdict CE 60%, futures premium +85, delta
+> +26%), but the **option-buyer layer withholds approval** — Buyer Quality is only 20
+> (AVOID) because the premium-behaviour engines haven't confirmed (history warming up,
+> IV healthy but efficiency/persistence/migration not yet scored). Wall Break shows both
+> the 24000 resistance and 23900 support at 68% strength (32% break chance) — a balanced
+> cage. This is exactly the "don't chase direction without premium confirmation" filter
+> the layer is designed to enforce.
 
 ---
 

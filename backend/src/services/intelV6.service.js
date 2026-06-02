@@ -6,27 +6,28 @@
  *   GOLDEN RULE:
  *     Breadth tells the truth · CPR tells the location · Greeks confirm strength
  *
- *   Engines & institutional weights (sum = 100):
- *     0. AUCTION (FRVP)          20%  — POC/VAH/VAL location + acceptance
- *     1. MARKET BREADTH ENGINE   25%  — Advance/Decline + heavyweight leadership
- *     2. CPR LOCATION            20%  — Above TC / Inside / Below BC (+ FRVP alignment)
- *     3. CPR RELATIONSHIP        ——  — folded into the CPR layer (value migration)
- *     4. FLOW ENGINE             ——  — Delta + Futures Premium + Buyer/Seller flow
- *     5. GREEKS ENGINE (ATM)     15%  — CE vs PE dominance + Premium Expansion Score
- *     6. IT SECTOR STRENGTH      10%  — NIFTY IT tilt → Support / Drag
- *     7. VIX                     10%  — Falling = Risk On, Spiking = Risk Off
+ *   Engines & institutional weights (directional vote, normalised to ±100):
+ *     0. AUCTION (FRVP)          18  — POC/VAH/VAL location + acceptance
+ *     1. MARKET BREADTH          20  — Advance/Decline + heavyweight leadership
+ *     2. CPR (loc+migration+align)18  — location + value migration + FRVP alignment
+ *     3. FLOW                    10  — Delta + Futures Premium + Buyer/Seller flow
+ *     4. STRIKE MOMENTUM         15  — ATM±2 premium/OI/vol/delta/vega buying (NEW)
+ *     5. GREEKS (ATM)            12  — CE vs PE dominance + Premium Expansion Score
+ *     6. IT SECTOR                8  — NIFTY IT tilt → Support / Drag
+ *     7. VIX                      7  — Falling = Risk On, Spiking = Risk Off
+ *     8. DEALER GAMMA REGIME     10  — Neg gamma (expansion) amplifies prevailing side (NEW)
  *
- *   Layer stack (institutional order — location first, then participation):
- *     L0 Auction(FRVP) · L1 Breadth(+Leadership) · L2 IT · L3 CPR(+FRVP align)
- *     L4 Flow · L5 Greeks(+Premium Expansion) · L6 VIX
- *     L7 ALIGNMENT ENGINE (0..N aligned) · L8 Logic Matrix · L9 Final Verdict(graded)
+ *   Non-weighted modifiers:
+ *     • TIME-OF-DAY ENGINE — phase multiplier on confidence (expansion vs theta zone) (NEW)
+ *     • MARKET CHARACTER   — Breadth + CPR Width + VIX → Trend/Range/Expansion/Panic/Short-Cover
+ *     • MARKET TREND VIEW  — majority vote of Breadth + IT + CPR Location
  *
- *   Extra engines:
- *     • MARKET CHARACTER  — Breadth + CPR Width + VIX → Trend/Range/Expansion/Panic/Short-Cover
- *     • MARKET TREND VIEW — majority vote of Breadth + IT + CPR Location
+ *   Layer stack (location → participation → premium):
+ *     L0 Auction · L1 Breadth(+Leadership) · L2 IT · L3 CPR(+FRVP align) · L4 Flow
+ *     L5 Greeks(+Premium Expansion) · L5.5 Strike Momentum · L6 VIX · L6.5 Dealer Gamma
+ *     L7 ALIGNMENT (0..7) · L8 Logic Matrix · L9 Final Verdict (greeks-gated · align-graded · time-aware)
  *
- *   Final Verdict is GREEKS-GATED + ALIGNMENT-GRADED: a directional BIAS upgrades
- *   to a BUY SETUP only when Greeks confirm AND alignment is high enough.
+ *   Final Verdict is GREEKS-GATED + ALIGNMENT-GRADED + TIME/GAMMA-AWARE.
  *
  * Endpoint: GET /api/intel-v6/decision?symbol=NIFTY_50[&date=YYYY-MM-DD]
  * ───────────────────────────────────────────────────────────────────── */
@@ -45,6 +46,11 @@ function _clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
 const _greekHistory = new Map(); // symbol → [{ t, ceDelta, peDelta, ... }]
 const GREEK_HISTORY_MAX = 80;
 const GREEK_TTL_MS = 30 * 60_000;
+
+/* ─── Strike-momentum history (ATM±2 premium/OI snapshots) ─── */
+const _strikeHistory = new Map(); // symbol → [{ t, strikes:{strike:{ceLtp,peLtp,ceOi,peOi,...}} }]
+const STRIKE_HISTORY_MAX = 80;
+const STRIKE_TTL_MS = 30 * 60_000;
 
 function _pushGreekHistory(symbol, sample) {
   const list = _greekHistory.get(symbol) || [];
@@ -74,11 +80,14 @@ const IT_MEMBERS = {
   SENSEX:   ['INFY', 'TCS', 'HCLTECH', 'TECHM'],
 };
 
-/* Institutional engine weights for the WEIGHTED net score.
- * Location-first ordering per institutional feedback:
- *   Auction(FRVP) 20 · Breadth 25 · CPR 20 · Flow 10 · Greeks 15 · IT 10 · VIX 10 */
-const WEIGHTS = { frvp: 20, breadth: 25, cpr: 20, flow: 10, greeks: 15, it: 10, vix: 10 };
-const WEIGHT_SUM = WEIGHTS.frvp + WEIGHTS.breadth + WEIGHTS.cpr + WEIGHTS.flow + WEIGHTS.greeks + WEIGHTS.it + WEIGHTS.vix;
+/* Institutional engine weights for the WEIGHTED net score (directional vote).
+ * Premium-behaviour layers (Strike Momentum + Greeks + Flow) now carry ~37
+ * combined, reflecting that option buyers are paid by premium expansion. */
+const WEIGHTS = {
+  frvp: 18, breadth: 20, cpr: 18, flow: 10,
+  strikeMomentum: 15, greeks: 12, it: 8, vix: 7, gamma: 10,
+};
+const WEIGHT_SUM = Object.values(WEIGHTS).reduce((a, b) => a + b, 0);
 
 /**
  * Compute YESTERDAY's CPR (TC/BC) so we can detect true value migration.
@@ -103,6 +112,211 @@ function _yesterdayCpr(symbolKey, usedDate) {
     return I._cprFromOHLC(ohlc);
   } catch (_) { return null; }
 }
+
+/* ─────────────────────────────────────────────────────────────────────
+ * STRIKE MOMENTUM ENGINE (ATM ± 2) — weight 15
+ * Institutional buyers move to ATM / ATM+1 / ATM+2 before the move is
+ * obvious. This tracks per-strike premium %Δ, OI %Δ, volume burst, delta
+ * and vega change across the ATM±2 band over a rolling window, then scores
+ * CE-side vs PE-side buying. Returns a 0..100 momentum score + side.
+ *   80+ Institutional Buying · 60+ Momentum Building · 40+ Neutral · <40 Decay
+ * ───────────────────────────────────────────────────────────────────── */
+function _strikeMomentum(symbol, atm, ladder) {
+  const now = Date.now();
+  if (!atm || !Array.isArray(ladder) || !ladder.length) {
+    return { ready: false, score: 50, side: 'NEUTRAL', bias: 'NEUTRAL', state: 'NO DATA',
+      tone: 'neutral', strikes: [], desc: 'Strike data unavailable' };
+  }
+  // ATM ± 2 band (ladder rows are strike-spaced)
+  const sorted = [...ladder].sort((a, b) => a.strike - b.strike);
+  const atmIdx = sorted.findIndex(r => r.isAtm) >= 0 ? sorted.findIndex(r => r.isAtm)
+    : sorted.findIndex(r => r.strike === atm);
+  const lo = Math.max(0, atmIdx - 2);
+  const hi = Math.min(sorted.length, atmIdx + 3);
+  const band = atmIdx >= 0 ? sorted.slice(lo, hi) : sorted.slice(0, 5);
+
+  // Snapshot current band into history
+  const snap = {};
+  for (const r of band) {
+    snap[r.strike] = {
+      ceLtp: _safe(r.ce?.ltp), peLtp: _safe(r.pe?.ltp),
+      ceOi: _safe(r.ce?.oi), peOi: _safe(r.pe?.oi),
+      ceVol: _safe(r.ce?.volume), peVol: _safe(r.pe?.volume),
+      ceVega: _safe(r.ce?.vega), peVega: _safe(r.pe?.vega),
+    };
+  }
+  const trail = _strikeHistory.get(symbol) || [];
+  trail.push({ t: now, strikes: snap });
+  while (trail.length && (now - trail[0].t) > STRIKE_TTL_MS) trail.shift();
+  while (trail.length > STRIKE_HISTORY_MAX) trail.shift();
+  _strikeHistory.set(symbol, trail);
+
+  // Baseline ~6 min back
+  let base = null;
+  if (trail.length >= 3) {
+    const targetT = now - 6 * 60_000;
+    let best = trail[0], bestDist = Math.abs(best.t - targetT);
+    for (let i = 1; i < trail.length - 1; i++) {
+      const d = Math.abs(trail[i].t - targetT);
+      if (d < bestDist) { bestDist = d; best = trail[i]; }
+    }
+    base = best;
+  }
+
+  // Per-strike CE/PE buying score
+  const rows = [];
+  let ceTotal = 0, peTotal = 0, scored = 0;
+  for (const r of band) {
+    const cur = snap[r.strike];
+    const prev = base?.strikes?.[r.strike] || null;
+    const pct = (now, was) => (was > 0 ? ((now - was) / was) * 100 : 0);
+
+    const cePremPct = prev ? pct(cur.ceLtp, prev.ceLtp) : 0;
+    const pePremPct = prev ? pct(cur.peLtp, prev.peLtp) : 0;
+    const ceOiPct   = prev ? pct(cur.ceOi, prev.ceOi) : 0;
+    const peOiPct   = prev ? pct(cur.peOi, prev.peOi) : 0;
+    // OI-change% on the row vs prior-day already in the row
+    const ceOiChg = _safe(r.ce?.oiChange);
+    const peOiChg = _safe(r.pe?.oiChange);
+
+    // CE buying score (0..100): rising premium + rising OI (long buildup) +
+    // volume + positive premium velocity. Mirror for PE.
+    const ceMom = _clamp(
+      (cePremPct >= 15 ? 40 : cePremPct >= 6 ? 26 : cePremPct >= 0 ? 12 : 0) +
+      (ceOiPct >= 5 ? 25 : ceOiPct >= 1 ? 14 : 0) +
+      (ceOiChg > 0 ? 15 : 0) +
+      (cur.ceVol > 100000 ? 20 : cur.ceVol > 20000 ? 10 : 4), 0, 100);
+    const peMom = _clamp(
+      (pePremPct >= 15 ? 40 : pePremPct >= 6 ? 26 : pePremPct >= 0 ? 12 : 0) +
+      (peOiPct >= 5 ? 25 : peOiPct >= 1 ? 14 : 0) +
+      (peOiChg > 0 ? 15 : 0) +
+      (cur.peVol > 100000 ? 20 : cur.peVol > 20000 ? 10 : 4), 0, 100);
+
+    if (prev) { ceTotal += ceMom; peTotal += peMom; scored++; }
+    rows.push({
+      strike: r.strike, isAtm: !!r.isAtm,
+      cePremPct: _round(cePremPct, 0), pePremPct: _round(pePremPct, 0),
+      ceMom, peMom,
+      side: ceMom > peMom + 8 ? 'CE' : peMom > ceMom + 8 ? 'PE' : 'NEU',
+    });
+  }
+
+  if (!base || scored === 0) {
+    return { ready: false, score: 50, side: 'NEUTRAL', bias: 'NEUTRAL',
+      state: 'WARMING UP', tone: 'neutral', strikes: rows,
+      desc: 'Collecting ATM±2 premium history…',
+      ceScore: 0, peScore: 0, baselineAgeSec: base ? Math.round((now - base.t) / 1000) : 0 };
+  }
+
+  const ceAvg = Math.round(ceTotal / scored);
+  const peAvg = Math.round(peTotal / scored);
+  const side = ceAvg > peAvg + 8 ? 'CE' : peAvg > ceAvg + 8 ? 'PE' : 'NEUTRAL';
+  const score = Math.max(ceAvg, peAvg);
+  const bias = side === 'CE' ? 'BULLISH' : side === 'PE' ? 'BEARISH' : 'NEUTRAL';
+  const state = score >= 80 ? 'INSTITUTIONAL BUYING'
+    : score >= 60 ? 'MOMENTUM BUILDING'
+    : score >= 40 ? 'NEUTRAL'
+    : 'DECAY ZONE';
+  const tone = bias === 'BULLISH' ? (score >= 80 ? 'strongbull' : 'bull')
+    : bias === 'BEARISH' ? (score >= 80 ? 'strongbear' : 'bear') : 'neutral';
+
+  return {
+    ready: true,
+    score, ceScore: ceAvg, peScore: peAvg,
+    side, bias, state, tone,
+    strikes: rows,
+    baselineAgeSec: Math.round((now - base.t) / 1000),
+    historyDepth: trail.length,
+    desc: side === 'CE' ? `CE buying across ATM±2 (${score})`
+      : side === 'PE' ? `PE buying across ATM±2 (${score})`
+      : 'Balanced strike activity',
+  };
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * DEALER GAMMA REGIME — weight 10
+ * Classifies whether option dealers are net long or short gamma. Long-gamma
+ * dealers hedge AGAINST the move → range / premium decay. Short-gamma dealers
+ * hedge WITH the move → trend / premium expansion (great for buyers).
+ *
+ * We don't have dealer positioning directly, so infer it from observable
+ * proxies already in V2: realised move vs CPR width (trending vs ranging),
+ * VIX direction, and ATM gamma magnitude.
+ * ───────────────────────────────────────────────────────────────────── */
+function _dealerGammaRegime({ cprWidthClass, spotChangePct, vixChangePct, atmGamma, marketCharacter, conditionBias }) {
+  // Score positive = negative-gamma (expansion) tendencies, negative = positive-gamma (range).
+  let s = 0;
+  const big = Math.abs(spotChangePct) >= 0.5;
+  if (big) s += 2;                                    // wide realised move → dealers chasing
+  if (cprWidthClass === 'narrow') s += 1;             // compression → break likely
+  if (cprWidthClass === 'wide') s -= 1;               // already wide → mean-revert
+  if (vixChangePct >= 3) s += 2;                      // VIX rising → short-gamma stress
+  if (vixChangePct <= -3) s -= 1;                     // VIX collapsing → vol selling / long gamma
+  if (marketCharacter === 'TREND DAY' || marketCharacter === 'EXPANSION DAY' || marketCharacter === 'PANIC DAY') s += 2;
+  if (marketCharacter === 'RANGE DAY') s -= 2;
+
+  let regime, premium, tone, desc;
+  if (s >= 2) {
+    regime = 'NEGATIVE GAMMA'; premium = 'EXPANSION'; tone = 'bull';
+    desc = 'Dealers short gamma — hedging amplifies the move. Premium expansion favoured.';
+  } else if (s <= -2) {
+    regime = 'POSITIVE GAMMA'; premium = 'DECAY'; tone = 'bear';
+    desc = 'Dealers long gamma — hedging dampens the move. Range / premium decay.';
+  } else {
+    regime = 'NEUTRAL GAMMA'; premium = 'MIXED'; tone = 'neutral';
+    desc = 'Mixed gamma regime — no strong dealer-flow edge.';
+  }
+
+  // The regime AMPLIFIES the prevailing directional bias (it is not directional
+  // by itself). In expansion it votes WITH conditionBias; in decay it votes
+  // AGAINST (range fades the move).
+  let bias = 'NEUTRAL';
+  if (regime === 'NEGATIVE GAMMA' && conditionBias !== 'NEUTRAL') bias = conditionBias;
+  else if (regime === 'POSITIVE GAMMA' && conditionBias !== 'NEUTRAL') bias = conditionBias === 'BULLISH' ? 'BEARISH' : 'BULLISH';
+
+  return { regime, premium, bias, tone, score: s, atmGamma: _round(atmGamma, 4), desc };
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * TIME-OF-DAY ENGINE — confidence multiplier (not a directional vote)
+ * Option buying behaves differently by session phase. A setup scoring 80 at
+ * 12:30 (theta zone) is not the same as 80 at 09:25 (expansion).
+ *   09:15–10:15 EXPANSION   ×1.15
+ *   10:15–12:00 CONTINUATION ×1.00
+ *   12:00–14:00 THETA ZONE  ×0.80
+ *   14:00–15:30 EXPANSION   ×1.10
+ * ───────────────────────────────────────────────────────────────────── */
+function _timeOfDay(isToday) {
+  const ist = new Date(Date.now() + 5.5 * 3600 * 1000);
+  const mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+  // Historical replay has no meaningful "now" phase → neutral multiplier.
+  if (!isToday) {
+    return { phase: 'HISTORICAL', label: 'Historical Replay', multiplier: 1.0, tone: 'neutral',
+      buyerFriendly: true, desc: 'Replay — time-of-day neutralised.' };
+  }
+  let phase, label, multiplier, tone, buyerFriendly, desc;
+  if (mins < 9 * 60 + 15) {
+    phase = 'PRE_MARKET'; label = 'Pre-Market'; multiplier = 0.7; tone = 'neutral'; buyerFriendly = false;
+    desc = 'Before open — no live auction yet.';
+  } else if (mins < 10 * 60 + 15) {
+    phase = 'OPENING_EXPANSION'; label = 'Opening Expansion'; multiplier = 1.15; tone = 'bull'; buyerFriendly = true;
+    desc = '09:15–10:15 — highest expansion, best for buyers.';
+  } else if (mins < 12 * 60) {
+    phase = 'CONTINUATION'; label = 'Continuation'; multiplier = 1.0; tone = 'neutral'; buyerFriendly = true;
+    desc = '10:15–12:00 — trend continuation window.';
+  } else if (mins < 14 * 60) {
+    phase = 'THETA_ZONE'; label = 'Theta Zone'; multiplier = 0.8; tone = 'bear'; buyerFriendly = false;
+    desc = '12:00–14:00 — lunch lull, theta bleeds buyers. Trim conviction.';
+  } else if (mins <= 15 * 60 + 30) {
+    phase = 'CLOSING_EXPANSION'; label = 'Closing Expansion'; multiplier = 1.1; tone = 'bull'; buyerFriendly = true;
+    desc = '14:00–15:30 — expansion / trend resolution window.';
+  } else {
+    phase = 'POST_MARKET'; label = 'Post-Market'; multiplier = 0.7; tone = 'neutral'; buyerFriendly = false;
+    desc = 'After close — no live trading.';
+  }
+  return { phase, label, multiplier, tone, buyerFriendly, desc };
+}
+
 
 /* ═════════════════════════════════════════════════════════════════════ */
 async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
@@ -542,6 +756,10 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
     reading: greeksReading,
   };
 
+  /* ═══ L5.5 STRIKE MOMENTUM ENGINE (ATM±2) — 15 ══════════════════════ */
+  const strikeMomentum = _strikeMomentum(symbol, atm, ladder);
+  const strikeMomentumBias = strikeMomentum.bias;
+
   /* ═══ 6. VIX ENGINE (10%) ════════════════════════════════════════════ */
   // VIX falling = risk-on (bullish for index buyers); spiking = risk-off.
   const vixBias = vixChangePct <= -1 ? 'BULLISH' : vixChangePct >= 4 ? 'BEARISH' : 'NEUTRAL';
@@ -641,14 +859,31 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
 
   /* ═══ L5/WEIGHTED VERDICT + L7 ALIGNMENT + L8 LOGIC MATRIX ═══════════ */
   const contrib = (bias, w) => (bias === 'BULLISH' ? w : bias === 'BEARISH' ? -w : 0);
-  const rawNet =
+  // Pass 1 — net WITHOUT gamma (gamma needs the prevailing bias to amplify).
+  const baseNet =
     contrib(auctionVoteBias, WEIGHTS.frvp) +
     contrib(breadthBias, WEIGHTS.breadth) +
     contrib(cprBias, WEIGHTS.cpr) +
     contrib(flowBias, WEIGHTS.flow) +
+    contrib(strikeMomentumBias, WEIGHTS.strikeMomentum) +
     contrib(greeksBias, WEIGHTS.greeks) +
     contrib(itBias, WEIGHTS.it) +
     contrib(vixBias, WEIGHTS.vix);
+  const prelimBias = baseNet > 0 ? 'BULLISH' : baseNet < 0 ? 'BEARISH' : 'NEUTRAL';
+
+  /* ═══ L6.5 DEALER GAMMA REGIME — 10 ═════════════════════════════════ */
+  const gammaRegime = _dealerGammaRegime({
+    cprWidthClass: widthClass,
+    spotChangePct,
+    vixChangePct,
+    atmGamma: _safe(ceLeg.gamma),
+    marketCharacter: marketCharacter.label,
+    conditionBias: prelimBias,
+  });
+  const gammaBias = gammaRegime.bias;
+
+  // Pass 2 — full net with gamma's amplification contribution.
+  const rawNet = baseNet + contrib(gammaBias, WEIGHTS.gamma);
   // Normalise to ±100 (weights nominal-sum may differ from 100).
   const netScore = _round((rawNet / WEIGHT_SUM) * 100, 0);
   const absNet = Math.abs(netScore);
@@ -668,27 +903,27 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
     marketCondition = 'MIXED SIGNALS — WAIT FOR ALIGNMENT';
   }
 
-  /* ═══ L7. ALIGNMENT ENGINE — 0..6 engines agreeing ══════════════════ */
-  // The single most useful read: how many of the 6 directional engines
-  // agree with the dominant side. (Flow & FRVP included; CPR combined.)
+  /* ═══ L7. ALIGNMENT ENGINE — 0..7 engines agreeing ══════════════════ */
+  // How many of the directional engines agree with the dominant side.
   const alignEngines = [
-    { key: 'FRVP',    bias: auctionVoteBias },
-    { key: 'BREADTH', bias: breadthBias },
-    { key: 'CPR',     bias: cprBias },
-    { key: 'FLOW',    bias: flowBias },
-    { key: 'GREEKS',  bias: greeksBias },
-    { key: 'VIX',     bias: vixBias },
+    { key: 'FRVP',     bias: auctionVoteBias },
+    { key: 'BREADTH',  bias: breadthBias },
+    { key: 'CPR',      bias: cprBias },
+    { key: 'FLOW',     bias: flowBias },
+    { key: 'STRIKE',   bias: strikeMomentumBias },
+    { key: 'GREEKS',   bias: greeksBias },
+    { key: 'VIX',      bias: vixBias },
   ];
   const alignBull = alignEngines.filter(e => e.bias === 'BULLISH').length;
   const alignBear = alignEngines.filter(e => e.bias === 'BEARISH').length;
   const dominantSide = alignBull > alignBear ? 'BULLISH' : alignBear > alignBull ? 'BEARISH' : 'NEUTRAL';
   const alignCount = dominantSide === 'BULLISH' ? alignBull : dominantSide === 'BEARISH' ? alignBear : Math.max(alignBull, alignBear);
-  const alignTotal = alignEngines.length; // 6
+  const alignTotal = alignEngines.length; // 7
   const alignGrade =
-    alignCount >= 6 ? { label: 'INSTITUTIONAL SETUP', tier: 'A+', tone: dominantSide === 'BEARISH' ? 'strongbear' : 'strongbull' } :
-    alignCount === 5 ? { label: 'HIGH CONVICTION', tier: 'A', tone: dominantSide === 'BEARISH' ? 'bear' : 'bull' } :
-    alignCount === 4 ? { label: 'TRADABLE', tier: 'B', tone: dominantSide === 'BEARISH' ? 'bear' : 'bull' } :
-    alignCount === 3 ? { label: 'WAIT', tier: 'C', tone: 'neutral' } :
+    alignCount >= 7 ? { label: 'INSTITUTIONAL SETUP', tier: 'A+', tone: dominantSide === 'BEARISH' ? 'strongbear' : 'strongbull' } :
+    alignCount === 6 ? { label: 'HIGH CONVICTION', tier: 'A', tone: dominantSide === 'BEARISH' ? 'bear' : 'bull' } :
+    alignCount === 5 ? { label: 'TRADABLE', tier: 'B', tone: dominantSide === 'BEARISH' ? 'bear' : 'bull' } :
+    alignCount === 4 ? { label: 'WATCH', tier: 'C', tone: 'neutral' } :
     { label: 'NO TRADE', tier: 'D', tone: 'neutral' };
   const alignmentEngine = {
     count: alignCount,
@@ -717,9 +952,11 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
       { engine: 'BREADTH',        weight: WEIGHTS.breadth, value: `${breadthPct}%`, verdict: breadthZone.label, tone: breadthZone.tone },
       { engine: 'CPR',            weight: WEIGHTS.cpr,     value: `${priceLocation} · ${cprFrvpAlignment.label}`, verdict: cprBias === 'BULLISH' ? 'BULLISH' : cprBias === 'BEARISH' ? 'BEARISH' : 'NEUTRAL', tone: cprBias === 'BULLISH' ? 'bull' : cprBias === 'BEARISH' ? 'bear' : 'neutral' },
       { engine: 'FLOW',           weight: WEIGHTS.flow,    value: `Δ ${deltaPct >= 0 ? '+' : ''}${_round(deltaPct, 1)} · Buy ${bsBuyersPct}%`, verdict: flowLabel.replace('FLOW ', ''), tone: flowBias === 'BULLISH' ? 'bull' : flowBias === 'BEARISH' ? 'bear' : 'neutral' },
+      { engine: 'STRIKE MOMENTUM', weight: WEIGHTS.strikeMomentum, value: `CE ${strikeMomentum.ceScore} / PE ${strikeMomentum.peScore}`, verdict: strikeMomentum.state, tone: strikeMomentum.tone, greeks: true },
       { engine: 'GREEKS (ATM)',   weight: WEIGHTS.greeks,  value: `CE ${ceScore} / PE ${peScore} · PEX ${premiumScore}`, verdict: greeksSide === 'CE' ? 'CE DOMINANT' : greeksSide === 'PE' ? 'PE DOMINANT' : 'BALANCED', tone: greeksBias === 'BULLISH' ? 'bull' : greeksBias === 'BEARISH' ? 'bear' : 'neutral', greeks: true },
       { engine: 'IT SECTOR',      weight: WEIGHTS.it,      value: `${itChangePct >= 0 ? '+' : ''}${itChangePct}%`, verdict: itBias === 'BULLISH' ? 'SUPPORTING' : itBias === 'BEARISH' ? 'DRAGGING' : 'NEUTRAL', tone: itZone.tone },
       { engine: 'VIX',            weight: WEIGHTS.vix,     value: `${_round(vix, 2)} (${vixChangePct >= 0 ? '+' : ''}${_round(vixChangePct, 2)}%)`, verdict: vixBias === 'BULLISH' ? 'RISK ON' : vixBias === 'BEARISH' ? 'RISK OFF' : 'STABLE', tone: vixBias === 'BULLISH' ? 'bull' : vixBias === 'BEARISH' ? 'bear' : 'neutral' },
+      { engine: 'DEALER GAMMA',   weight: WEIGHTS.gamma,   value: `${gammaRegime.regime} · ${gammaRegime.premium}`, verdict: gammaBias === 'BULLISH' ? 'AMPLIFY ↑' : gammaBias === 'BEARISH' ? 'AMPLIFY ↓' : 'NEUTRAL', tone: gammaRegime.tone },
     ],
     condition: marketCondition,
     conditionBias,
@@ -728,46 +965,51 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
       { label: 'BREADTH ALIGNED',   ok: breadthBias !== 'NEUTRAL' },
       { label: 'CPR + FRVP ALIGN',  ok: cprFrvpAlignment.strength === 'STRONG' },
       { label: 'FLOW CONFIRMING',   ok: flowBias !== 'NEUTRAL' },
+      { label: 'STRIKE MOMENTUM',   ok: strikeMomentum.ready && strikeMomentum.score >= 60 },
       { label: 'GREEKS CONFIRMING', ok: greeksConfirm },
-      { label: 'PREMIUM EXPANDING', ok: premiumState === 'EXPANDING' },
+      { label: 'PREMIUM EXPANDING', ok: premiumState === 'EXPANDING' || gammaRegime.premium === 'EXPANSION' },
     ],
     allAlign: allBull || allBear,
     alignText: alignmentEngine.text,
   };
 
-  /* ═══ L9. FINAL VERDICT — GREEKS-GATED + ALIGNMENT-GRADED ════════════ */
-  // Confidence blends net-score strength with alignment depth.
-  const confidence10 = _clamp(
-    _round(3 + (absNet / 100) * 4 + (alignCount / alignTotal) * 2.5 + (vix < 14 ? 0.5 : 0), 1),
-    1, 10
-  );
-  const stars = _clamp(Math.round(alignCount * 0.85), 1, 5);
+  /* ═══ L9. FINAL VERDICT — GREEKS-GATED + ALIGNMENT-GRADED + TIME-AWARE ═ */
+  // Time-of-day phase multiplier (expansion windows boost, theta zone trims).
+  const timeOfDay = _timeOfDay(v2.isToday);
+  // Confidence blends net-score strength with alignment depth, then scaled by
+  // the time-of-day multiplier.
+  const baseConfidence = 3 + (absNet / 100) * 4 + (alignCount / alignTotal) * 2.5 + (vix < 14 ? 0.5 : 0);
+  const confidence10 = _clamp(_round(baseConfidence * timeOfDay.multiplier, 1), 1, 10);
+  const stars = _clamp(Math.round((alignCount / alignTotal) * 5), 1, 5);
   const strengthLabel = absNet >= 60 ? 'STRONG' : absNet >= 35 ? 'MODERATE' : absNet >= 20 ? 'MILD' : 'WEAK';
 
   // A BUY SETUP requires: directional condition + greeks confirm the side +
-  // at least 4/6 engines aligned (Tradable). Otherwise it stays a BIAS.
+  // at least 4/7 engines aligned. Theta-zone (non-buyer-friendly time) blocks
+  // fresh buy setups → downgraded to a BIAS.
   const alignmentOk = alignCount >= 4;
   let setup, setupBias, tradePlan, greeksGate;
   if (conditionBias === 'BULLISH') {
     setupBias = 'BULLISH';
-    if (greeksBias === 'BULLISH' && alignmentOk) {
+    if (greeksBias === 'BULLISH' && alignmentOk && timeOfDay.buyerFriendly) {
       setup = 'CE BUY SETUP';
-      tradePlan = (alignCount >= 5 && absNet >= 55) ? 'BUY CE ON DIP' : 'BUY CE ON CONFIRMATION';
+      tradePlan = (alignCount >= 6 && absNet >= 55) ? 'BUY CE ON DIP' : 'BUY CE ON CONFIRMATION';
       greeksGate = 'CONFIRMED';
     } else {
       setup = 'BULLISH BIAS';
-      tradePlan = greeksBias !== 'BULLISH' ? 'AWAIT GREEKS CONFIRMATION' : 'AWAIT ALIGNMENT';
+      tradePlan = !timeOfDay.buyerFriendly ? `WAIT — ${timeOfDay.label.toUpperCase()}`
+        : greeksBias !== 'BULLISH' ? 'AWAIT GREEKS CONFIRMATION' : 'AWAIT ALIGNMENT';
       greeksGate = greeksBias === 'BULLISH' ? 'ALIGN-PENDING' : 'PENDING';
     }
   } else if (conditionBias === 'BEARISH') {
     setupBias = 'BEARISH';
-    if (greeksBias === 'BEARISH' && alignmentOk) {
+    if (greeksBias === 'BEARISH' && alignmentOk && timeOfDay.buyerFriendly) {
       setup = 'PE BUY SETUP';
-      tradePlan = (alignCount >= 5 && absNet >= 55) ? 'BUY PE ON RISE' : 'BUY PE ON CONFIRMATION';
+      tradePlan = (alignCount >= 6 && absNet >= 55) ? 'BUY PE ON RISE' : 'BUY PE ON CONFIRMATION';
       greeksGate = 'CONFIRMED';
     } else {
       setup = 'BEARISH BIAS';
-      tradePlan = greeksBias !== 'BEARISH' ? 'AWAIT GREEKS CONFIRMATION' : 'AWAIT ALIGNMENT';
+      tradePlan = !timeOfDay.buyerFriendly ? `WAIT — ${timeOfDay.label.toUpperCase()}`
+        : greeksBias !== 'BEARISH' ? 'AWAIT GREEKS CONFIRMATION' : 'AWAIT ALIGNMENT';
       greeksGate = greeksBias === 'BEARISH' ? 'ALIGN-PENDING' : 'PENDING';
     }
   } else {
@@ -793,6 +1035,10 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
       premiumState,                   // EXPANDING | NEUTRAL | DECAYING
       flowState: flowBias === 'BULLISH' ? 'BUYERS ACTIVE' : flowBias === 'BEARISH' ? 'SELLERS ACTIVE' : 'TWO-SIDED',
       auctionZone,
+      strikeMomentum: strikeMomentum.state,
+      gammaRegime: gammaRegime.regime,
+      timePhase: timeOfDay.label,
+      timeMultiplier: timeOfDay.multiplier,
     },
     cells: [
       { label: 'TREND',       value: trendBias === 'BULLISH' ? 'UP' : trendBias === 'BEARISH' ? 'DOWN' : 'FLAT', icon: trendBias === 'BULLISH' ? 'up' : trendBias === 'BEARISH' ? 'down' : 'flat', tone: trendBias === 'BULLISH' ? 'bull' : trendBias === 'BEARISH' ? 'bear' : 'neutral' },
@@ -832,6 +1078,9 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
     cprEngine,
     auctionEngine,
     flowEngine,
+    strikeMomentum,
+    gammaRegime,
+    timeOfDay,
     trendView,
     greeksEngine,
     marketCharacter,
@@ -839,13 +1088,16 @@ async function getDecision({ symbol = 'NIFTY_50', date = null } = {}) {
     logicMatrix,
     finalVerdict,
 
-    goldenRule: 'AUCTION TELLS LOCATION · BREADTH TELLS TRUTH · FLOW + GREEKS CONFIRM STRENGTH',
+    goldenRule: 'AUCTION TELLS LOCATION · BREADTH TELLS TRUTH · FLOW + GREEKS + STRIKE MOMENTUM CONFIRM STRENGTH',
 
     debug: {
-      netScore, rawNet, weightSum: WEIGHT_SUM,
+      netScore, rawNet, baseNet, weightSum: WEIGHT_SUM,
       alignBull, alignBear, alignCount, dominantSide,
-      conditionBias, greeksGate,
+      conditionBias, prelimBias, greeksGate,
       greeksSide, ceScore, peScore, premiumScore, premiumState,
+      strikeMomentumScore: strikeMomentum.score, strikeMomentumSide: strikeMomentum.side,
+      gammaRegime: gammaRegime.regime, gammaBias,
+      timePhase: timeOfDay.phase, timeMultiplier: timeOfDay.multiplier,
       auctionZone, auctionBias, flowBias, cprBias,
       leadershipBias, participationVsLeadership,
       cprRelationMethod: cprRelation.method,

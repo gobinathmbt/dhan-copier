@@ -8,20 +8,33 @@ This document explains **every function and every piece of logic** used in the I
 Master Engine Dashboard — the data it consumes, the thresholds for each engine, the
 weighted scoring, the greeks-gated verdict, and how the frontend renders it.
 
-> **v3 upgrade note (institutional layering):** V6 now adds three institutional
-> layers on top of the prior engines — **L0 Auction (FRVP)**, **L4 Flow Confirmation**,
-> and **L7 Alignment Engine** — plus **heavyweight leadership** in Breadth, a
+> **v4 upgrade note (premium-behaviour layers):** V6 now adds three more
+> institutional layers that directly measure **premium expansion** — the core
+> objective of an option buyer:
+> **L5.5 Strike Momentum (ATM ± 2)**, **L6.5 Dealer Gamma Regime**, and a
+> **Time-of-Day Engine** (confidence multiplier). Alignment expanded from 6 → **7
+> directional engines**, and the verdict is now **time-aware** (theta-zone blocks
+> fresh buys).
+>
+> **New weighted decision (premium-aware):**
+> `Auction 18 · Breadth 20 · CPR 18 · Flow 10 · Strike-Momentum 15 · Greeks 12 ·
+> IT 8 · VIX 7 · Gamma 10` (nominal sum 118; net score normalised to ±100). Premium-
+> behaviour layers (Strike Momentum + Greeks + Flow = 37) now outweigh any single
+> structural engine.
+>
+> **Final Verdict gating:** directional condition **+** greeks confirm **+** ≥ 4/7
+> aligned **+** buyer-friendly time-of-day → BUY SETUP; otherwise it stays a BIAS.
+>
+> **v3 upgrade note (institutional layering):** V6 added three layers on top of the
+> prior engines — **L0 Auction (FRVP)**, **L4 Flow Confirmation**, and
+> **L7 Alignment Engine** — plus **heavyweight leadership** in Breadth, a
 > **CPR + FRVP alignment** read, and a **Premium Expansion Score** in Greeks. The
-> Final Verdict is now both **greeks-gated AND alignment-graded**.
+> Final Verdict became both **greeks-gated AND alignment-graded**.
 >
-> **New weighted decision (location-first):**
-> `Auction/FRVP 20 · Breadth 25 · CPR 20 · Flow 10 · Greeks 15 · IT 10 · VIX 10`
-> (net score normalised to ±100). The CPR weight now bundles location + value
-> migration + FRVP alignment.
->
-> **Layer stack:** L0 Auction → L1 Breadth(+Leadership) → L2 IT → L3 CPR(+FRVP align) →
-> L4 Flow → L5 Greeks(+Premium Expansion) → L6 VIX → **L7 Alignment (0–6)** →
-> L8 Logic Matrix → L9 Final Verdict (graded).
+> **Layer stack (current):** L0 Auction → L1 Breadth(+Leadership) → L2 IT →
+> L3 CPR(+FRVP align) → L4 Flow → L5 Greeks(+Premium Expansion) →
+> **L5.5 Strike Momentum** → L6 VIX → **L6.5 Dealer Gamma** → **L7 Alignment (0–7)** →
+> L8 Logic Matrix → L9 Final Verdict (greeks-gated · align-graded · time-aware).
 >
 > **Earlier upgrades retained:** true CPR value migration (today TC&BC vs yesterday),
 > finer breadth tiers (56% = Mild Bull), CE-vs-PE greeks dominance, Market Character
@@ -326,16 +339,25 @@ gamma trend → RISING/FADING/STEADY), CHARACTER (Market Character label).
   "breadthEngine": { advancing, declining, unchanged, total, pct, formula, zone, tone, bias, scale[] },
   "itEngine":      { changePct, members[], zone, tone, bias, summary, scale[] },
   "cprEngine":     { width, widthPct, levels, yesterday, priceLocation, territory,
-                     locationSub, locationBias, locationBanner, relation{…,method}, opening },
+                     locationSub, locationBias, locationBanner, relation{…,method}, alignment, opening },
+  "auctionEngine": { poc, vah, val, spot, zone, bias, desc, priceAbovePocPct, acceptance, scale[] },
+  "flowEngine":    { bias, label, deltaPct, futPremium, buyersPct, components[], desc },
+  "strikeMomentum":{ ready, score, ceScore, peScore, side, bias, state, tone, strikes[], desc },   // L5.5 (new)
+  "gammaRegime":   { regime, premium, bias, tone, score, atmGamma, desc },                          // L6.5 (new)
+  "timeOfDay":     { phase, label, multiplier, tone, buyerFriendly, desc },                         // (new)
   "trendView":     { active, rows[] },
   "greeksEngine":  { side, bias, confirm, dominance{ceScore,peScore,ce,pe},
-                     delta, gamma, vega, theta, allPositive, reading[] },
+                     delta, gamma, vega, theta, premiumExpansion, allPositive, reading[] },
   "marketCharacter": { label, desc, tone, inputs },
-  "logicMatrix":   { netScore, weights, rows[], condition, conditionBias, summary[], allAlign, alignText },
-  "finalVerdict":  { setup, bias, greeksGate, netScore, stars, confidence, confidenceText, cells[], tradePlan },
+  "alignmentEngine": { count, total(7), dominantSide, grade, gradeLabel, tone, text, rows[] },
+  "logicMatrix":   { netScore, weights(9), rows[], condition, conditionBias, summary[], allAlign, alignText },
+  "finalVerdict":  { setup, bias, greeksGate, netScore, stars, confidence, confidenceText,
+                     quality{alignment,grade,gradeLabel,premiumState,flowState,auctionZone,
+                             strikeMomentum,gammaRegime,timePhase,timeMultiplier}, cells[], tradePlan },
   "goldenRule": "...",
-  "debug": { netScore, bullCount, bearCount, conditionBias, greeksGate, greeksSide,
-             ceScore, peScore, cprRelationMethod, trendBias, character, itMembersFound, historySamples }
+  "debug": { netScore, rawNet, baseNet, alignBull, alignBear, alignCount, dominantSide, prelimBias,
+             greeksGate, greeksSide, ceScore, peScore, premiumScore, strikeMomentumScore,
+             gammaRegime, gammaBias, timePhase, timeMultiplier, … }
 }
 ```
 On failure: `{ ok:false, error, version:'v6' }`.
@@ -350,17 +372,23 @@ fetches once for a historical date; exposes `{ data, loading, error, lastFetchAt
 
 | Component | Renders |
 |-----------|---------|
-| `MasterDashboard` | Overall grid (Title · Row A · Greeks · Market Character · Logic+Verdict · Golden Rule) |
+| `MasterDashboard` | Overall grid (Title · Row0 Auction/Flow/Alignment · Row A · Greeks · **Strike-Momentum/Gamma/Time row** · Market Character · Logic+Verdict · Golden Rule) |
 | `TitleBar` | Date/time · title + index quote + VIX · Market Mode |
-| `BreadthEngine`+`Gauge`+`Stat` | Adv/Dec/Unch, % gauge, 7-tier scale |
+| `AuctionEngine`+`LevelChip` | **L0 FRVP** — price location vs VAH/POC/VAL + acceptance/trap badge |
+| `FlowEngine` | **L4** — FLOW BULLISH/BEARISH + Delta · Fut Prem · Buyers components |
+| `AlignmentEngine` | **L7** — n/7 count + grade (Institutional/High/Tradable/Watch) + per-engine ✓/✗ grid |
+| `BreadthEngine`+`Gauge`+`Stat` | Adv/Dec/Unch, % gauge, 7-tier scale + **heavyweight leadership row** |
 | `ItEngine` | NIFTY IT % + scale + summary |
-| `CprEngine`+`LevelRow`+`OpeningCol` | Width, levels, price location, opening map |
+| `CprEngine`+`LevelRow`+`OpeningCol` | Width, levels, price location, opening map + **CPR+FRVP alignment badge** |
 | `CprRelationship` | Value migration + **today vs yesterday TC/BC table** |
 | `TrendView` | 3-row trend vote |
-| `GreeksEngine`+`GreekCard`+`GreeksReading` | **CE/PE dominance bar** + 4 greek cards + reading |
+| `GreeksEngine`+`GreekCard`+`GreeksReading`+`PremiumExpansionBar` | **CE/PE dominance bar** + **Premium Expansion Score bar** + 4 greek cards + reading |
+| `StrikeMomentumPanel` | **L5.5** — ATM±2 score + per-strike CE/PE momentum bars (warming-up aware) |
+| `GammaRegimePanel` | **L6.5** — Dealer gamma regime + premium expansion/decay read |
+| `TimeOfDayPanel` | Session phase + confidence multiplier + buyer-friendly flag |
 | `MarketCharacter` | Day-type badge + breadth/CPR/VIX inputs |
-| `LogicMatrix` | Weighted rows (weight badges) + **net-score bipolar bar** + summary |
-| `FinalVerdict`+`Stars` | Setup + **Greeks Gate badge** + confidence + 4 cells + trade plan |
+| `LogicMatrix` | 9 weighted rows (weight badges) + **net-score bipolar bar** + summary |
+| `FinalVerdict`+`Stars`+`QualityCell` | Setup + **Greeks Gate badge** + confidence + **quality block (alignment·premium·flow + strike-momentum·gamma·time-phase)** + 4 cells + trade plan |
 | `GoldenRule` | Footer banner |
 | `ScaleTable` | Shared range→label rows |
 
@@ -375,50 +403,51 @@ CPR Relationship natural height (`shrink-0`) and Trend View the rest (`flex-1`).
 ## 19. Quick Reference — All Thresholds
 
 ```
-WEIGHTS:     Breadth 30 · CPR-Location 25 · CPR-Relation 15 · IT 10 · Greeks 10 · VIX 10
+WEIGHTS:     Auction 18 · Breadth 20 · CPR 18 · Flow 10 · Strike-Momentum 15 · Greeks 12 · IT 8 · VIX 7 · Gamma 10  (Σ=118)
 
+AUCTION:     spot>VAH ABOVE/Bull · spot<VAL BELOW/Bear · else INSIDE/Neutral (vote); rejected=trap→Neutral
 BREADTH %:   ≥75 ExtBull · 65-75 StrongBull · 55-65 MildBull · 45-55 Neutral
              35-45 MildBear · 25-35 StrongBear · <25 ExtBear
-             bias: ≥55 BULLISH · <45 BEARISH
+             bias: ≥55 BULLISH · <45 BEARISH ; LEADERSHIP from heavyweight impact (CONFIRMED/DIVERGENT)
 
 IT AVG %:    >1.5 SSupport · 0.5..1.5 Support · ±0.5 Neutral · -1.5..-0.5 Drag · <-1.5 HDrag
-             bias: ≥+0.5 BULLISH · ≤-0.5 BEARISH
-
 CPR LOC:     spot>TC ABOVE(Bull) · spot<BC BELOW(Bear) · else INSIDE(Neutral)
-CPR REL:     today TC>yTC & BC>yBC HIGHER(Bull) · both lower LOWER(Bear) · mixed OVERLAP(Neutral)
-             fallback: pivot vs priorClose
+CPR REL:     today TC&BC vs yesterday → HIGHER/LOWER/OVERLAP (fallback pivot vs priorClose)
+CPR ALIGN:   Above TC+Above VAH STRONG BULL · Above TC+inside WEAK BULL (mirror bear); CPR vote = majority of loc+rel+align
 CPR WIDTH:   narrow NARROW · wide WIDE · normal NORMAL
 
-GREEKS:      sideScore = |Δ|×60(cap35) + 25(Δ↑) + 20(V↑) + 12(Γ↑) + 8(IV↑)
-             dominant: CE>PE+8 → CE/BULLISH · PE>CE+8 → PE/BEARISH · else NEUTRAL
-             confirm: dominant side & Γ not↓ & V not↓ & |Θ|≤15
+FLOW:        2-of-3 vote — Delta(>±8) · FutPrem(>±5) · Buyers%(≥58/≤42)
+
+STRIKE MOM:  ATM±2; per side: premium%Δ(≤40)+OI%Δ(≤25)+freshOI(15)+vol(≤20) → avg CE vs PE
+             80+ INSTITUTIONAL · 60+ BUILDING · 40+ NEUTRAL · <40 DECAY (history-based)
+
+GREEKS:      sideScore = |Δ|×60(cap35) + 25(Δ↑) + 20(V↑) + 12(Γ↑) + 8(IV↑); CE>PE+8 → CE/BULL
+             PREMIUM EXPANSION = Δ↑35 + Γ↑25 + V↑25 + Θlow15 → ≥65 EXPANDING · ≥40 NEUTRAL · <40 DECAYING
 THETA |x|:   >15 HIGH/Seller · 8-15 MED/Neutral · <8 LOW/Buyer
 TREND eps:   Δ .01 · Γ .00003 · V .1 · IV .1 · Θ .4  (gamma/vega/theta abs)
 
 VIX:         chg≤-1 BULLISH · ≥+4 BEARISH; trend ≤-2 FALLING · ≥+4 RISING
+DEALER GAMMA: score from move/CPR-width/VIX/character → ≥+2 NEG-GAMMA/EXPANSION (votes WITH bias)
+             ≤-2 POS-GAMMA/DECAY (votes AGAINST) · else NEUTRAL  (amplifier, 2nd pass)
+TIME-OF-DAY: 09:15-10:15 ×1.15 · 10:15-12:00 ×1.00 · 12:00-14:00 ×0.80(theta) · 14:00-15:30 ×1.10 · pre/post ×0.70
+
 TREND VIEW:  ≥2 of {Breadth, IT, CPR-Loc} agree
 CHARACTER:   Panic / Expansion / Trend / Short-Cover / Range / Normal (priority order)
 MARKET MODE: (Bull breadth/trend & VIXchg≤5) RISK ON · Bear breadth RISK OFF · else NEUTRAL
 
-NET SCORE:   Σ contrib(bias, weight)  range -100..+100
-CONDITION:   ≥+20 BULLISH · ≤-20 BEARISH · else NEUTRAL
-             |net| ≥60 HIGH CONVICTION · ≥35 TILT · ≥20 MILD
-VERDICT:     bias + greeks CONFIRM → BUY SETUP · bias only → BIAS (gate PENDING) · neutral → NO TRADE
-CONFIDENCE:  clamp(round(3 + |net|/100×6 + (VIX<14?0.5:0)), 1, 10)
-STARS:       clamp(round(|net|/20), 1, 5)
+NET SCORE:   pass1 = Σ contrib(bias,weight) w/o gamma → prelimBias; pass2 += gamma; netScore = round(rawNet/118×100)
+CONDITION:   ≥+20 BULLISH · ≤-20 BEARISH · else NEUTRAL ; |net| ≥60 HIGH CONVICTION · ≥35 TILT · ≥20 MILD
+ALIGNMENT:   7 engines (FRVP,Breadth,CPR,Flow,Strike,Greeks,VIX); 7/7 A+ · 6/7 A · 5/7 B · 4/7 C · <4 D
+VERDICT:     condition + greeks CONFIRM + align≥4/7 + buyer-friendly time → BUY SETUP; else BIAS
+CONFIDENCE:  clamp((3 + |net|/100×4 + alignCount/7×2.5 + (VIX<14?0.5:0)) × timeMultiplier, 1, 10)
+STARS:       clamp(round(alignCount/7 × 5), 1, 5)
 ```
-
----
-
-*This dashboard is for educational purposes only. Always consult a financial advisor
-before trading.*
-
 
 ---
 
 ## 20. v3 Institutional Layers (detailed)
 
-### L0 — Auction Structure Engine (FRVP) · weight 20%
+### L0 — Auction Structure Engine (FRVP) · weight 18
 **Answers "where is price?" before "who is buying?".** Reads POC / VAH / VAL (from V2
 `flow.volume` or the FRVP institutional engine profile) + acceptance/rejection.
 - `spot > VAH` → **ABOVE VALUE** → BULLISH (NEUTRAL if rejected above VAH = bull trap)
@@ -444,9 +473,9 @@ Removes fake breakouts by combining CPR location with auction zone:
 | Inside CPR | — | **NO EDGE** |
 
 The **combined CPR bias** (location + value migration + FRVP alignment, majority vote)
-drives the 20% CPR weight.
+drives the 18% CPR weight.
 
-### L4 — Flow Confirmation Engine · weight 10%
+### L4 — Flow Confirmation Engine · weight 10
 Fuses three real-flow reads (majority vote, ≥2 agree):
 - **Delta** — V2 `flow.delta.deltaPct`: `>+8 bull`, `<−8 bear`.
 - **Futures Premium** — `>+5 bull`, `<−5 bear`.
@@ -460,33 +489,173 @@ the dominant side:
 partial credit). → **EXPANDING ≥65 · NEUTRAL ≥40 · DECAYING <40.**
 
 ### L7 — Alignment Engine (the headline read)
-Counts how many of the **6 directional engines** (FRVP, Breadth, CPR, Flow, Greeks, VIX)
-agree with the dominant side:
-- **6/6 → INSTITUTIONAL SETUP (A+)** · **5/6 → HIGH CONVICTION (A)** ·
-  **4/6 → TRADABLE (B)** · **3/6 → WAIT (C)** · **<3 → NO TRADE (D)**.
-Shown as a per-engine ✓/✗ grid.
+Counts how many of the directional engines agree with the dominant side. **v4 expanded
+this from 6 → 7 engines** (FRVP, Breadth, CPR, Flow, **Strike Momentum**, Greeks, VIX):
+- **7/7 → INSTITUTIONAL SETUP (A+)** · **6/7 → HIGH CONVICTION (A)** ·
+  **5/7 → TRADABLE (B)** · **4/7 → WATCH (C)** · **<4 → NO TRADE (D)**.
+Shown as a per-engine ✓/✗ grid. *(Dealer Gamma is not counted as a directional vote —
+it amplifies the prevailing side in the weighted score instead.)*
 
 ### Weighted Net Score (normalised)
 ```
-rawNet = Σ contrib(bias, weight)   // weights: FRVP20 Breadth25 CPR20 Flow10 Greeks15 IT10 VIX10
-netScore = round(rawNet / 110 × 100)        // → ±100
+rawNet = Σ contrib(bias, weight)
+  weights: FRVP18 Breadth20 CPR18 Flow10 StrikeMomentum15 Greeks12 IT8 VIX7 Gamma10
+netScore = round(rawNet / 118 × 100)        // → ±100
 condition: ≥+20 BULLISH · ≤−20 BEARISH · else NEUTRAL
 ```
+Gamma is applied in a **second pass**: pass 1 computes the net without gamma to get the
+prevailing bias, then gamma votes WITH it (expansion) or AGAINST it (decay/range).
 
-### L9 — Final Verdict (greeks-gated + alignment-graded)
-A directional condition becomes a **BUY SETUP** only when **both**:
+### L9 — Final Verdict (greeks-gated + alignment-graded + time-aware)
+A directional condition becomes a **BUY SETUP** only when **all**:
 1. Greeks confirm the same side, **and**
-2. Alignment ≥ **4/6** (Tradable).
+2. Alignment ≥ **4/7**, **and**
+3. Time-of-day is **buyer-friendly** (not the theta zone / pre/post-market).
 
-Otherwise it stays a **BIAS** with gate `PENDING` (greeks disagree) or `ALIGN-PENDING`
-(greeks agree but alignment < 4). The verdict now carries a **quality block**:
-`alignment (n/6 + grade) · premium state · flow state · auction zone`.
-- **Confidence /10** = `3 + |net|/100×4 + alignCount/6×2.5 + (VIX<14 ? 0.5)`.
-- **Stars** = `round(alignCount × 0.85)`.
+Otherwise it stays a **BIAS** with gate `PENDING` (greeks disagree), `ALIGN-PENDING`
+(greeks agree but alignment short), or a `WAIT — <PHASE>` plan in the theta zone. The
+verdict carries a **quality block**:
+`alignment (n/7 + grade) · premium state · flow state · auction zone · strike momentum ·
+gamma regime · time phase (×mult)`.
+- **Confidence /10** = `(3 + |net|/100×4 + alignCount/7×2.5 + (VIX<14 ? 0.5)) × timeMultiplier`.
+- **Stars** = `round(alignCount/7 × 5)`.
 
 ### New response fields
 `auctionEngine`, `flowEngine`, `alignmentEngine`, `breadthEngine.leadership`,
-`cprEngine.alignment`, `greeksEngine.premiumExpansion`, `finalVerdict.quality`.
+`cprEngine.alignment`, `greeksEngine.premiumExpansion`, `finalVerdict.quality`,
+**`strikeMomentum`**, **`gammaRegime`**, **`timeOfDay`**.
 
 ### Golden Rule (updated)
-> *AUCTION TELLS LOCATION · BREADTH TELLS TRUTH · FLOW + GREEKS CONFIRM STRENGTH*
+> *AUCTION TELLS LOCATION · BREADTH TELLS TRUTH · FLOW + GREEKS + STRIKE MOMENTUM CONFIRM STRENGTH*
+
+---
+
+## 20b. v4 Premium-Behaviour Layers (detailed)
+
+### L5.5 — Strike Momentum Engine (ATM ± 2) · weight 15
+**Question:** *Are institutions accumulating ATM / ATM+1 / ATM+2 before the move shows?*
+**Logic:** Snapshots the ATM ± 2 band each poll into `_strikeHistory` (30-min ring
+buffer). Against a ~6-min baseline, per strike & per side it scores:
+```
+premium %Δ  (≥15 → 40 · ≥6 → 26 · ≥0 → 12)
++ OI %Δ      (≥5 → 25 · ≥1 → 14)
++ fresh OIΔ>0 (long buildup) → 15
++ volume      (>1L → 20 · >20k → 10)        // 0..100 per side per strike
+```
+Averages CE-side vs PE-side across the band → dominant side + a 0–100 score:
+**80+ INSTITUTIONAL BUYING · 60+ MOMENTUM BUILDING · 40+ NEUTRAL · <40 DECAY ZONE.**
+History-based → reads *WARMING UP* until the buffer fills (live only).
+
+### L6.5 — Dealer Gamma Regime · weight 10
+**Question:** *Are dealers long or short gamma (range vs trend)?*
+**Logic:** We can't see dealer books directly, so infer from observable proxies already
+in V2 — realised move vs CPR width, VIX direction, market character. A signed score:
+```
++2 big realised move (|Δ%|≥0.5)   +1 narrow CPR   −1 wide CPR
++2 VIX rising (≥3)                 −1 VIX collapsing (≤−3)
++2 Trend/Expansion/Panic day       −2 Range day
+```
+- score **≥ +2 → NEGATIVE GAMMA / EXPANSION** (dealers hedge *with* the move → premium
+  expands → great for buyers).
+- score **≤ −2 → POSITIVE GAMMA / DECAY** (dealers hedge *against* → range / theta bleed).
+- else **NEUTRAL GAMMA / MIXED**.
+The regime is **not directional by itself** — it *amplifies* the prevailing bias
+(expansion votes WITH it, decay votes AGAINST it / fades the move).
+
+### Time-of-Day Engine · confidence multiplier (not a vote)
+**Question:** *Is this the right session window to buy?* Option buying behaves
+differently by phase, so the same score isn't equal at 09:25 vs 12:30.
+| IST window | Phase | Multiplier | Buyer-friendly |
+|------------|-------|-----------|----------------|
+| 09:15–10:15 | OPENING EXPANSION | ×1.15 | ✅ |
+| 10:15–12:00 | CONTINUATION | ×1.00 | ✅ |
+| 12:00–14:00 | THETA ZONE | ×0.80 | ❌ (blocks fresh buys) |
+| 14:00–15:30 | CLOSING EXPANSION | ×1.10 | ✅ |
+| pre / post | PRE/POST MARKET | ×0.70 | ❌ |
+Historical replay → neutral (×1.0). The multiplier scales final confidence; a
+non-buyer-friendly phase downgrades a would-be BUY SETUP to a BIAS with a
+`WAIT — <PHASE>` plan.
+
+
+---
+
+## 21. Live Output Snapshot (NIFTY 50 · 2026-05-27)
+
+Real `GET /api/intel-v6/decision` output with the v4 layers (trimmed). The history-based
+engines (Greeks trends, Strike Momentum) read warming/flat here because this was a single
+historical fetch; they populate over live 3-second polling, and the Time engine reads
+`HISTORICAL` (×1.0) on replay.
+
+```jsonc
+{
+  "ok": true, "version": "v6", "symbol": "NIFTY_50", "date": "2026-05-27",
+  "header": { "spot": 23924.25, "vix": 15.36, "vixChangePct": -7.16,
+              "marketMode": { "state": "RISK ON", "bias": "BULLISH" } },
+
+  "auctionEngine":  { "zone": "ABOVE VALUE", "bias": "BULLISH" },
+
+  "breadthEngine":  { "pct": 56, "zone": "MILD BULL", "bias": "BULLISH",
+                      "leadership": { "label": "LEADERS BULLISH", "totalImpact": 151.05,
+                                      "alignment": "5/8", "status": "CONFIRMED" } },
+
+  "cprEngine":      { "priceLocation": "BELOW BC", "relation": "OVERLAPPING CPR",
+                      "alignment": "WEAK BEAR" },
+
+  "flowEngine":     { "label": "FLOW BULLISH", "bias": "BULLISH" },
+
+  "strikeMomentum": { "ready": false, "score": 50, "side": "NEUTRAL", "state": "WARMING UP",
+                      "ceScore": 0, "peScore": 0,
+                      "strikes": [ "23800", "23850", "23900*", "23950", "24000" ],
+                      "desc": "Collecting ATM±2 premium history…" },
+
+  "gammaRegime":    { "regime": "NEUTRAL GAMMA", "premium": "MIXED", "bias": "NEUTRAL",
+                      "score": -1, "atmGamma": 0.001,
+                      "desc": "Mixed gamma regime — no strong dealer-flow edge." },
+
+  "timeOfDay":      { "phase": "HISTORICAL", "label": "Historical Replay",
+                      "multiplier": 1, "buyerFriendly": true },
+
+  "greeksEngine":   { "side": "NEUTRAL", "dominance": { "ceScore": 34, "peScore": 26 },
+                      "premiumExpansion": { "score": 35, "state": "DECAYING", "side": "CE" } },
+
+  "alignmentEngine":{ "count": 4, "total": 7, "dominantSide": "BULLISH",
+                      "grade": "C", "gradeLabel": "WATCH", "text": "4 / 7 ALIGNED",
+                      "rows": [ { "engine": "FRVP", "bias": "BULLISH", "aligned": true },
+                                { "engine": "BREADTH", "bias": "BULLISH", "aligned": true },
+                                { "engine": "CPR", "bias": "BEARISH", "aligned": false },
+                                { "engine": "FLOW", "bias": "BULLISH", "aligned": true },
+                                { "engine": "STRIKE", "bias": "NEUTRAL", "aligned": false },
+                                { "engine": "GREEKS", "bias": "NEUTRAL", "aligned": false },
+                                { "engine": "VIX", "bias": "BULLISH", "aligned": true } ] },
+
+  "logicMatrix":    { "netScore": 38, "condition": "BULLISH TILT — CE SETUP FORMING",
+                      "weights": { "frvp": 18, "breadth": 20, "cpr": 18, "flow": 10,
+                                   "strikeMomentum": 15, "greeks": 12, "it": 8, "vix": 7, "gamma": 10 } },
+
+  "finalVerdict":   { "setup": "BULLISH BIAS", "bias": "BULLISH", "greeksGate": "PENDING",
+                      "netScore": 38, "stars": 3, "confidence": 5.9,
+                      "quality": { "alignment": "4/7", "grade": "C", "gradeLabel": "WATCH",
+                                   "premiumState": "DECAYING", "flowState": "BUYERS ACTIVE",
+                                   "auctionZone": "ABOVE VALUE", "strikeMomentum": "WARMING UP",
+                                   "gammaRegime": "NEUTRAL GAMMA", "timePhase": "Historical Replay",
+                                   "timeMultiplier": 1 },
+                      "tradePlan": "AWAIT GREEKS CONFIRMATION" },
+
+  "goldenRule": "AUCTION TELLS LOCATION · BREADTH TELLS TRUTH · FLOW + GREEKS + STRIKE MOMENTUM CONFIRM STRENGTH"
+}
+```
+
+> Reading it: net score **+38** (BULLISH TILT) — Auction above value, breadth mild-bull
+> with leadership CONFIRMED, flow bullish, VIX risk-on. But the **verdict stays BULLISH
+> BIAS, not CE BUY SETUP**, because the premium-behaviour layers don't confirm:
+> **Greeks NEUTRAL** (CE 34 / PE 26, premium DECAYING → gate PENDING), **Strike Momentum
+> WARMING UP** (no ATM±2 accumulation read yet), **Dealer Gamma NEUTRAL** (no expansion
+> tailwind), and only **4/7 aligned (grade C WATCH)** with CPR diverging bearish. The new
+> layers tighten the filter further: even a +38 structural tilt won't issue a buy until
+> premium actually expands — exactly the "direction ≠ premium expansion" discipline that
+> separates V6 (trade-decision engine) from V2 (market-intelligence engine).
+
+---
+
+*This dashboard is for educational purposes only. Always consult a financial advisor
+before trading.*

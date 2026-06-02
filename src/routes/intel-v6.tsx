@@ -129,6 +129,13 @@ function MasterDashboard({ data }: { data: V6Decision }) {
       {/* Row B: Greeks Engine (ATM) + Greeks Market Reading */}
       <GreeksEngine data={data} />
 
+      {/* Premium-behaviour row: Strike Momentum · Dealer Gamma · Time-of-Day */}
+      <div className="grid grid-cols-12 items-stretch gap-2">
+        <div className="col-span-6"><StrikeMomentumPanel data={data} /></div>
+        <div className="col-span-3"><GammaRegimePanel data={data} /></div>
+        <div className="col-span-3"><TimeOfDayPanel data={data} /></div>
+      </div>
+
       {/* Market Character strip */}
       <MarketCharacter data={data} />
 
@@ -790,6 +797,15 @@ function FinalVerdict({ data }: { data: V6Decision }) {
           <QualityCell label="Flow" value={fv.quality.flowState}
             tone={fv.quality.flowState.includes("BUYERS") ? "#22c55e" : fv.quality.flowState.includes("SELLERS") ? "#ef4444" : "#eab308"} />
         </div>
+        {/* Quality grade block — strike momentum + gamma + time phase */}
+        <div className="grid grid-cols-3 gap-1.5">
+          <QualityCell label="Strike Mom" value={fv.quality.strikeMomentum}
+            tone={fv.quality.strikeMomentum.includes("INSTITUTIONAL") ? "#22c55e" : fv.quality.strikeMomentum.includes("BUILDING") ? "#eab308" : fv.quality.strikeMomentum.includes("DECAY") ? "#ef4444" : "#94a3b8"} />
+          <QualityCell label="Gamma" value={fv.quality.gammaRegime.replace(" GAMMA", "")}
+            tone={fv.quality.gammaRegime.includes("NEGATIVE") ? "#22c55e" : fv.quality.gammaRegime.includes("POSITIVE") ? "#ef4444" : "#eab308"} />
+          <QualityCell label="Time" value={fv.quality.timePhase} sub={`×${fv.quality.timeMultiplier.toFixed(2)}`}
+            tone={fv.quality.timeMultiplier > 1 ? "#22c55e" : fv.quality.timeMultiplier < 1 ? "#ef4444" : "#94a3b8"} />
+        </div>
 
         <div className="grid grid-cols-4 gap-2">
           {fv.cells.map((c, i) => {
@@ -835,6 +851,88 @@ function QualityCell({ label, value, sub, tone }: { label: string; value: string
       <span className="text-center text-[12px] font-black uppercase leading-tight" style={{ color: tone }}>{value}</span>
       {sub ? <span className="text-[9px] uppercase text-white/45">{sub}</span> : null}
     </div>
+  );
+}
+
+/* ═══════════════ L5.5 STRIKE MOMENTUM (ATM±2) ═════════════════════════ */
+function StrikeMomentumPanel({ data }: { data: V6Decision }) {
+  const sm = data.strikeMomentum;
+  const color = tc(sm.tone);
+  return (
+    <Panel title="L5.5 · STRIKE MOMENTUM (ATM ± 2)" accent="#1e4d4a">
+      <div className="flex items-center gap-3 rounded border px-3 py-1.5"
+        style={{ background: `${color}14`, borderColor: `${color}55` }}>
+        <span className="font-mono text-[26px] font-black leading-none" style={{ color }}>{sm.score}</span>
+        <div className="flex flex-1 flex-col">
+          <span className="text-[14px] font-black uppercase tracking-wide" style={{ color }}>
+            {sm.state}{sm.side !== "NEUTRAL" ? ` · ${sm.side}` : ""}
+          </span>
+          <span className="text-[10px] leading-tight text-white/55">
+            CE {sm.ceScore ?? 0} / PE {sm.peScore ?? 0} · {sm.desc}
+          </span>
+        </div>
+      </div>
+      {/* per-strike CE vs PE momentum grid */}
+      <div className="grid grid-cols-5 gap-1.5">
+        {sm.strikes.map((s) => {
+          const sTone = s.side === "CE" ? "#22c55e" : s.side === "PE" ? "#ef4444" : "#64748b";
+          return (
+            <div key={s.strike} className="flex flex-col items-center rounded border px-1 py-1.5"
+              style={{ borderColor: s.isAtm ? "#f59e0b88" : "rgba(255,255,255,0.08)", background: "rgba(255,255,255,0.02)" }}>
+              <span className="font-mono text-[12px] font-black text-white/85">{s.strike}{s.isAtm ? "*" : ""}</span>
+              <div className="mt-1 flex w-full items-end justify-center gap-1" style={{ height: 26 }}>
+                <span className="w-2 rounded-sm bg-emerald-500" style={{ height: `${Math.max(4, s.ceMom)}%` }} title={`CE ${s.ceMom}`} />
+                <span className="w-2 rounded-sm bg-rose-500" style={{ height: `${Math.max(4, s.peMom)}%` }} title={`PE ${s.peMom}`} />
+              </div>
+              <span className="mt-0.5 text-[10px] font-black uppercase" style={{ color: sTone }}>{s.side}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="rounded px-2 py-0.5 text-center text-[10px] font-black uppercase tracking-wide"
+        style={{ background: `${color}1a`, color }}>
+        80+ INSTITUTIONAL · 60+ BUILDING · 40+ NEUTRAL · &lt;40 DECAY
+      </div>
+    </Panel>
+  );
+}
+
+/* ═══════════════ L6.5 DEALER GAMMA REGIME ═════════════════════════════ */
+function GammaRegimePanel({ data }: { data: V6Decision }) {
+  const g = data.gammaRegime;
+  const color = tc(g.tone);
+  return (
+    <Panel title="L6.5 · DEALER GAMMA" accent="#3a2a5f">
+      <div className="flex flex-1 flex-col items-center justify-center gap-1 py-1">
+        <span className="text-[18px] font-black uppercase tracking-wide" style={{ color }}>{g.regime}</span>
+        <span className="rounded px-2 py-0.5 text-[12px] font-black uppercase tracking-wide"
+          style={{ background: `${color}1f`, border: `1px solid ${color}66`, color }}>
+          PREMIUM {g.premium}
+        </span>
+        <span className="mt-1 text-center text-[11px] leading-tight text-white/60">{g.desc}</span>
+      </div>
+    </Panel>
+  );
+}
+
+/* ═══════════════ TIME-OF-DAY ENGINE ═══════════════════════════════════ */
+function TimeOfDayPanel({ data }: { data: V6Decision }) {
+  const t = data.timeOfDay;
+  const color = tc(t.tone);
+  const mPct = Math.round((t.multiplier - 1) * 100);
+  return (
+    <Panel title="TIME-OF-DAY" accent="#1e3a5f">
+      <div className="flex flex-1 flex-col items-center justify-center gap-1 py-1">
+        <span className="text-[16px] font-black uppercase tracking-wide" style={{ color }}>{t.label}</span>
+        <span className="font-mono text-[20px] font-black" style={{ color }}>
+          ×{t.multiplier.toFixed(2)}
+        </span>
+        <span className="text-[10px] font-bold uppercase" style={{ color: t.buyerFriendly ? "#22c55e" : "#ef4444" }}>
+          {t.buyerFriendly ? "BUYER FRIENDLY" : "TRIM CONVICTION"}{mPct !== 0 ? ` · ${mPct > 0 ? "+" : ""}${mPct}%` : ""}
+        </span>
+        <span className="mt-1 text-center text-[10px] leading-tight text-white/55">{t.desc}</span>
+      </div>
+    </Panel>
   );
 }
 
