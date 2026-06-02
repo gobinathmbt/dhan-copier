@@ -70,12 +70,13 @@ export interface V6CprEngine {
     r3: number; tc: number; pivot: number; bc: number; s3: number;
     r1: number; r2: number; s1: number; s2: number;
   };
+  yesterday: { tc: number; bc: number; pivot: number } | null;
   priceLocation: string;
   territory: string;
   locationSub: string;
   locationBias: V6Bias;
   locationBanner: string;
-  relation: { label: string; l1: string; l2: string; bias: V6Bias };
+  relation: { label: string; l1: string; l2: string; bias: V6Bias; method: string };
   opening: { gapUp: V6OpeningCol[]; flat: V6OpeningCol[]; gapDown: V6OpeningCol[] };
 }
 
@@ -90,7 +91,26 @@ export interface V6GreekBlock {
   scale: V6ScaleRow[];
 }
 
+export interface V6GreeksSide {
+  delta: number;
+  gamma: number;
+  vega: number;
+  iv: number;
+  deltaTrend: string;
+  vegaTrend: string;
+  gammaTrend: string;
+}
+
 export interface V6GreeksEngine {
+  side: "CE" | "PE" | "NEUTRAL";
+  bias: V6Bias;
+  confirm: boolean;
+  dominance: {
+    ceScore: number;
+    peScore: number;
+    ce: V6GreeksSide;
+    pe: V6GreeksSide;
+  };
   delta: V6GreekBlock & { bias: V6Bias; control: string };
   gamma: V6GreekBlock & { state: string };
   vega: V6GreekBlock & { iv: number; state: string };
@@ -99,8 +119,23 @@ export interface V6GreeksEngine {
   reading: Array<{ text: string; tone: string; active: boolean }>;
 }
 
+export interface V6MarketCharacter {
+  label: string;
+  desc: string;
+  tone: string;
+  inputs: {
+    breadthPct: number;
+    cprWidth: string;
+    vix: number;
+    vixChangePct: number;
+    vixTrend: string;
+  };
+}
+
 export interface V6LogicMatrix {
-  rows: Array<{ engine: string; value: string; verdict: string; tone: string; greeks?: boolean }>;
+  netScore: number;
+  weights: { breadth: number; cprLocation: number; cprRelation: number; it: number; greeks: number; vix: number };
+  rows: Array<{ engine: string; weight: number; value: string; verdict: string; tone: string; greeks?: boolean }>;
   condition: string;
   conditionBias: V6Bias;
   summary: Array<{ label: string; ok: boolean }>;
@@ -111,6 +146,8 @@ export interface V6LogicMatrix {
 export interface V6FinalVerdict {
   setup: string;
   bias: V6Bias;
+  greeksGate: "CONFIRMED" | "PENDING" | "N/A";
+  netScore: number;
   stars: number;
   confidence: number;
   confidenceText: string;
@@ -133,6 +170,7 @@ export interface V6Decision {
   cprEngine: V6CprEngine;
   trendView: V6TrendView;
   greeksEngine: V6GreeksEngine;
+  marketCharacter: V6MarketCharacter;
   logicMatrix: V6LogicMatrix;
   finalVerdict: V6FinalVerdict;
   goldenRule: string;

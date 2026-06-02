@@ -122,6 +122,9 @@ function MasterDashboard({ data }: { data: V6Decision }) {
       {/* Row B: Greeks Engine (ATM) + Greeks Market Reading */}
       <GreeksEngine data={data} />
 
+      {/* Market Character strip */}
+      <MarketCharacter data={data} />
+
       {/* Row C: Complete Logic Matrix | Final Verdict */}
       <div className="grid grid-cols-12 items-stretch gap-2">
         <div className="col-span-7"><LogicMatrix data={data} /></div>
@@ -390,14 +393,31 @@ function OpeningCol({ head, cols }: { head: string; cols: V6OpeningCol[] }) {
 
 /* ═══════════════ CPR RELATIONSHIP ═════════════════════════════════════ */
 function CprRelationship({ data }: { data: V6Decision }) {
-  const r = data.cprEngine.relation;
+  const c = data.cprEngine;
+  const r = c.relation;
   const color = tc(r.bias);
+  const y = c.yesterday;
   return (
     <Panel title="CPR RELATIONSHIP" accent="#3a2a5f">
-      <div className="flex flex-1 flex-col items-center justify-center py-2">
+      <div className="flex flex-1 flex-col items-center justify-center py-1">
         <span className="text-[20px] font-black uppercase tracking-wide" style={{ color }}>{r.label}</span>
-        <span className="mt-1.5 text-[14px] font-bold uppercase text-white/70">{r.l1}</span>
-        <span className="text-[14px] uppercase text-white/55">{r.l2}</span>
+        <span className="mt-1 text-[14px] font-bold uppercase text-white/70">{r.l1}</span>
+        <span className="text-[13px] uppercase text-white/55">{r.l2}</span>
+        {/* today vs yesterday TC/BC */}
+        <div className="mt-2 grid w-full grid-cols-3 gap-1 text-center text-[11px]">
+          <span className="text-white/40"></span>
+          <span className="font-bold text-white/55">TC</span>
+          <span className="font-bold text-white/55">BC</span>
+          <span className="text-left font-bold text-white/55">Today</span>
+          <span className="font-mono text-white/85">{c.levels.tc ? Math.round(c.levels.tc) : "—"}</span>
+          <span className="font-mono text-white/85">{c.levels.bc ? Math.round(c.levels.bc) : "—"}</span>
+          <span className="text-left font-bold text-white/55">Yest.</span>
+          <span className="font-mono text-white/65">{y?.tc ? Math.round(y.tc) : "—"}</span>
+          <span className="font-mono text-white/65">{y?.bc ? Math.round(y.bc) : "—"}</span>
+        </div>
+        {r.method === "pivot-fallback" ? (
+          <span className="mt-1 text-[9px] uppercase tracking-wide text-amber-400/70">pivot proxy (no prior CPR)</span>
+        ) : null}
       </div>
     </Panel>
   );
@@ -431,9 +451,25 @@ function TrendView({ data }: { data: V6Decision }) {
 /* ═══════════════ 4. GREEKS ENGINE (ATM) ═══════════════════════════════ */
 function GreeksEngine({ data }: { data: V6Decision }) {
   const g = data.greeksEngine;
+  const sideTone = g.side === "CE" ? "#22c55e" : g.side === "PE" ? "#ef4444" : "#eab308";
   return (
     <Panel title="4. GREEKS ENGINE ( ATM )">
-      <div className="grid h-full grid-cols-12 gap-2">
+      {/* CE vs PE dominance bar */}
+      <div className="flex items-center gap-3 rounded border border-white/10 bg-black/30 px-3 py-1.5">
+        <span className="text-[12px] font-bold uppercase tracking-wide text-white/55">CE / PE Dominance</span>
+        <span className="font-mono text-[14px] font-black text-emerald-400">CE {g.dominance.ceScore}</span>
+        <div className="flex h-2.5 flex-1 overflow-hidden rounded-full bg-white/10">
+          <div className="h-full bg-emerald-500" style={{ width: `${dominancePct(g.dominance.ceScore, g.dominance.peScore)}%` }} />
+          <div className="h-full bg-rose-500" style={{ width: `${100 - dominancePct(g.dominance.ceScore, g.dominance.peScore)}%` }} />
+        </div>
+        <span className="font-mono text-[14px] font-black text-rose-400">PE {g.dominance.peScore}</span>
+        <span className="rounded px-2 py-0.5 text-[13px] font-black uppercase tracking-wide"
+          style={{ background: `${sideTone}1f`, border: `1px solid ${sideTone}77`, color: sideTone }}>
+          {g.side === "CE" ? "CALL BUYERS ACTIVE" : g.side === "PE" ? "PUT BUYERS ACTIVE" : "BALANCED"}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-12 gap-2">
         <div className="col-span-2"><GreekCard name="DELTA" value={fmtSigned(g.delta.value, 2)} trend={g.delta.trend} sub={g.delta.control} subTone={tc(g.delta.bias)} scale={g.delta.scale} /></div>
         <div className="col-span-2"><GreekCard name="GAMMA" value={fmtSigned(g.gamma.value, 3)} trend={g.gamma.trend} sub={g.gamma.state} subTone="#22c55e" scale={g.gamma.scale} /></div>
         <div className="col-span-2"><GreekCard name="VEGA" value={fmtSigned(g.vega.value, 3)} trend={g.vega.trend} sub={g.vega.state} subTone="#22c55e" scale={g.vega.scale} /></div>
@@ -442,6 +478,12 @@ function GreeksEngine({ data }: { data: V6Decision }) {
       </div>
     </Panel>
   );
+}
+
+function dominancePct(ce: number, pe: number): number {
+  const tot = ce + pe;
+  if (tot <= 0) return 50;
+  return Math.round((ce / tot) * 100);
 }
 
 function GreekCard({
@@ -502,15 +544,16 @@ function LogicMatrix({ data }: { data: V6Decision }) {
   const lm = data.logicMatrix;
   const condTone = tc(lm.conditionBias);
   return (
-    <Panel title="5. COMPLETE LOGIC MATRIX ( FINAL VIEW )">
+    <Panel title="5. COMPLETE LOGIC MATRIX ( WEIGHTED )">
       <div className="grid h-full grid-cols-[1fr_auto] gap-3">
         {/* left: engine rows */}
         <div className="flex flex-1 flex-col justify-around gap-1">
           {lm.rows.map((row, i) => {
             const color = tc(row.tone);
             return (
-              <div key={i} className="grid grid-cols-[120px_1fr_auto] items-center gap-2 rounded px-2 py-1.5 text-[13px]"
+              <div key={i} className="grid grid-cols-[44px_110px_1fr_auto] items-center gap-2 rounded px-2 py-1.5 text-[13px]"
                 style={{ background: "rgba(255,255,255,0.02)" }}>
+                <span className="rounded bg-white/10 px-1 py-0.5 text-center font-mono text-[11px] font-bold text-cyan-300">{row.weight}%</span>
                 <span className="font-bold uppercase tracking-wide text-white/60">{row.engine}</span>
                 <span className={`font-mono ${row.greeks ? "text-[11px]" : ""} font-bold`} style={{ color }}>{row.value}</span>
                 <span className="text-right font-bold uppercase" style={{ color }}>{row.verdict}</span>
@@ -523,12 +566,28 @@ function LogicMatrix({ data }: { data: V6Decision }) {
           </div>
         </div>
 
-        {/* right: logic summary checklist */}
+        {/* right: net score + logic summary checklist */}
         <div className="flex w-[230px] flex-col justify-center rounded border border-white/10 bg-black/30 p-2">
-          <span className="mb-2 text-center text-[13px] font-bold uppercase tracking-wide text-white/55">Logic Summary</span>
+          <div className="mb-2 flex flex-col items-center">
+            <span className="text-[11px] font-bold uppercase tracking-wide text-white/45">Net Score</span>
+            <span className="font-mono text-[24px] font-black leading-none" style={{ color: condTone }}>
+              {lm.netScore >= 0 ? "+" : ""}{lm.netScore}
+            </span>
+            {/* bipolar bar -100..+100 */}
+            <div className="relative mt-1 h-2.5 w-full overflow-hidden rounded-full bg-white/10">
+              <div className="absolute left-1/2 top-0 h-full w-px bg-white/40" />
+              <div className="absolute top-0 h-full"
+                style={{
+                  left: lm.netScore >= 0 ? "50%" : `${50 + lm.netScore / 2}%`,
+                  width: `${Math.abs(lm.netScore) / 2}%`,
+                  background: condTone,
+                }} />
+            </div>
+          </div>
+          <span className="mb-1 text-center text-[12px] font-bold uppercase tracking-wide text-white/55">Logic Summary</span>
           {lm.summary.map((s, i) => (
-            <div key={i} className="flex items-center gap-2 py-0.5 text-[13px]">
-              <span className="text-[15px]" style={{ color: s.ok ? "#22c55e" : "#64748b" }}>{s.ok ? "✔" : "○"}</span>
+            <div key={i} className="flex items-center gap-2 py-0.5 text-[12px]">
+              <span className="text-[14px]" style={{ color: s.ok ? "#22c55e" : "#64748b" }}>{s.ok ? "✔" : "○"}</span>
               <span className="uppercase" style={{ color: s.ok ? "rgba(255,255,255,0.8)" : "rgba(255,255,255,0.4)" }}>{s.label}</span>
             </div>
           ))}
@@ -546,28 +605,39 @@ function LogicMatrix({ data }: { data: V6Decision }) {
 function FinalVerdict({ data }: { data: V6Decision }) {
   const fv = data.finalVerdict;
   const color = tc(fv.bias);
+  const gateTone = fv.greeksGate === "CONFIRMED" ? "#22c55e" : fv.greeksGate === "PENDING" ? "#eab308" : "#64748b";
   return (
     <Panel title="6. FINAL VERDICT">
       <div className="flex h-full flex-col justify-around">
         <div className="text-center font-black uppercase leading-none tracking-wide"
-          style={{ color, fontSize: 48, textShadow: `0 0 16px ${color}44` }}>
+          style={{ color, fontSize: fv.setup.length > 12 ? 36 : 46, textShadow: `0 0 16px ${color}44` }}>
           {fv.setup}
         </div>
-        <div className="my-2 flex items-center justify-center gap-2">
+
+        {/* Greeks gate status */}
+        <div className="mt-1 flex items-center justify-center gap-2">
+          <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">Greeks Gate :</span>
+          <span className="rounded px-2 py-0.5 text-[12px] font-black uppercase tracking-wide"
+            style={{ background: `${gateTone}1f`, border: `1px solid ${gateTone}77`, color: gateTone }}>
+            {fv.greeksGate === "CONFIRMED" ? "✓ CONFIRMED" : fv.greeksGate === "PENDING" ? "⧗ AWAITING" : "—"}
+          </span>
+        </div>
+
+        <div className="my-1.5 flex items-center justify-center gap-2">
           <Stars value={fv.stars} />
-          <span className="ml-2 text-[15px] font-bold uppercase text-white/70">Confidence Level :</span>
+          <span className="ml-2 text-[15px] font-bold uppercase text-white/70">Confidence :</span>
           <span className="font-mono text-[18px] font-black" style={{ color }}>{fv.confidenceText}</span>
         </div>
 
         <div className="grid grid-cols-4 gap-2">
           {fv.cells.map((c, i) => {
             const cTone = tc(c.tone);
-            const arrow = c.icon === "up" ? "⬆" : c.icon === "down" ? "⬇" : c.label === "MOMENTUM" ? "📈" : c.label === "MARKET MODE" ? "🐂" : "";
+            const arrow = c.icon === "up" ? "⬆" : c.icon === "down" ? "⬇" : c.label === "MOMENTUM" ? "📈" : "";
             return (
               <div key={i} className="flex flex-col items-center rounded border border-white/10 bg-white/[0.02] px-1.5 py-2">
-                <span className="text-[12px] font-bold uppercase tracking-wide text-white/50">{c.label}</span>
-                <span className="text-[17px] font-black uppercase" style={{ color: cTone }}>{c.value}</span>
-                {arrow ? <span className="text-[16px]" style={{ color: cTone }}>{arrow}</span> : null}
+                <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">{c.label}</span>
+                <span className="text-[16px] font-black uppercase" style={{ color: cTone }}>{c.value}</span>
+                {arrow ? <span className="text-[15px]" style={{ color: cTone }}>{arrow}</span> : null}
               </div>
             );
           })}
@@ -576,8 +646,10 @@ function FinalVerdict({ data }: { data: V6Decision }) {
         <div className="mt-2 flex items-center justify-center gap-3 rounded border px-3 py-2.5"
           style={{ borderColor: `${color}66`, background: `${color}14` }}>
           <span className="text-[15px] font-bold uppercase tracking-wide text-white/70">TRADE PLAN :</span>
-          <span className="text-[19px] font-black uppercase tracking-wide" style={{ color }}>{fv.tradePlan}</span>
-          <span className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-500 text-[13px] text-black">✓</span>
+          <span className="text-[18px] font-black uppercase tracking-wide" style={{ color }}>{fv.tradePlan}</span>
+          {fv.greeksGate === "CONFIRMED" ? (
+            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-500 text-[13px] text-black">✓</span>
+          ) : null}
         </div>
       </div>
     </Panel>
@@ -590,6 +662,32 @@ function Stars({ value }: { value: number }) {
       {[0, 1, 2, 3, 4].map((i) => (
         <span key={i} className="text-[24px] leading-none" style={{ color: i < value ? "#22c55e" : "rgba(255,255,255,0.2)" }}>★</span>
       ))}
+    </div>
+  );
+}
+
+/* ═══════════════ MARKET CHARACTER ENGINE ══════════════════════════════ */
+function MarketCharacter({ data }: { data: V6Decision }) {
+  const mc = data.marketCharacter;
+  const color = tc(mc.tone);
+  const inp = mc.inputs;
+  return (
+    <div className="flex items-center gap-4 rounded border border-white/15 bg-[#0a0f17] px-4 py-2">
+      <span className="text-[13px] font-bold uppercase tracking-[0.12em] text-cyan-300">Market Character</span>
+      <span className="rounded px-3 py-1 text-[18px] font-black uppercase tracking-wide"
+        style={{ background: `${color}1f`, border: `1px solid ${color}77`, color }}>
+        {mc.label}
+      </span>
+      <span className="text-[13px] text-white/65">{mc.desc}</span>
+      <div className="ml-auto flex items-center gap-4 text-[12px]">
+        <span className="text-white/55">Breadth <span className="font-mono font-bold text-white/85">{inp.breadthPct}%</span></span>
+        <span className="text-white/55">CPR <span className="font-mono font-bold text-white/85">{inp.cprWidth}</span></span>
+        <span className="text-white/55">VIX <span className="font-mono font-bold text-white/85">{inp.vix}</span>
+          <span className="ml-1 font-mono font-bold" style={{ color: inp.vixChangePct <= 0 ? "#22c55e" : "#ef4444" }}>
+            ({inp.vixChangePct >= 0 ? "+" : ""}{inp.vixChangePct}%)
+          </span>
+        </span>
+      </div>
     </div>
   );
 }
