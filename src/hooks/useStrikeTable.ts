@@ -49,13 +49,15 @@ export function useStrikeTable({
     const tick = async () => {
       if (cancelled) return;
       if (typeof document !== "undefined" && document.hidden) {
-        timer = setTimeout(tick, intervalMs);
+        if (intervalMs > 0) timer = setTimeout(tick, intervalMs);
         return;
       }
       await fetchOnce();
       if (cancelled) return;
       // Historical (date-pinned) → fetch once, no repeat polling.
       if (date) return;
+      // intervalMs <= 0 → fetch once, no repeat polling.
+      if (!(intervalMs > 0)) return;
       timer = setTimeout(tick, intervalMs);
     };
     tick();

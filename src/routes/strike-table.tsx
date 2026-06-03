@@ -25,7 +25,9 @@ function StrikeTablePage() {
 
   const [symbol, setSymbol] = useState<StrikeSymbol>("NIFTY_50");
   const [date, setDate] = useState<string | null>(null);
-  const { data, loading, lastFetchAt, refetch } = useStrikeTable({ symbol, date, range: 6, intervalMs: 3000 });
+  const [range, setRange] = useState<number>(3);
+  // First 5-min ORB never changes after 09:20 — fetch once, no polling.
+  const { data, loading, lastFetchAt, refetch } = useStrikeTable({ symbol, date, range, intervalMs: 0 });
 
   return (
     <div className="strike-table-root fixed inset-0 left-3 flex flex-col bg-[#06090e] font-sans text-white">
@@ -33,7 +35,7 @@ function StrikeTablePage() {
         <div className="flex items-center gap-3">
           <span className="text-[15px] font-bold tracking-[0.16em] text-amber-300">STRIKE TABLE</span>
           <span className="text-[12px] uppercase tracking-[0.16em] text-white/50">
-            ATM ± 6 · First 5-min Range
+            ATM ± {range} · First 5-min Range
           </span>
           {data?.ok ? (
             <span
@@ -63,6 +65,20 @@ function StrikeTablePage() {
               </button>
             ))}
           </div>
+          <label className="flex items-center gap-1 rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[12px] text-white/65">
+            <span className="font-bold uppercase tracking-wider text-white/50">Strikes</span>
+            <select
+              value={range}
+              onChange={(e) => setRange(Number(e.target.value))}
+              className="bg-transparent text-[13px] font-bold text-amber-300 outline-none [color-scheme:dark]"
+            >
+              {[1, 2, 3, 4, 5, 6, 8, 10].map((n) => (
+                <option key={n} value={n} className="bg-[#0a0e15] text-white">
+                  ± {n}
+                </option>
+              ))}
+            </select>
+          </label>
           <input
             type="date"
             value={date || todayIST()}
@@ -177,120 +193,81 @@ function Stat({ label, value, sub, subTone }: { label: string; value: string; su
 /* ── Strike grid — each strike is a column (CE top · PE bottom) ─────── */
 function Table({ data }: { data: StrikeTableResponse }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [overflow, setOverflow] = useState(false);
 
-  // On first render, scroll the ATM column into view (centered).
+  // On first render (or whenever the symbol/date changes), scroll the ATM
+  // column into view (centered).
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
+    setOverflow(el.scrollWidth > el.clientWidth + 1);
     const atmCol = el.querySelector<HTMLElement>('[data-atm="true"]');
     if (atmCol) {
       const target = atmCol.offsetLeft - el.clientWidth / 2 + atmCol.offsetWidth / 2;
       el.scrollTo({ left: Math.max(0, target), behavior: "auto" });
     }
-  }, [data.symbol, data.date, data.atm]);
+  }, [data.symbol, data.date, data.atm, data.range, data.rowCount]);
+
+  // Update overflow flag on resize
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => {
+      setOverflow(el.scrollWidth > el.clientWidth + 1);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const scrollBy = (dx: number) => {
     scrollRef.current?.scrollBy({ left: dx, behavior: "smooth" });
   };
 
-  return (
-    <div className="relative">
-      {/* row labels (sticky on the left) */}
-      <div className="absolute left-0 top-0 z-10 grid h-full w-[64px] grid-rows-[28px_24px_28px_24px] gap-0">
-        <div className="border-y border-r border-white/10 bg-[#0a0e15]" />
-        <RowLabel kind="ce-header">CE</RowLabel>
-        <div className="border-b border-r border-white/10 bg-[#0a0e15]" />
-        <RowLabel kind="pe-header">PE</RowLabel>
-      </div>
+  // Column min-width so each cell stays readable.
+  const COL_MIN = 200;
 
-      {/* scroll arrows */}
-      <button
-        onClick={() => scrollBy(-360)}
-        className="absolute left-[68px] top-[34px] z-20 flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-black/60 text-white/75 backdrop-blur transition-colors hover:bg-black/80"
-        aria-label="Scroll left"
-      >
-        ‹
-      </button>
-      <button
-        onClick={() => scrollBy(360)}
-        className="absolute right-2 top-[34px] z-20 flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-black/60 text-white/75 backdrop-blur transition-colors hover:bg-black/80"
-        aria-label="Scroll right"
-      >
-        ›
-      </button>
+  return (
+    <div className="relative w-full">
+      {/* scroll arrows (only when content overflows) */}
+      {overflow ? (
+        <>
+          <button
+            onClick={() => scrollBy(-480)}
+            className="absolute left-2 top-1/2 z-20 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-black/70 text-[18px] text-white/75 backdrop-blur transition-colors hover:bg-black/85"
+            aria-label="Scroll left"
+          >
+            ‹
+          </button>
+          <button
+            onClick={() => scrollBy(480)}
+            className="absolute right-2 top-1/2 z-20 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-black/70 text-[18px] text-white/75 backdrop-blur transition-colors hover:bg-black/85"
+            aria-label="Scroll right"
+          >
+            ›
+          </button>
+        </>
+      ) : null}
 
       {/* horizontal scroller */}
       <div
         ref={scrollRef}
-        className="overflow-x-auto rounded-xl border border-white/10 bg-[#0a0e15] pl-[64px]"
+        className="overflow-x-auto rounded-xl border border-white/10 bg-[#0a0e15]"
         style={{ scrollBehavior: "smooth" }}
       >
-        <div className="flex w-max">
+        <div
+          className="flex"
+          style={{
+            // When columns fit, stretch them to fill the container & center.
+            // When they overflow, keep min-width so cell text stays legible.
+            minWidth: "100%",
+            justifyContent: overflow ? "flex-start" : "center",
+          }}
+        >
           {data.rows.map((row) => (
-            <StrikeColumn key={row.strike} row={row} atm={data.atm} />
+            <StrikeColumn key={row.strike} row={row} minWidth={COL_MIN} grow={!overflow} />
           ))}
         </div>
       </div>
-    </div>
-  );
-}
-
-function RowLabel({ kind, children }: { kind: "ce-header" | "pe-header"; children: React.ReactNode }) {
-  const isCe = kind === "ce-header";
-  return (
-    <div
-      className={`flex items-center justify-center border-b border-r border-white/10 text-[11px] font-black uppercase tracking-[0.16em] ${
-        isCe ? "bg-sky-500/[0.10] text-sky-300" : "bg-rose-500/[0.10] text-rose-300"
-      }`}
-    >
-      {children}
-    </div>
-  );
-}
-
-/* ── A single strike column: header · CE row · PE row ───────────────── */
-function StrikeColumn({ row, atm }: { row: StrikeRow; atm: number }) {
-  const ce = row.ce;
-  const pe = row.pe;
-  const isAtm = row.isAtm;
-  // CE is ITM when strike < spot (offset < 0), PE is ITM when strike > spot
-  const ceItm = row.offset < 0;
-  const peItm = row.offset > 0;
-  const ceTag = isAtm ? "(ATM)" : ceItm ? "ITM" : "OTM";
-  const peTag = isAtm ? "(ATM)" : peItm ? "ITM" : "OTM";
-
-  return (
-    <div
-      data-atm={isAtm ? "true" : undefined}
-      className="flex w-[180px] shrink-0 flex-col"
-      style={
-        isAtm
-          ? { boxShadow: "inset 0 0 0 2px rgba(56,189,248,0.85)" }
-          : undefined
-      }
-    >
-      {/* CE header */}
-      <ColHeader side="CE" isAtm={isAtm} tag={ceTag} strike={row.strike} />
-      {/* CE OPEN / HIGH / LOW */}
-      <CellRow
-        kind="ce"
-        open={ce.firstFiveOpen}
-        high={ce.firstFiveHigh}
-        low={ce.firstFiveLow}
-        ltp={ce.ltp}
-        itm={ceItm}
-      />
-      {/* PE header */}
-      <ColHeader side="PE" isAtm={isAtm} tag={peTag} strike={row.strike} />
-      {/* PE OPEN / HIGH / LOW */}
-      <CellRow
-        kind="pe"
-        open={pe.firstFiveOpen}
-        high={pe.firstFiveHigh}
-        low={pe.firstFiveLow}
-        ltp={pe.ltp}
-        itm={peItm}
-      />
     </div>
   );
 }
@@ -309,7 +286,7 @@ function ColHeader({
   const fg = isCe ? "text-sky-100" : "text-rose-100";
   return (
     <div
-      className={`flex h-7 items-center justify-center border-b border-r border-white/10 text-[11px] font-black uppercase tracking-[0.10em] ${bg} ${fg} ${
+      className={`flex h-10 items-center justify-center border-b border-r border-white/10 text-[13px] font-black uppercase tracking-[0.10em] ${bg} ${fg} ${
         isAtm ? "ring-1 ring-amber-300/70" : ""
       }`}
     >
@@ -317,9 +294,54 @@ function ColHeader({
     </div>
   );
 }
+function StrikeColumn({ row, minWidth, grow }: { row: StrikeRow; minWidth: number; grow: boolean }) {
+  const ce = row.ce;
+  const pe = row.pe;
+  const isAtm = row.isAtm;
+  // CE is ITM when strike < spot (offset < 0), PE is ITM when strike > spot
+  const ceItm = row.offset < 0;
+  const peItm = row.offset > 0;
+  const ceTag = isAtm ? "(ATM)" : ceItm ? "ITM" : "OTM";
+  const peTag = isAtm ? "(ATM)" : peItm ? "ITM" : "OTM";
+
+  return (
+    <div
+      data-atm={isAtm ? "true" : undefined}
+      className="flex shrink-0 flex-col"
+      style={{
+        minWidth,
+        flex: grow ? "1 1 0" : "0 0 auto",
+        boxShadow: isAtm ? "inset 0 0 0 2px rgba(56,189,248,0.85)" : undefined,
+      }}
+    >
+      {/* CE header */}
+      <ColHeader side="CE" isAtm={isAtm} tag={ceTag} strike={row.strike} />
+      {/* CE HIGH / LOW */}
+      <CellRow
+        kind="ce"
+        open={ce.firstFiveOpen}
+        high={ce.firstFiveHigh}
+        low={ce.firstFiveLow}
+        ltp={ce.ltp}
+        itm={ceItm}
+      />
+      {/* PE header */}
+      <ColHeader side="PE" isAtm={isAtm} tag={peTag} strike={row.strike} />
+      {/* PE HIGH / LOW */}
+      <CellRow
+        kind="pe"
+        open={pe.firstFiveOpen}
+        high={pe.firstFiveHigh}
+        low={pe.firstFiveLow}
+        ltp={pe.ltp}
+        itm={peItm}
+      />
+    </div>
+  );
+}
 
 function CellRow({
-  kind, open, high, low, ltp, itm,
+  kind, high, low, ltp, itm,
 }: {
   kind: "ce" | "pe";
   open: number | null;
@@ -329,38 +351,33 @@ function CellRow({
   itm: boolean;
 }) {
   return (
-    <div className="grid h-[24px] grid-cols-3 border-b border-r border-white/10">
-      <Cell label="OPEN" value={fmtNum(open)} kind={kind} itm={itm} />
-      <Cell label="HIGH" value={fmtNum(high)} kind={kind} itm={itm} highlight />
-      <Cell label="LOW" value={fmtNum(low)} kind={kind} itm={itm} />
+    <div className="grid h-12 grid-cols-2 border-b border-r border-white/10">
+      <Cell label="HIGH" value={fmtNum(high)} tone="high" />
+      <Cell label="LOW" value={fmtNum(low)} tone="low" />
       {/* Hidden helper — keep LTP for hover/title for reference */}
-      <span className="sr-only">{`${kind.toUpperCase()} LTP ${ltp}`}</span>
+      <span className="sr-only">{`${kind.toUpperCase()} LTP ${ltp} · ${itm ? "ITM" : "OTM"}`}</span>
     </div>
   );
 }
 
 function Cell({
-  label, value, kind, itm, highlight,
+  label, value, tone,
 }: {
   label: string;
   value: string;
-  kind: "ce" | "pe";
-  itm: boolean;
-  highlight?: boolean;
+  tone: "high" | "low";
 }) {
-  // Faint tint matching the side.
-  const baseBg = kind === "ce" ? "bg-sky-500/[0.04]" : "bg-rose-500/[0.04]";
-  // ITM cells get a slightly stronger tint.
-  const itmBg = itm ? (kind === "ce" ? "bg-sky-500/[0.08]" : "bg-rose-500/[0.08]") : baseBg;
-  const tone = kind === "ce" ? "text-sky-100" : "text-rose-100";
+  // High = light green, Low = light red — same vibe across CE & PE rows.
+  const bg = tone === "high" ? "bg-emerald-500/[0.18]" : "bg-rose-500/[0.18]";
+  const fg = tone === "high" ? "text-emerald-200" : "text-rose-200";
+  const dot = tone === "high" ? "text-emerald-400" : "text-rose-400";
   return (
     <div
-      className={`flex flex-col items-center justify-center border-r border-white/10 ${itmBg} px-1`}
+      className={`flex items-center justify-center gap-1.5 border-r border-white/10 ${bg} px-2`}
       title={label}
     >
-      <span
-        className={`font-mono text-[11px] font-bold tabular-nums ${tone} ${highlight ? "" : "opacity-90"}`}
-      >
+      <span className={`text-[10px] font-black uppercase tracking-[0.16em] ${dot}`}>{label}</span>
+      <span className={`font-mono text-[15px] font-black tabular-nums ${fg}`}>
         {value}
       </span>
     </div>
