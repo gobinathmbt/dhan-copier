@@ -4722,3 +4722,14 @@ module.exports = {
   getDualSnapshot,
   getAvailableDates,
 };
+
+// Augment __internals with helpers that are defined AFTER the initial
+// __internals declaration (e.g. _loadOptionChain, _activeAuthKey). Other
+// services (strikeTable, bridge) use these to fetch live option-chain
+// data that V2 already pulled from Dhan API or the recorded folder.
+Object.assign(module.exports.__internals, {
+  _loadOptionChain,
+  _activeAuthKey,
+  _computeAtm,
+  LIVE_FEED_DIR,
+});
