@@ -263,6 +263,24 @@ async function getStrikeTable({ symbol = 'NIFTY_50', date = null, range = 6 } = 
       fullChain = await I._loadOptionChain(authKey, sym, usedDate, isToday);
     }
   } catch (_) { /* fall through */ }
+  // Historical fallback: when option-chain.jsonl wasn't recorded for the
+  // chosen date, the folder chain is empty and there are no secIds to
+  // request candles with. Fall back to TODAY's chain — its secIds for
+  // contracts that still exist are also valid for past dates on Dhan's
+  // intraday endpoint.
+  const _hasUsableChain = (c) =>
+    c && Array.isArray(c.strikes) && c.strikes.length > 0
+    && c.strikes.some((s) => (s?.call?.securityId ?? s?.ce?.securityId) || (s?.put?.securityId ?? s?.pe?.securityId));
+  if (!_hasUsableChain(fullChain) && !isToday) {
+    try {
+      if (typeof I._loadOptionChain === 'function') {
+        const liveChain = await I._loadOptionChain(authKey, sym, /*date*/ null, /*isToday*/ true);
+        if (_hasUsableChain(liveChain)) {
+          fullChain = { ...liveChain, source: `${liveChain.source}:fallback-for-historical` };
+        }
+      }
+    } catch (_) { /* best effort */ }
+  }
 
   const anchor = _safe(v2.options?.atm, _safe(fullChain?.atm, Math.round(spot / step) * step));
 

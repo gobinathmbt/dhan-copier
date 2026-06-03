@@ -101,8 +101,14 @@ async function getStrikeChart({ symbol = 'NIFTY_50', date = null, offset = 3, in
   // → 6 lines per chart, all on round strikes.
 
   // 2. Pick the primary CE/PE legs from the table → look up their secIds
-  //    via the v2 internals (the strike table doesn't return secIds).
-  //    Easiest: re-load the option chain through intelV2 internals.
+  //    via the v2 internals.
+  //    For TODAY: load chain live from Dhan API.
+  //    For HISTORICAL: try the date's folder first; if that's empty (the
+  //    common case — option-chain.jsonl is rarely recorded), fall back to
+  //    loading the live chain and use those secIds to fetch the chosen
+  //    date's intraday candles. Dhan's intraday endpoint accepts any date
+  //    in the past 90 days regardless of when you ask, so as long as the
+  //    contract still exists this returns the correct historical candles.
   const I = intelV2.__internals || {};
   const authKey = I._activeAuthKey ? I._activeAuthKey() : null;
   let chain = null;
@@ -111,6 +117,19 @@ async function getStrikeChart({ symbol = 'NIFTY_50', date = null, offset = 3, in
       chain = await I._loadOptionChain(authKey, sym, usedDate, isToday);
     }
   } catch (_) { /* best effort */ }
+  // Historical fallback: load TODAY's chain to harvest the secIds.
+  const hasUsableChain = chain && Array.isArray(chain.strikes) && chain.strikes.length > 0
+    && chain.strikes.some((s) => (s?.call?.securityId ?? s?.ce?.securityId) || (s?.put?.securityId ?? s?.pe?.securityId));
+  if (!hasUsableChain && !isToday) {
+    try {
+      if (typeof I._loadOptionChain === 'function') {
+        const liveChain = await I._loadOptionChain(authKey, sym, /*date*/ null, /*isToday*/ true);
+        if (liveChain && Array.isArray(liveChain.strikes) && liveChain.strikes.length) {
+          chain = { ...liveChain, source: `${liveChain.source}:fallback-for-historical` };
+        }
+      }
+    } catch (_) { /* best effort */ }
+  }
 
   const strikeMap = new Map();
   if (chain && Array.isArray(chain.strikes)) {
@@ -188,6 +207,7 @@ async function getStrikeChart({ symbol = 'NIFTY_50', date = null, offset = 3, in
     offset: offN,
     interval: intv,
     source: isToday ? 'live' : 'folder',
+    chainSource: chain?.source || null,
     primary: {
       ce: {
         strike: atm,

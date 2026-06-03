@@ -43,12 +43,17 @@ function StrikeChartPage() {
   const [date, setDate] = useState<string | null>(null);
   const [offset, setOffset] = useState<number>(3);
   const [interval, setInterval] = useState<string>("5");
+  const [showLines, setShowLines] = useState<boolean>(true);
+  const [showMid, setShowMid] = useState<boolean>(false);
+  const [showPrimary, setShowPrimary] = useState<boolean>(false);
+  const [showOwn, setShowOwn] = useState<boolean>(false);
+  // Live (no date) → poll every 2s. Historical → fetch once.
   const { data, loading, lastFetchAt, refetch } = useStrikeChart({
     symbol,
     date,
     offset,
     interval,
-    intervalMs: 0, // fetch once + on control change; manual refresh still works
+    intervalMs: date ? 0 : 2000,
   });
 
   return (
@@ -79,6 +84,51 @@ function StrikeChartPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          <label className="flex cursor-pointer items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[12px] text-white/75 hover:bg-white/[0.08]">
+            <input
+              type="checkbox"
+              checked={showLines}
+              onChange={(e) => setShowLines(e.target.checked)}
+              className="h-3.5 w-3.5 cursor-pointer accent-amber-400"
+            />
+            <span className="font-bold uppercase tracking-wider">
+              Show Lines
+            </span>
+          </label>
+          <label className="flex cursor-pointer items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[12px] text-white/75 hover:bg-white/[0.08]">
+            <input
+              type="checkbox"
+              checked={showMid}
+              disabled={!showLines}
+              onChange={(e) => setShowMid(e.target.checked)}
+              className="h-3.5 w-3.5 cursor-pointer accent-orange-400 disabled:opacity-40"
+            />
+            <span className={`font-bold uppercase tracking-wider ${!showLines ? "text-white/30" : ""}`}>
+              Show Mid
+            </span>
+          </label>
+          <label className="flex cursor-pointer items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[12px] text-white/75 hover:bg-white/[0.08]">
+            <input
+              type="checkbox"
+              checked={showPrimary}
+              onChange={(e) => setShowPrimary(e.target.checked)}
+              className="h-3.5 w-3.5 cursor-pointer accent-blue-400"
+            />
+            <span className="font-bold uppercase tracking-wider">
+              Primary Line
+            </span>
+          </label>
+          <label className="flex cursor-pointer items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[12px] text-white/75 hover:bg-white/[0.08]">
+            <input
+              type="checkbox"
+              checked={showOwn}
+              onChange={(e) => setShowOwn(e.target.checked)}
+              className="h-3.5 w-3.5 cursor-pointer accent-emerald-400"
+            />
+            <span className="font-bold uppercase tracking-wider">
+              Own 5 Min
+            </span>
+          </label>
           <div className="flex rounded-md bg-white/[0.05] p-0.5">
             {(["NIFTY_50", "SENSEX"] as const).map((s) => (
               <button
@@ -159,7 +209,13 @@ function StrikeChartPage() {
             <div className="mt-2 text-[14px]">{data.error || "Unable to load strike chart."}</div>
           </div>
         ) : (
-          <ChartGrid data={data} />
+          <ChartGrid
+            data={data}
+            showLines={showLines}
+            showMid={showMid}
+            showPrimary={showPrimary}
+            showOwn={showOwn}
+          />
         )}
       </main>
     </div>
@@ -174,18 +230,40 @@ function todayIST(): string {
 /* ═══════════════════════════════════════════════════════════════════════
  * CHART GRID — two charts side-by-side
  * ═══════════════════════════════════════════════════════════════════════ */
-function ChartGrid({ data }: { data: StrikeChartResponse }) {
+function ChartGrid({
+  data,
+  showLines,
+  showMid,
+  showPrimary,
+  showOwn,
+}: {
+  data: StrikeChartResponse;
+  showLines: boolean;
+  showMid: boolean;
+  showPrimary: boolean;
+  showOwn: boolean;
+}) {
   return (
     <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-2">
       <LegChartCard
         side="CE"
         leg={data.primary.ce}
+        otherLeg={data.primary.pe}
         markers={data.markers.ceChart}
+        showLines={showLines}
+        showMid={showMid}
+        showPrimary={showPrimary}
+        showOwn={showOwn}
       />
       <LegChartCard
         side="PE"
         leg={data.primary.pe}
+        otherLeg={data.primary.ce}
         markers={data.markers.peChart}
+        showLines={showLines}
+        showMid={showMid}
+        showPrimary={showPrimary}
+        showOwn={showOwn}
       />
     </div>
   );
@@ -197,11 +275,21 @@ function ChartGrid({ data }: { data: StrikeChartResponse }) {
 function LegChartCard({
   side,
   leg,
+  otherLeg,
   markers,
+  showLines,
+  showMid,
+  showPrimary,
+  showOwn,
 }: {
   side: "CE" | "PE";
   leg: PrimaryLeg;
+  otherLeg: PrimaryLeg;
   markers: ChartMarker[];
+  showLines: boolean;
+  showMid: boolean;
+  showPrimary: boolean;
+  showOwn: boolean;
 }) {
   const isCe = side === "CE";
   const borderColor = isCe ? "rgba(56,189,248,0.55)" : "rgba(244,63,94,0.55)";
@@ -229,11 +317,27 @@ function LegChartCard({
         <div className="flex items-baseline gap-3 text-[11px] uppercase tracking-wider">
           <span className="text-emerald-300">5m H {fmt(leg.firstFiveHigh)}</span>
           <span className="text-rose-300">5m L {fmt(leg.firstFiveLow)}</span>
-          <span className="text-amber-300">{markers.length} {side === "CE" ? "PE" : "CE"} lines</span>
+          <span className={showLines ? "text-amber-300" : "text-white/30"}>
+            {showLines ? `${markers.length} ${side === "CE" ? "PE" : "CE"} lines` : "lines off"}
+          </span>
         </div>
       </div>
       <div className="min-h-[420px] flex-1">
-        <CandleChart side={side} candles={leg.candles} markers={markers} />
+        <CandleChart
+          side={side}
+          candles={leg.candles}
+          markers={showLines ? markers : []}
+          showMid={showLines && showMid}
+          ownHigh={leg.firstFiveHigh}
+          ownLow={leg.firstFiveLow}
+          ownStrike={leg.strike}
+          showOwn={showOwn}
+          primaryHigh={otherLeg.firstFiveHigh}
+          primaryLow={otherLeg.firstFiveLow}
+          primaryStrike={otherLeg.strike}
+          primarySide={side === "CE" ? "PE" : "CE"}
+          showPrimary={showPrimary}
+        />
       </div>
     </div>
   );
@@ -251,10 +355,30 @@ function CandleChart({
   side,
   candles,
   markers,
+  showMid,
+  ownHigh,
+  ownLow,
+  ownStrike,
+  showOwn,
+  primaryHigh,
+  primaryLow,
+  primaryStrike,
+  primarySide,
+  showPrimary,
 }: {
   side: "CE" | "PE";
   candles: ChartCandle[];
   markers: ChartMarker[];
+  showMid: boolean;
+  ownHigh: number;
+  ownLow: number;
+  ownStrike: number;
+  showOwn: boolean;
+  primaryHigh: number;
+  primaryLow: number;
+  primaryStrike: number;
+  primarySide: "CE" | "PE";
+  showPrimary: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -264,6 +388,15 @@ function CandleChart({
   // Chart marker line color: CE chart → green, PE chart → red.
   const MARKER_COLOR = side === "CE" ? "#22c55e" : "#ef4444";
   const MARKER_WIDTH = 3;
+  // Mid line: light orange dotted, drawn between consecutive marker prices.
+  const MID_COLOR = "#fdba74"; // orange-300 (light orange)
+  const MID_WIDTH = 1;
+  // Primary cross-leg H/L: thick blue solid lines.
+  const PRIMARY_COLOR = "#3b82f6"; // blue-500
+  const PRIMARY_WIDTH = 3;
+  // Own H/L: thick dotted, CE → green, PE → red.
+  const OWN_COLOR = side === "CE" ? "#22c55e" : "#ef4444";
+  const OWN_WIDTH = 3;
 
   // Init chart
   useEffect(() => {
@@ -318,10 +451,12 @@ function CandleChart({
       chartRef.current = null;
       seriesRef.current = null;
       priceLinesRef.current = [];
+      lastCandleCountRef.current = 0;
     };
   }, [side]);
 
   // Push candles
+  const lastCandleCountRef = useRef<number>(0);
   useEffect(() => {
     const series = seriesRef.current;
     const chart = chartRef.current;
@@ -336,7 +471,12 @@ function CandleChart({
         close: c.close,
       }));
     series.setData(data);
-    if (data.length > 0) chart.timeScale().fitContent();
+    // Only auto-fit on first load (or major reset). Otherwise, preserve the
+    // user's current zoom/scroll across the 2-second polling refreshes.
+    if (data.length > 0 && lastCandleCountRef.current === 0) {
+      chart.timeScale().fitContent();
+    }
+    lastCandleCountRef.current = data.length;
   }, [candles]);
 
   // Draw / update marker price lines
@@ -361,7 +501,83 @@ function CandleChart({
       });
       priceLinesRef.current.push(ln);
     }
-  }, [markers, MARKER_COLOR, MARKER_WIDTH]);
+    // Mid lines: dotted light-orange, halfway between every pair of
+    // consecutive marker prices (sorted by price ascending).
+    if (showMid && markers && markers.length >= 2) {
+      const prices = markers
+        .filter((m) => m.price > 0)
+        .map((m) => m.price)
+        .sort((a, b) => a - b);
+      for (let i = 0; i < prices.length - 1; i++) {
+        const mid = (prices[i] + prices[i + 1]) / 2;
+        const ln = series.createPriceLine({
+          price: mid,
+          color: MID_COLOR,
+          lineWidth: MID_WIDTH as 1 | 2 | 3 | 4,
+          lineStyle: LineStyle.Dotted,
+          axisLabelVisible: true,
+          title: `mid ${mid.toFixed(2)}`,
+        });
+        priceLinesRef.current.push(ln);
+      }
+    }
+    // Primary cross-leg HIGH / LOW: thick BLUE solid lines drawn on this
+    // chart at the OTHER leg's first-5-min H/L levels.
+    if (showPrimary) {
+      if (primaryHigh > 0) {
+        const ln = series.createPriceLine({
+          price: primaryHigh,
+          color: PRIMARY_COLOR,
+          lineWidth: PRIMARY_WIDTH as 1 | 2 | 3 | 4,
+          lineStyle: LineStyle.Solid,
+          axisLabelVisible: true,
+          title: `${primarySide} ${primaryStrike} 5m H`,
+        });
+        priceLinesRef.current.push(ln);
+      }
+      if (primaryLow > 0) {
+        const ln = series.createPriceLine({
+          price: primaryLow,
+          color: PRIMARY_COLOR,
+          lineWidth: PRIMARY_WIDTH as 1 | 2 | 3 | 4,
+          lineStyle: LineStyle.Solid,
+          axisLabelVisible: true,
+          title: `${primarySide} ${primaryStrike} 5m L`,
+        });
+        priceLinesRef.current.push(ln);
+      }
+    }
+    // Own first-5-min H / L: thick DOTTED green (CE) or red (PE) lines.
+    if (showOwn) {
+      if (ownHigh > 0) {
+        const ln = series.createPriceLine({
+          price: ownHigh,
+          color: OWN_COLOR,
+          lineWidth: OWN_WIDTH as 1 | 2 | 3 | 4,
+          lineStyle: LineStyle.Dotted,
+          axisLabelVisible: true,
+          title: `${side} ${ownStrike} 5m H`,
+        });
+        priceLinesRef.current.push(ln);
+      }
+      if (ownLow > 0) {
+        const ln = series.createPriceLine({
+          price: ownLow,
+          color: OWN_COLOR,
+          lineWidth: OWN_WIDTH as 1 | 2 | 3 | 4,
+          lineStyle: LineStyle.Dotted,
+          axisLabelVisible: true,
+          title: `${side} ${ownStrike} 5m L`,
+        });
+        priceLinesRef.current.push(ln);
+      }
+    }
+  }, [
+    markers, MARKER_COLOR, MARKER_WIDTH,
+    showMid, MID_COLOR, MID_WIDTH,
+    showPrimary, primaryHigh, primaryLow, primaryStrike, primarySide, PRIMARY_COLOR, PRIMARY_WIDTH,
+    showOwn, ownHigh, ownLow, ownStrike, OWN_COLOR, OWN_WIDTH, side,
+  ]);
 
   return <div ref={containerRef} className="h-full w-full" />;
 }
