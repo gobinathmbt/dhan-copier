@@ -24,6 +24,7 @@ const NAV_ITEMS = [
   { to: "/intel-v6", label: "Intel V6 Master Engine", icon: Sigma },
   { to: "/intel-bridge", label: "Intel Bridge (V2→V6 Intent)", icon: GitMerge },
   { to: "/strike-table", label: "Strike Table (ATM ± 6 · 5min Range)", icon: TableProperties },
+  { to: "/strike-chart", label: "Strike Chart (CE/PE · cross-leg marker)", icon: LineChart },
   // { to: "/nifty50", label: "Nifty 50", icon: Target },
   { to: "/scalping", label: "Intraday Scalping Algo AI", icon: Brain },
   // { to: "/accounts", label: "Accounts", icon: Users },

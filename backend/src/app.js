@@ -27,6 +27,7 @@ const intelV5Routes = require('./routes/intelV5.routes');
 const intelV6Routes = require('./routes/intelV6.routes');
 const intelBridgeRoutes = require('./routes/intelBridge.routes');
 const strikeTableRoutes = require('./routes/strikeTable.routes');
+const strikeChartRoutes = require('./routes/strikeChart.routes');
 
 const app = express();
 
@@ -85,6 +86,7 @@ app.use('/api/intel-v5', intelV5Routes);
 app.use('/api/intel-v6', intelV6Routes);
 app.use('/api/intel-bridge', intelBridgeRoutes);
 app.use('/api/strike-table', strikeTableRoutes);
+app.use('/api/strike-chart', strikeChartRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);
