@@ -19,6 +19,7 @@ import { Route as IntelV5RouteImport } from './routes/intel-v5'
 import { Route as IntelV4RouteImport } from './routes/intel-v4'
 import { Route as IntelV3RouteImport } from './routes/intel-v3'
 import { Route as IntelV2RouteImport } from './routes/intel-v2'
+import { Route as IntelBridgeRouteImport } from './routes/intel-bridge'
 import { Route as IntelRouteImport } from './routes/intel'
 import { Route as CustomChartRouteImport } from './routes/custom-chart'
 import { Route as ChartRouteImport } from './routes/chart'
@@ -77,6 +78,11 @@ const IntelV2Route = IntelV2RouteImport.update({
   path: '/intel-v2',
   getParentRoute: () => rootRouteImport,
 } as any)
+const IntelBridgeRoute = IntelBridgeRouteImport.update({
+  id: '/intel-bridge',
+  path: '/intel-bridge',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const IntelRoute = IntelRouteImport.update({
   id: '/intel',
   path: '/intel',
@@ -119,6 +125,7 @@ export interface FileRoutesByFullPath {
   '/chart': typeof ChartRoute
   '/custom-chart': typeof CustomChartRoute
   '/intel': typeof IntelRoute
+  '/intel-bridge': typeof IntelBridgeRoute
   '/intel-v2': typeof IntelV2Route
   '/intel-v3': typeof IntelV3Route
   '/intel-v4': typeof IntelV4Route
@@ -138,6 +145,7 @@ export interface FileRoutesByTo {
   '/chart': typeof ChartRoute
   '/custom-chart': typeof CustomChartRoute
   '/intel': typeof IntelRoute
+  '/intel-bridge': typeof IntelBridgeRoute
   '/intel-v2': typeof IntelV2Route
   '/intel-v3': typeof IntelV3Route
   '/intel-v4': typeof IntelV4Route
@@ -158,6 +166,7 @@ export interface FileRoutesById {
   '/chart': typeof ChartRoute
   '/custom-chart': typeof CustomChartRoute
   '/intel': typeof IntelRoute
+  '/intel-bridge': typeof IntelBridgeRoute
   '/intel-v2': typeof IntelV2Route
   '/intel-v3': typeof IntelV3Route
   '/intel-v4': typeof IntelV4Route
@@ -179,6 +188,7 @@ export interface FileRouteTypes {
     | '/chart'
     | '/custom-chart'
     | '/intel'
+    | '/intel-bridge'
     | '/intel-v2'
     | '/intel-v3'
     | '/intel-v4'
@@ -198,6 +208,7 @@ export interface FileRouteTypes {
     | '/chart'
     | '/custom-chart'
     | '/intel'
+    | '/intel-bridge'
     | '/intel-v2'
     | '/intel-v3'
     | '/intel-v4'
@@ -217,6 +228,7 @@ export interface FileRouteTypes {
     | '/chart'
     | '/custom-chart'
     | '/intel'
+    | '/intel-bridge'
     | '/intel-v2'
     | '/intel-v3'
     | '/intel-v4'
@@ -237,6 +249,7 @@ export interface RootRouteChildren {
   ChartRoute: typeof ChartRoute
   CustomChartRoute: typeof CustomChartRoute
   IntelRoute: typeof IntelRoute
+  IntelBridgeRoute: typeof IntelBridgeRoute
   IntelV2Route: typeof IntelV2Route
   IntelV3Route: typeof IntelV3Route
   IntelV4Route: typeof IntelV4Route
@@ -321,6 +334,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IntelV2RouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/intel-bridge': {
+      id: '/intel-bridge'
+      path: '/intel-bridge'
+      fullPath: '/intel-bridge'
+      preLoaderRoute: typeof IntelBridgeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/intel': {
       id: '/intel'
       path: '/intel'
@@ -392,6 +412,7 @@ const rootRouteChildren: RootRouteChildren = {
   ChartRoute: ChartRoute,
   CustomChartRoute: CustomChartRoute,
   IntelRoute: IntelRoute,
+  IntelBridgeRoute: IntelBridgeRoute,
   IntelV2Route: IntelV2Route,
   IntelV3Route: IntelV3Route,
   IntelV4Route: IntelV4Route,

@@ -25,6 +25,7 @@ const intelV3Routes = require('./routes/intelV3.routes');
 const intelV4Routes = require('./routes/intelV4.routes');
 const intelV5Routes = require('./routes/intelV5.routes');
 const intelV6Routes = require('./routes/intelV6.routes');
+const intelBridgeRoutes = require('./routes/intelBridge.routes');
 
 const app = express();
 
@@ -81,6 +82,7 @@ app.use('/api/intel-v3', intelV3Routes);
 app.use('/api/intel-v4', intelV4Routes);
 app.use('/api/intel-v5', intelV5Routes);
 app.use('/api/intel-v6', intelV6Routes);
+app.use('/api/intel-bridge', intelBridgeRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);
