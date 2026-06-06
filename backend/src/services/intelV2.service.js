@@ -4731,5 +4731,6 @@ Object.assign(module.exports.__internals, {
   _loadOptionChain,
   _activeAuthKey,
   _computeAtm,
+  _strikeLadder,
   LIVE_FEED_DIR,
 });

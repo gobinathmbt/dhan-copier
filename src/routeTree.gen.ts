@@ -13,6 +13,7 @@ import { Route as TradeRouteImport } from './routes/trade'
 import { Route as StrikeTableRouteImport } from './routes/strike-table'
 import { Route as StrikeChartRouteImport } from './routes/strike-chart'
 import { Route as ScalpingRouteImport } from './routes/scalping'
+import { Route as OrderFlowRouteImport } from './routes/order-flow'
 import { Route as Nifty50RouteImport } from './routes/nifty50'
 import { Route as LogsRouteImport } from './routes/logs'
 import { Route as LoginRouteImport } from './routes/login'
@@ -48,6 +49,11 @@ const StrikeChartRoute = StrikeChartRouteImport.update({
 const ScalpingRoute = ScalpingRouteImport.update({
   id: '/scalping',
   path: '/scalping',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OrderFlowRoute = OrderFlowRouteImport.update({
+  id: '/order-flow',
+  path: '/order-flow',
   getParentRoute: () => rootRouteImport,
 } as any)
 const Nifty50Route = Nifty50RouteImport.update({
@@ -146,6 +152,7 @@ export interface FileRoutesByFullPath {
   '/login': typeof LoginRoute
   '/logs': typeof LogsRoute
   '/nifty50': typeof Nifty50RouteWithChildren
+  '/order-flow': typeof OrderFlowRoute
   '/scalping': typeof ScalpingRoute
   '/strike-chart': typeof StrikeChartRoute
   '/strike-table': typeof StrikeTableRoute
@@ -168,6 +175,7 @@ export interface FileRoutesByTo {
   '/login': typeof LoginRoute
   '/logs': typeof LogsRoute
   '/nifty50': typeof Nifty50RouteWithChildren
+  '/order-flow': typeof OrderFlowRoute
   '/scalping': typeof ScalpingRoute
   '/strike-chart': typeof StrikeChartRoute
   '/strike-table': typeof StrikeTableRoute
@@ -191,6 +199,7 @@ export interface FileRoutesById {
   '/login': typeof LoginRoute
   '/logs': typeof LogsRoute
   '/nifty50': typeof Nifty50RouteWithChildren
+  '/order-flow': typeof OrderFlowRoute
   '/scalping': typeof ScalpingRoute
   '/strike-chart': typeof StrikeChartRoute
   '/strike-table': typeof StrikeTableRoute
@@ -215,6 +224,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/logs'
     | '/nifty50'
+    | '/order-flow'
     | '/scalping'
     | '/strike-chart'
     | '/strike-table'
@@ -237,6 +247,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/logs'
     | '/nifty50'
+    | '/order-flow'
     | '/scalping'
     | '/strike-chart'
     | '/strike-table'
@@ -259,6 +270,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/logs'
     | '/nifty50'
+    | '/order-flow'
     | '/scalping'
     | '/strike-chart'
     | '/strike-table'
@@ -282,6 +294,7 @@ export interface RootRouteChildren {
   LoginRoute: typeof LoginRoute
   LogsRoute: typeof LogsRoute
   Nifty50Route: typeof Nifty50RouteWithChildren
+  OrderFlowRoute: typeof OrderFlowRoute
   ScalpingRoute: typeof ScalpingRoute
   StrikeChartRoute: typeof StrikeChartRoute
   StrikeTableRoute: typeof StrikeTableRoute
@@ -316,6 +329,13 @@ declare module '@tanstack/react-router' {
       path: '/scalping'
       fullPath: '/scalping'
       preLoaderRoute: typeof ScalpingRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/order-flow': {
+      id: '/order-flow'
+      path: '/order-flow'
+      fullPath: '/order-flow'
+      preLoaderRoute: typeof OrderFlowRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/nifty50': {
@@ -461,6 +481,7 @@ const rootRouteChildren: RootRouteChildren = {
   LoginRoute: LoginRoute,
   LogsRoute: LogsRoute,
   Nifty50Route: Nifty50RouteWithChildren,
+  OrderFlowRoute: OrderFlowRoute,
   ScalpingRoute: ScalpingRoute,
   StrikeChartRoute: StrikeChartRoute,
   StrikeTableRoute: StrikeTableRoute,
