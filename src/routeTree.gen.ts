@@ -25,6 +25,7 @@ import { Route as IntelV2RouteImport } from './routes/intel-v2'
 import { Route as IntelBridgeRouteImport } from './routes/intel-bridge'
 import { Route as IntelRouteImport } from './routes/intel'
 import { Route as CustomChartRouteImport } from './routes/custom-chart'
+import { Route as CprCamRouteImport } from './routes/cpr-cam'
 import { Route as ChartRouteImport } from './routes/chart'
 import { Route as AccountsRouteImport } from './routes/accounts'
 import { Route as IndexRouteImport } from './routes/index'
@@ -111,6 +112,11 @@ const CustomChartRoute = CustomChartRouteImport.update({
   path: '/custom-chart',
   getParentRoute: () => rootRouteImport,
 } as any)
+const CprCamRoute = CprCamRouteImport.update({
+  id: '/cpr-cam',
+  path: '/cpr-cam',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ChartRoute = ChartRouteImport.update({
   id: '/chart',
   path: '/chart',
@@ -141,6 +147,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/accounts': typeof AccountsRoute
   '/chart': typeof ChartRoute
+  '/cpr-cam': typeof CprCamRoute
   '/custom-chart': typeof CustomChartRoute
   '/intel': typeof IntelRoute
   '/intel-bridge': typeof IntelBridgeRoute
@@ -164,6 +171,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/accounts': typeof AccountsRoute
   '/chart': typeof ChartRoute
+  '/cpr-cam': typeof CprCamRoute
   '/custom-chart': typeof CustomChartRoute
   '/intel': typeof IntelRoute
   '/intel-bridge': typeof IntelBridgeRoute
@@ -188,6 +196,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/accounts': typeof AccountsRoute
   '/chart': typeof ChartRoute
+  '/cpr-cam': typeof CprCamRoute
   '/custom-chart': typeof CustomChartRoute
   '/intel': typeof IntelRoute
   '/intel-bridge': typeof IntelBridgeRoute
@@ -213,6 +222,7 @@ export interface FileRouteTypes {
     | '/'
     | '/accounts'
     | '/chart'
+    | '/cpr-cam'
     | '/custom-chart'
     | '/intel'
     | '/intel-bridge'
@@ -236,6 +246,7 @@ export interface FileRouteTypes {
     | '/'
     | '/accounts'
     | '/chart'
+    | '/cpr-cam'
     | '/custom-chart'
     | '/intel'
     | '/intel-bridge'
@@ -259,6 +270,7 @@ export interface FileRouteTypes {
     | '/'
     | '/accounts'
     | '/chart'
+    | '/cpr-cam'
     | '/custom-chart'
     | '/intel'
     | '/intel-bridge'
@@ -283,6 +295,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AccountsRoute: typeof AccountsRoute
   ChartRoute: typeof ChartRoute
+  CprCamRoute: typeof CprCamRoute
   CustomChartRoute: typeof CustomChartRoute
   IntelRoute: typeof IntelRoute
   IntelBridgeRoute: typeof IntelBridgeRoute
@@ -415,6 +428,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof CustomChartRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/cpr-cam': {
+      id: '/cpr-cam'
+      path: '/cpr-cam'
+      fullPath: '/cpr-cam'
+      preLoaderRoute: typeof CprCamRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/chart': {
       id: '/chart'
       path: '/chart'
@@ -470,6 +490,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AccountsRoute: AccountsRoute,
   ChartRoute: ChartRoute,
+  CprCamRoute: CprCamRoute,
   CustomChartRoute: CustomChartRoute,
   IntelRoute: IntelRoute,
   IntelBridgeRoute: IntelBridgeRoute,

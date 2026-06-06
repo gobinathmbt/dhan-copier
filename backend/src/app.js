@@ -29,6 +29,7 @@ const intelBridgeRoutes = require('./routes/intelBridge.routes');
 const strikeTableRoutes = require('./routes/strikeTable.routes');
 const strikeChartRoutes = require('./routes/strikeChart.routes');
 const orderFlowRoutes = require('./routes/orderFlow.routes');
+const cprCamRoutes = require('./routes/cprCamarilla.routes');
 
 const app = express();
 
@@ -89,6 +90,7 @@ app.use('/api/intel-bridge', intelBridgeRoutes);
 app.use('/api/strike-table', strikeTableRoutes);
 app.use('/api/strike-chart', strikeChartRoutes);
 app.use('/api/order-flow', orderFlowRoutes);
+app.use('/api/cpr-cam', cprCamRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);
