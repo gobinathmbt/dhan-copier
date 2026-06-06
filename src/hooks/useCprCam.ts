@@ -7,6 +7,7 @@ interface UseOptions {
   date?: string | null;
   intervalMs?: number;
   enabled?: boolean;
+  interval?: string;
 }
 
 export function useCprCam({
@@ -14,6 +15,7 @@ export function useCprCam({
   date,
   intervalMs = 3000,
   enabled = true,
+  interval = "5",
 }: UseOptions) {
   const [data, setData] = useState<CprCamResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -28,6 +30,7 @@ export function useCprCam({
     try {
       const params: Record<string, string> = { symbol };
       if (date) params.date = date;
+      if (interval) params.interval = String(interval);
       const res = await api.get<CprCamResponse>("/api/cpr-cam", { params, timeout: 12000 });
       setData(res.data);
       setLastFetchAt(Date.now());
@@ -62,7 +65,7 @@ export function useCprCam({
       if (timer) clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [symbol, date, intervalMs, enabled]);
+  }, [symbol, date, intervalMs, enabled, interval]);
 
   return { data, loading, error, lastFetchAt, refetch: fetchOnce };
 }

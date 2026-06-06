@@ -233,10 +233,12 @@ function _s3BreakLogic({ spot, lvl, recentHigh, recentLow, lastClose }) {
 /* ═════════════════════════════════════════════════════════════════════
  *  GET /api/cpr-cam
  * ═════════════════════════════════════════════════════════════════════ */
-async function getCprCam({ symbol = 'NIFTY_50', date = null } = {}) {
+async function getCprCam({ symbol = 'NIFTY_50', date = null, interval = '5' } = {}) {
   const SYMBOL = String(symbol).toUpperCase();
   const sym = symbolRegistry.getSymbol(SYMBOL);
   if (!sym) return { ok: false, error: `Unsupported symbol: ${SYMBOL}` };
+  const VALID_INTERVALS = new Set(['1', '3', '5', '15', '30', '60']);
+  const intv = VALID_INTERVALS.has(String(interval)) ? String(interval) : '5';
 
   const v2 = await intelV2.getSnapshot({ symbol: SYMBOL, date });
   if (!v2 || !v2.ok) return { ok: false, error: 'V2 snapshot unavailable' };
@@ -288,9 +290,24 @@ async function getCprCam({ symbol = 'NIFTY_50', date = null } = {}) {
   // 5m candles for the chart and recent-bar logic.
   // Prefer Dhan intraday API (full session for any date) → falls back to
   // the recorded live-feed folder when the API is unavailable.
-  const candleLoad = await _loadIntradayCandles({ authKey, sym, date: usedDate, isToday, interval: '5' });
+  const candleLoad = await _loadIntradayCandles({ authKey, sym, date: usedDate, isToday, interval: intv });
   const candles5m = candleLoad.candles;
   const candleSource = candleLoad.source;
+
+  // Total intraday volume (lakhs) for the VOLUME (L) header card.
+  const intradayVolume = candles5m.reduce((s, c) => s + _safe(c.volume), 0);
+  const volumeLakhs = intradayVolume / 100_000;
+
+  // Net OI change % (across the ATM±N ladder) for the OI CHANGE card.
+  const ladderRows = Array.isArray(v2.ladder) ? v2.ladder : [];
+  let totalLadderOi = 0;
+  let totalLadderOiChange = 0;
+  for (const r of ladderRows) {
+    totalLadderOi       += _safe(r.ce?.oi) + _safe(r.pe?.oi);
+    totalLadderOiChange += _safe(r.ce?.oiChange) + _safe(r.pe?.oiChange);
+  }
+  const oiChangePct = totalLadderOi > 0 ? (totalLadderOiChange / totalLadderOi) * 100 : 0;
+  const marketOpen = !!v2.market?.isOpen;
   const lastBar = candles5m.length ? candles5m[candles5m.length - 1] : null;
   const lastClose = _safe(lastBar?.close, spot);
   const lastOpen  = _safe(lastBar?.open,  spot);
@@ -550,6 +567,138 @@ async function getCprCam({ symbol = 'NIFTY_50', date = null } = {}) {
   while (trail.length > HISTORY_MAX) trail.shift();
   _levelHistory.set(SYMBOL, trail);
 
+  /* ═══ MARKET STATS HEADER (LTP / HIGH / LOW / CHANGE / VOL / OI / VWAP) ═ */
+  const vwap = _safe(v2.spot?.vwap);
+  const marketStats = {
+    ltp:        _round(spot, 2),
+    ltpChange:  _round(spotChange, 2),
+    ltpChangePct: _round(spotChangePct, 2),
+    dayHigh:    _round(dayHigh, 2),
+    dayLow:     _round(dayLow, 2),
+    change:     _round(spotChange, 2),
+    changePct:  _round(spotChangePct, 2),
+    volumeLakhs: _round(volumeLakhs, 2),
+    oiChangePct: _round(oiChangePct, 2),
+    vwap:       _round(vwap, 2),
+    marketOpen,
+    marketLabel: marketOpen ? 'MARKET OPEN' : 'MARKET CLOSED',
+  };
+
+  /* ═══ DAY TYPE GUIDE (small reference table from the image) ═══════ */
+  const dayTypeGuide = [
+    { key: 'NARROW CPR', tone: 'bull', headline: 'Trend / Expansion', desc: 'Focus on R4 / S4 breaks',
+      active: widthClass === 'narrow' },
+    { key: 'WIDE CPR',   tone: 'bear', headline: 'Range / Rotation', desc: 'Focus on R3 / S3 rejections',
+      active: widthClass === 'wide' },
+  ];
+
+  /* ═══ KEY LEVELS SUMMARY (CPR levels + Camarilla on the same card) ══ */
+  const keyLevelsSummary = {
+    cpr: [
+      { name: 'TC (Top Central)',     value: _round(cpr.tc, 2),    tone: 'bull' },
+      { name: 'PIVOT',                value: _round(cpr.pivot, 2), tone: 'neutral' },
+      { name: 'BC (Bottom Central)',  value: _round(cpr.bc, 2),    tone: 'bear' },
+    ],
+    cam: [
+      { name: 'R3', value: cam.r3, tone: 'bear' },
+      { name: 'R4', value: cam.r4, tone: 'bear' },
+      { name: 'S3', value: cam.s3, tone: 'bull' },
+      { name: 'S4', value: cam.s4, tone: 'bull' },
+    ],
+  };
+
+  /* ═══ SCENARIO GUIDE (6 lookup rows from the image) ═══════════════ */
+  const aboveR3 = spot > cam.r3;
+  const aboveR4 = spot > cam.r4;
+  const belowS3 = spot < cam.s3;
+  const belowS4 = spot < cam.s4;
+  const aboveTc = Number.isFinite(cpr.tc) && spot > cpr.tc;
+  const belowBc = Number.isFinite(cpr.bc) && spot < cpr.bc;
+  const scenarioGuide = [
+    { id: 1, icon: '⬈', cond: 'Above TC & Above R3',  result: 'Bullish Continuation', action: 'CE BUY',     tone: 'bull',
+      active: aboveTc && aboveR3 && !aboveR4 },
+    { id: 2, icon: '⬈', cond: 'Above TC & Above R4',  result: 'Trend Acceleration',   action: 'CE HOLD',    tone: 'bull',
+      active: aboveTc && aboveR4 },
+    { id: 3, icon: '⬊', cond: 'Below BC & Below S3',  result: 'Bearish Continuation', action: 'PE BUY',     tone: 'bear',
+      active: belowBc && belowS3 && !belowS4 },
+    { id: 4, icon: '⬊', cond: 'Below BC & Below S4',  result: 'Trend Acceleration',   action: 'PE HOLD',    tone: 'bear',
+      active: belowBc && belowS4 },
+    { id: 5, icon: '↻', cond: 'S3 → R3 Reversal',      result: 'Reversal Up',          action: 'CE SCALP',   tone: 'bull',
+      active: !aboveR3 && !belowS3 && lastClose > lastOpen },
+    { id: 6, icon: '↻', cond: 'R3 → S3 Reversal',      result: 'Reversal Down',        action: 'PE SCALP',   tone: 'bear',
+      active: !aboveR3 && !belowS3 && lastClose < lastOpen },
+  ];
+
+  /* ═══ TRADE SETUP (Buyer Logic) ═══════════════════════════════════ */
+  const tradeSetup = (() => {
+    if (signal === 'BUY CE') {
+      return {
+        setup: aboveR4 ? 'ABOVE TC + ABOVE R4'
+          : aboveR3 ? 'ABOVE TC + ABOVE R3'
+          : 'ABOVE TC',
+        action: setupLabel.includes('R4') ? 'CE HOLD' : 'CE BUY',
+        target: aboveR4 ? 'R5 / R6' : 'R4 / R5',
+        stoploss: aboveR4 ? 'BELOW R4' : aboveR3 ? 'BELOW R3' : 'BELOW TC',
+        tone: 'bull',
+      };
+    }
+    if (signal === 'BUY PE') {
+      return {
+        setup: belowS4 ? 'BELOW BC + BELOW S4'
+          : belowS3 ? 'BELOW BC + BELOW S3'
+          : 'BELOW BC',
+        action: setupLabel.includes('S4') ? 'PE HOLD' : 'PE BUY',
+        target: belowS4 ? 'S5 / S6' : 'S4 / S5',
+        stoploss: belowS4 ? 'ABOVE S4' : belowS3 ? 'ABOVE S3' : 'ABOVE BC',
+        tone: 'bear',
+      };
+    }
+    return {
+      setup: 'INSIDE CPR · NO EDGE',
+      action: 'WAIT',
+      target: 'TC / BC',
+      stoploss: 'BREAK PIVOT',
+      tone: 'neutral',
+    };
+  })();
+
+  /* ═══ CONFLUENCE CHECK (5-point checklist + score) ═════════════════ */
+  const confluenceItems = [
+    {
+      label: signal === 'BUY PE' ? 'PRICE BELOW BC' : 'PRICE ABOVE TC',
+      ok: signal === 'BUY PE' ? belowBc : aboveTc,
+    },
+    {
+      label: signal === 'BUY PE' ? 'PRICE BELOW S3' : 'PRICE ABOVE R3',
+      ok: signal === 'BUY PE' ? belowS3 : aboveR3,
+    },
+    {
+      label: signal === 'BUY PE' ? 'OI BUILD-UP (SHORT)' : 'OI BUILD-UP (LONG)',
+      ok: oiChangePct >= 1,
+    },
+    {
+      label: signal === 'BUY PE' ? 'VWAP BELOW PRICE' : 'VWAP ABOVE PRICE',
+      ok: signal === 'BUY PE' ? vwap > spot : vwap > 0 && spot > vwap,
+    },
+    {
+      label: signal === 'BUY PE' ? 'FRVP REJECTION ABOVE' : 'FRVP ACCEPTANCE ABOVE',
+      ok: bullPts >= 30 || bearPts >= 30,
+    },
+  ];
+  const confluenceScore = confluenceItems.filter((i) => i.ok).length;
+  const confluenceTotal = confluenceItems.length;
+  const confluenceLabel = confluenceScore >= 5 ? 'STRONG SETUP'
+    : confluenceScore >= 4 ? 'GOOD SETUP'
+    : confluenceScore >= 3 ? 'MODERATE SETUP'
+    : 'WEAK / NO TRADE';
+  const confluenceCheck = {
+    items: confluenceItems,
+    score: confluenceScore,
+    total: confluenceTotal,
+    label: confluenceLabel,
+    tone: confluenceScore >= 4 ? 'bull' : confluenceScore >= 3 ? 'neutral' : 'bear',
+  };
+
   return {
     ok: true,
     version: 'cpr-cam-v1',
@@ -560,6 +709,7 @@ async function getCprCam({ symbol = 'NIFTY_50', date = null } = {}) {
     at: Date.now(),
     source: isToday ? 'live' : 'folder',
     candleSource,
+    interval: intv,
 
     spot: _round(spot, 2),
     spotChange: _round(spotChange, 2),
@@ -625,6 +775,13 @@ async function getCprCam({ symbol = 'NIFTY_50', date = null } = {}) {
     trendContext,
     quickSummary,
     chartCandles,
+
+    marketStats,
+    dayTypeGuide,
+    keyLevelsSummary,
+    scenarioGuide,
+    tradeSetup,
+    confluenceCheck,
 
     desc: signal === 'BUY CE' ? 'Bulls in control — ride the trend.'
       : signal === 'BUY PE' ? 'Bears in control — ride the breakdown.'

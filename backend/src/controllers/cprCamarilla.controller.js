@@ -9,7 +9,8 @@ async function getCprCam(req, res) {
   try {
     const symbol = (req.query.symbol || 'NIFTY_50').toUpperCase();
     const date = req.query.date || null;
-    const data = await cprCam.getCprCam({ symbol, date });
+    const interval = req.query.interval || '5';
+    const data = await cprCam.getCprCam({ symbol, date, interval });
     res.json(data);
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });

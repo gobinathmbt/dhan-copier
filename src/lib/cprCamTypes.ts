@@ -90,6 +90,60 @@ export interface CCTrendContextRow {
   tone: string;
 }
 
+export interface CCMarketStats {
+  ltp: number;
+  ltpChange: number;
+  ltpChangePct: number;
+  dayHigh: number;
+  dayLow: number;
+  change: number;
+  changePct: number;
+  volumeLakhs: number;
+  oiChangePct: number;
+  vwap: number;
+  marketOpen: boolean;
+  marketLabel: "MARKET OPEN" | "MARKET CLOSED";
+}
+
+export interface CCDayTypeGuideRow {
+  key: "NARROW CPR" | "WIDE CPR";
+  tone: string;
+  headline: string;
+  desc: string;
+  active: boolean;
+}
+
+export interface CCKeyLevelsSummary {
+  cpr: Array<{ name: string; value: number; tone: string }>;
+  cam: Array<{ name: string; value: number; tone: string }>;
+}
+
+export interface CCScenarioRow {
+  id: number;
+  icon: string;
+  cond: string;
+  result: string;
+  action: string;
+  tone: string;
+  active: boolean;
+}
+
+export interface CCTradeSetup {
+  setup: string;
+  action: string;
+  target: string;
+  stoploss: string;
+  tone: string;
+}
+
+export interface CCConfluenceCheck {
+  items: Array<{ label: string; ok: boolean }>;
+  score: number;
+  total: number;
+  label: string;
+  tone: string;
+}
+
 export interface CprCamResponse {
   ok: boolean;
   version: "cpr-cam-v1";
@@ -99,6 +153,7 @@ export interface CprCamResponse {
   isToday: boolean;
   at: number;
   source: "live" | "folder";
+  interval?: string;
 
   spot: number;
   spotChange: number;
@@ -129,6 +184,13 @@ export interface CprCamResponse {
   trendContext: CCTrendContextRow[];
   quickSummary: Array<{ ok: boolean; label: string }>;
   chartCandles: CCCandle[];
+
+  marketStats: CCMarketStats;
+  dayTypeGuide: CCDayTypeGuideRow[];
+  keyLevelsSummary: CCKeyLevelsSummary;
+  scenarioGuide: CCScenarioRow[];
+  tradeSetup: CCTradeSetup;
+  confluenceCheck: CCConfluenceCheck;
 
   desc: string;
   error?: string;
