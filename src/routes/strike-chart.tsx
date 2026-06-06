@@ -47,6 +47,7 @@ function StrikeChartPage() {
   const [showMid, setShowMid] = useState<boolean>(false);
   const [showPrimary, setShowPrimary] = useState<boolean>(false);
   const [showOwn, setShowOwn] = useState<boolean>(false);
+  const [include50, setInclude50] = useState<boolean>(false);
   // Live (no date) → poll every 2s. Historical → fetch once.
   const { data, loading, lastFetchAt, refetch } = useStrikeChart({
     symbol,
@@ -54,6 +55,7 @@ function StrikeChartPage() {
     offset,
     interval,
     intervalMs: date ? 0 : 2000,
+    include50,
   });
 
   return (
@@ -127,6 +129,17 @@ function StrikeChartPage() {
             />
             <span className="font-bold uppercase tracking-wider">
               Own 5 Min
+            </span>
+          </label>
+          <label className="flex cursor-pointer items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[12px] text-white/75 hover:bg-white/[0.08]">
+            <input
+              type="checkbox"
+              checked={include50}
+              onChange={(e) => setInclude50(e.target.checked)}
+              className="h-3.5 w-3.5 cursor-pointer accent-amber-400"
+            />
+            <span className="font-bold uppercase tracking-wider">
+              50 Strikes
             </span>
           </label>
           <div className="flex rounded-md bg-white/[0.05] p-0.5">

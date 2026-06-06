@@ -9,6 +9,7 @@ interface UseOptions {
   interval?: string;
   intervalMs?: number;
   enabled?: boolean;
+  include50?: boolean;
 }
 
 export function useStrikeChart({
@@ -18,6 +19,7 @@ export function useStrikeChart({
   interval = "5",
   intervalMs = 0,
   enabled = true,
+  include50 = false,
 }: UseOptions) {
   const [data, setData] = useState<StrikeChartResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -36,6 +38,7 @@ export function useStrikeChart({
         interval,
       };
       if (date) params.date = date;
+      if (include50) params.include50 = "1";
       const res = await api.get<StrikeChartResponse>("/api/strike-chart", { params, timeout: 20000 });
       setData(res.data);
       setLastFetchAt(Date.now());
@@ -70,7 +73,7 @@ export function useStrikeChart({
       if (timer) clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [symbol, date, offset, interval, intervalMs, enabled]);
+  }, [symbol, date, offset, interval, intervalMs, enabled, include50]);
 
   return { data, loading, error, lastFetchAt, refetch: fetchOnce };
 }

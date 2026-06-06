@@ -11,7 +11,8 @@ async function getStrikeChart(req, res) {
     const date = req.query.date || null;
     const offset = req.query.offset != null ? Number(req.query.offset) : 3;
     const interval = req.query.interval || '5';
-    const data = await strikeChart.getStrikeChart({ symbol, date, offset, interval });
+    const include50 = req.query.include50 === '1' || req.query.include50 === 'true';
+    const data = await strikeChart.getStrikeChart({ symbol, date, offset, interval, include50 });
     res.json(data);
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });

@@ -71,20 +71,24 @@ async function _fetchLegCandles({ authKey, secId, exchange, date, interval }) {
 /**
  * GET /api/strike-chart
  */
-async function getStrikeChart({ symbol = 'NIFTY_50', date = null, offset = 3, interval = '5' } = {}) {
+async function getStrikeChart({ symbol = 'NIFTY_50', date = null, offset = 3, interval = '5', include50 = false } = {}) {
   const SYMBOL = String(symbol).toUpperCase();
   const sym = symbolRegistry.getSymbol(SYMBOL);
   if (!sym) return { ok: false, error: `Unsupported symbol: ${SYMBOL}` };
   const intv = VALID_INTERVALS.has(String(interval)) ? String(interval) : '5';
+  const inc50 = !!include50;
 
   // 1. Pull the strike table — gives us ATM, primary CE/PE secIds, and
   //    the first-5-min HIGH for every strike in the visible window.
   //    Request a generous range so the offset strike is always inside it.
-  // Strike-table needs to span the round-strike offsets. The farthest round
-  // strike from ATM is offN*100 above/below the nearest-round-ATM, which is
-  // up to (offN*100 + step/2) absolute distance → (2*offN + 1) step-units
-  // for NIFTY (step 50), (offN + 1) for SENSEX (step 100). Pick the larger.
-  const stepUnitsNeeded = Math.ceil((Math.abs(Math.round(_safe(offset, 3))) * 100 + (sym.strikeStep || 50)) / (sym.strikeStep || 50));
+  // Strike-table needs to span the marker offsets. The farthest marker
+  // strike from ATM is offN*MARKER_STEP above/below the nearest-step ATM,
+  // which is up to (offN*MARKER_STEP + step/2) absolute distance →
+  // ((offN*MARKER_STEP)/step + 1) step-units. MARKER_STEP is 100 in
+  // round-only mode and the symbol's natural step (50 for NIFTY) when
+  // include50 is on.
+  const MARKER_STEP = inc50 ? (sym.strikeStep || 50) : 100;
+  const stepUnitsNeeded = Math.ceil((Math.abs(Math.round(_safe(offset, 3))) * MARKER_STEP + (sym.strikeStep || 50)) / (sym.strikeStep || 50));
   const tableRange = Math.max(8, stepUnitsNeeded + 2);
   const table = await strikeTable.getStrikeTable({ symbol: SYMBOL, date, range: tableRange });
   if (!table?.ok) return { ok: false, error: table?.error || 'strike table unavailable' };
@@ -135,33 +139,42 @@ async function getStrikeChart({ symbol = 'NIFTY_50', date = null, offset = 3, in
   if (chain && Array.isArray(chain.strikes)) {
     for (const s of chain.strikes) strikeMap.set(Number(s.strike), s);
   }
-  const primary = strikeMap.get(atm) || null;
+  // PRIMARY strike for the chart:
+  //   • include50=true  → actual ATM (keeps existing 50-step behavior).
+  //   • include50=false → snap ATM to the nearest 100-step. So a NIFTY
+  //     ATM of 23350 becomes a primary of 23300 or 23400, ensuring the
+  //     CE/PE candles shown belong to a round-100 strike.
+  const primaryStrike = inc50 ? atm : Math.round(atm / 100) * 100;
+  const primary = strikeMap.get(primaryStrike) || null;
   const primaryCeSecId = primary?.call?.securityId || primary?.ce?.securityId || null;
   const primaryPeSecId = primary?.put?.securityId  || primary?.pe?.securityId  || null;
 
   // 3. Build the marker arrays from the strike-table rows.
-  //    Only round strikes (multiples of 100) are kept. We walk N strikes
-  //    above and below the ATM (skipping ATM itself when ATM is round).
-  //    • CE chart shows PE first-5-min HIGHs of each round offset strike.
-  //    • PE chart shows CE first-5-min HIGHs of each round offset strike.
+  //    Walk N strikes above and below the PRIMARY (skipping primary itself).
+  //    • In round mode (include50=false): only multiples of 100 are kept,
+  //      anchored at the rounded primary strike.
+  //    • In 50 mode (include50=true): every step strike is kept (50 for
+  //      NIFTY), anchored at the actual ATM.
+  //    • CE chart shows PE first-5-min HIGHs of each marker strike.
+  //    • PE chart shows CE first-5-min HIGHs of each marker strike.
   const findRow = (strike) => (table.rows || []).find((r) => Number(r.strike) === Number(strike));
-  const ROUND_STEP = 100;
-  const atmRound = Math.round(atm / ROUND_STEP) * ROUND_STEP;
-  const roundStrikes = [];
-  // Below ATM
+  const markerAnchor = primaryStrike;
+  const markerStrikes = [];
+  // Below primary
   for (let i = 1; i <= offN; i++) {
-    const s = atmRound - i * ROUND_STEP;
-    if (s > 0) roundStrikes.push(s);
+    const s = markerAnchor - i * MARKER_STEP;
+    if (s > 0) markerStrikes.push(s);
   }
-  // Above ATM
+  // Above primary
   for (let i = 1; i <= offN; i++) {
-    roundStrikes.push(atmRound + i * ROUND_STEP);
+    markerStrikes.push(markerAnchor + i * MARKER_STEP);
   }
 
   const ceMarkers = [];
   const peMarkers = [];
-  for (const strike of roundStrikes) {
-    const offSteps = Math.round((strike - atm) / step); // signed offset in step units
+  for (const strike of markerStrikes) {
+    // Signed offset expressed in marker-step units (intuitive: ±1, ±2, …).
+    const offSteps = Math.round((strike - primaryStrike) / MARKER_STEP);
     const row = findRow(strike);
     const peHigh = _safe(row?.pe?.firstFiveHigh, 0); // PE high → drawn on CE chart
     const ceHigh = _safe(row?.ce?.firstFiveHigh, 0); // CE high → drawn on PE chart
@@ -206,24 +219,26 @@ async function getStrikeChart({ symbol = 'NIFTY_50', date = null, offset = 3, in
     step,
     offset: offN,
     interval: intv,
+    include50: inc50,
+    markerStep: MARKER_STEP,
     source: isToday ? 'live' : 'folder',
     chainSource: chain?.source || null,
     primary: {
       ce: {
-        strike: atm,
+        strike: primaryStrike,
         securityId: primaryCeSecId,
         candles: ceCandles,
-        firstFiveHigh: _safe(findRow(atm)?.ce?.firstFiveHigh, 0),
-        firstFiveLow:  _safe(findRow(atm)?.ce?.firstFiveLow,  0),
-        ltp: _safe(findRow(atm)?.ce?.ltp, 0),
+        firstFiveHigh: _safe(findRow(primaryStrike)?.ce?.firstFiveHigh, 0),
+        firstFiveLow:  _safe(findRow(primaryStrike)?.ce?.firstFiveLow,  0),
+        ltp: _safe(findRow(primaryStrike)?.ce?.ltp, 0),
       },
       pe: {
-        strike: atm,
+        strike: primaryStrike,
         securityId: primaryPeSecId,
         candles: peCandles,
-        firstFiveHigh: _safe(findRow(atm)?.pe?.firstFiveHigh, 0),
-        firstFiveLow:  _safe(findRow(atm)?.pe?.firstFiveLow,  0),
-        ltp: _safe(findRow(atm)?.pe?.ltp, 0),
+        firstFiveHigh: _safe(findRow(primaryStrike)?.pe?.firstFiveHigh, 0),
+        firstFiveLow:  _safe(findRow(primaryStrike)?.pe?.firstFiveLow,  0),
+        ltp: _safe(findRow(primaryStrike)?.pe?.ltp, 0),
       },
     },
     markers: {

@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { isAuthenticated } from "@/lib/auth";
 import { useStrikeTable } from "@/hooks/useStrikeTable";
 import type { StrikeSymbol, StrikeTableResponse, StrikeRow } from "@/lib/strikeTableTypes";
@@ -26,8 +26,23 @@ function StrikeTablePage() {
   const [symbol, setSymbol] = useState<StrikeSymbol>("NIFTY_50");
   const [date, setDate] = useState<string | null>(null);
   const [range, setRange] = useState<number>(3);
+  const [show50, setShow50] = useState<boolean>(false);
   // First 5-min ORB never changes after 09:20 — fetch once, no polling.
   const { data, loading, lastFetchAt, refetch } = useStrikeTable({ symbol, date, range, intervalMs: 0 });
+
+  // Round-strike filter: when show50 is OFF, drop strikes that are not
+  // multiples of 100 from the rendered table (purely a view filter — the
+  // backend still returns the natural step ladder). The ATM row is
+  // always kept even if it lands on a 50-step (e.g., NIFTY ATM 23350)
+  // so the table never loses its focal row.
+  const viewData = useMemo<StrikeTableResponse | null>(() => {
+    if (!data || !data.ok) return data;
+    if (show50) return data;
+    const filteredRows = (data.rows || []).filter(
+      (r) => r.isAtm || Number(r.strike) % 100 === 0,
+    );
+    return { ...data, rows: filteredRows, rowCount: filteredRows.length };
+  }, [data, show50]);
 
   return (
     <div className="strike-table-root fixed inset-0 left-3 flex flex-col bg-[#06090e] font-sans text-white">
@@ -52,6 +67,15 @@ function StrikeTablePage() {
         </div>
 
         <div className="flex items-center gap-2">
+          <label className="flex cursor-pointer items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[12px] text-white/75 hover:bg-white/[0.08]">
+            <input
+              type="checkbox"
+              checked={show50}
+              onChange={(e) => setShow50(e.target.checked)}
+              className="h-3.5 w-3.5 cursor-pointer accent-amber-400"
+            />
+            <span className="font-bold uppercase tracking-wider">50 Strikes</span>
+          </label>
           <div className="flex rounded-md bg-white/[0.05] p-0.5">
             {(["NIFTY_50", "SENSEX"] as const).map((s) => (
               <button
@@ -108,19 +132,19 @@ function StrikeTablePage() {
       </header>
 
       <main className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4">
-        {!data ? (
+        {!viewData ? (
           <div className="flex h-full items-center justify-center text-[16px] text-white/45">
             Loading strike table…
           </div>
-        ) : !data.ok ? (
+        ) : !viewData.ok ? (
           <div className="rounded-md border border-rose-500/40 bg-rose-500/10 p-6 text-rose-300">
             <div className="text-[15px] font-bold uppercase tracking-wider">Error</div>
             <div className="mt-2 text-[14px]">
-              {data.error || "Unable to load strike data."}
+              {viewData.error || "Unable to load strike data."}
             </div>
           </div>
         ) : (
-          <StrikeTableView data={data} />
+          <StrikeTableView data={viewData} />
         )}
       </main>
     </div>
