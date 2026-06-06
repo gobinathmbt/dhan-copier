@@ -230,6 +230,48 @@ function _s3BreakLogic({ spot, lvl, recentHigh, recentLow, lastClose }) {
   };
 }
 
+/* ─── Strong prior-day OHLC loader (Dhan API first, folder fallback) ─
+ * V2's `_loadPriorDayOHLC` trusts the live-feed folder if it has even one
+ * 5-min candle — which gives wrong High / Low (and therefore wrong R3/R4
+ * /S3/S4) when the recorder only captured part of the prior session.
+ * For Camarilla we need the FULL prior-day session, so call the Dhan
+ * intraday endpoint directly with the prior trading day's session window.
+ * Falls back to the folder helper if the API is unreachable. */
+async function _loadPriorDayOhlcStrong({ authKey, sym, date }) {
+  const I = intelV2.__internals || {};
+  const prevDate = typeof I._previousTradingDay === 'function' ? I._previousTradingDay(date) : null;
+  if (!prevDate) return null;
+  // 1. Dhan API — authoritative, full prior-day session.
+  if (typeof I._sessionUtcRange === 'function') {
+    try {
+      const { start, end } = I._sessionUtcRange(prevDate);
+      const res = await dhanProd.getDhanProdData(authKey, {
+        securityId: sym.indexSecurityId,
+        exchange: 'IDX', segment: 'I', instrument: 'IDX',
+        startTime: start, endTime: end, interval: '5',
+      });
+      if (res?.ok && Array.isArray(res.data?.candles) && res.data.candles.length) {
+        const cs = res.data.candles;
+        const high = Math.max(...cs.map((c) => _safe(c.high)));
+        const low  = Math.min(...cs.map((c) => _safe(c.low)));
+        const open = _safe(cs[0].open);
+        const close = _safe(cs[cs.length - 1].close);
+        if ([high, low, close].every(Number.isFinite) && high > 0 && low > 0 && close > 0) {
+          return { open, high, low, close, date: prevDate, source: 'dhan-api', samples: cs.length };
+        }
+      }
+    } catch (_) { /* fall through */ }
+  }
+  // 2. Folder via the V2 helper (uses folder first, then API anonymously).
+  if (typeof I._loadPriorDayOHLC === 'function') {
+    try {
+      const v2res = await I._loadPriorDayOHLC(authKey, sym, date);
+      if (v2res) return { ...v2res, source: v2res.source || 'v2-helper' };
+    } catch (_) { /* noop */ }
+  }
+  return null;
+}
+
 /* ═════════════════════════════════════════════════════════════════════
  *  GET /api/cpr-cam
  * ═════════════════════════════════════════════════════════════════════ */
@@ -255,17 +297,40 @@ async function getCprCam({ symbol = 'NIFTY_50', date = null, interval = '5' } = 
   const cpr = v2.cpr || null;
   if (!cpr) return { ok: false, error: 'CPR unavailable for the requested date' };
 
-  // Camarilla — uses prior-day OHLC from V2 internals.
+  // Camarilla — uses prior-day OHLC fetched directly from Dhan first
+  // (folder data can be incomplete and would distort R3/R4/S3/S4).
   const I = intelV2.__internals || {};
   const authKey = I._activeAuthKey ? I._activeAuthKey() : null;
-  let priorOHLC = null;
-  try {
-    if (typeof I._loadPriorDayOHLC === 'function') {
-      priorOHLC = await I._loadPriorDayOHLC(authKey, sym, usedDate);
-    }
-  } catch (_) { /* noop */ }
+  const priorOHLC = await _loadPriorDayOhlcStrong({ authKey, sym, date: usedDate });
   const cam = _camarillaFromOHLC(priorOHLC);
   if (!cam) return { ok: false, error: 'Prior-day OHLC unavailable for Camarilla' };
+
+  // Re-derive CPR from the SAME prior-day OHLC so TC / Pivot / BC are
+  // consistent with the Camarilla band. V2's CPR can drift if its folder
+  // had partial prior-day data; using a single source keeps everything
+  // aligned with TradingView's prior-day pivots.
+  if (priorOHLC && typeof I._cprFromOHLC === 'function') {
+    const freshCpr = I._cprFromOHLC(priorOHLC);
+    if (freshCpr && Number.isFinite(freshCpr.tc) && Number.isFinite(freshCpr.bc)) {
+      cpr.tc = freshCpr.tc;
+      cpr.bc = freshCpr.bc;
+      cpr.pivot = freshCpr.pivot;
+      cpr.r1 = freshCpr.r1; cpr.r2 = freshCpr.r2; cpr.r3 = freshCpr.r3;
+      cpr.s1 = freshCpr.s1; cpr.s2 = freshCpr.s2; cpr.s3 = freshCpr.s3;
+      cpr.width = freshCpr.width;
+      cpr.widthPct = freshCpr.widthPct;
+      cpr.widthClass = freshCpr.widthClass;
+    }
+  }
+  // Pine swap — guarantees TC is always the UPPER central line and BC the
+  // LOWER. V2's raw `tc` formula is `2*pivot - bc`, which goes BELOW bc when
+  // yesterday's close is under the (H+L) midpoint (typical on bearish days).
+  // Pine handles this with `tc_final = max(tc,bc), bc_final = min(tc,bc)`.
+  // We mirror that here so every downstream consumer (signal panel, scenario
+  // guide, level chart lines) sees a correctly oriented CPR.
+  if (Number.isFinite(cpr.tc) && Number.isFinite(cpr.bc) && cpr.tc < cpr.bc) {
+    const _t = cpr.tc; cpr.tc = cpr.bc; cpr.bc = _t;
+  }
 
   // Yesterday vs today CPR — for the "TODAY vs YESTERDAY" badge.
   let yCpr = null;
@@ -283,6 +348,10 @@ async function getCprCam({ symbol = 'NIFTY_50', date = null, interval = '5' } = 
         const close = c5[c5.length - 1].close;
         const ohlc = { high, low, close, open: c5[0].open };
         if (typeof I._cprFromOHLC === 'function') yCpr = I._cprFromOHLC(ohlc);
+        // Same TC/BC swap as today's CPR.
+        if (yCpr && Number.isFinite(yCpr.tc) && Number.isFinite(yCpr.bc) && yCpr.tc < yCpr.bc) {
+          const _t = yCpr.tc; yCpr.tc = yCpr.bc; yCpr.bc = _t;
+        }
       }
     }
   } catch (_) { /* noop */ }

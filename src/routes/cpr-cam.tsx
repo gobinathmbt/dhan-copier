@@ -258,17 +258,18 @@ function Card({ title, children, className = "" }: { title?: string; children: R
 /* ═══════════════ CPR LEVELS CARD ═════════════════════════════════════ */
 function CprLevelsCard({ data }: { data: CprCamResponse }) {
   const c = data.cpr;
+  // CPR is a single structural zone — render TC / Pivot / BC all in white.
   const rows = [
-    { name: "TC (Top Central)",     value: c.tc,    tone: "#3b82f6" },  // blue (per image)
-    { name: "PIVOT",                value: c.pivot, tone: "rgba(255,255,255,0.85)" },
-    { name: "BC (Bottom Central)",  value: c.bc,    tone: "#ef4444" },
+    { name: "TC (Top Central)",     value: c.tc,    tone: "#ffffff" },
+    { name: "PIVOT",                value: c.pivot, tone: "#ffffff" },
+    { name: "BC (Bottom Central)",  value: c.bc,    tone: "#ffffff" },
   ];
   return (
     <Card title="CPR LEVELS">
       <div className="flex flex-col gap-2">
         {rows.map((r) => (
           <div key={r.name} className="flex items-center justify-between text-[13px]">
-            <span className="uppercase tracking-wide text-white/65" style={{ color: r.tone }}>{r.name}</span>
+            <span className="uppercase tracking-wide" style={{ color: r.tone }}>{r.name}</span>
             <span className="font-mono font-black tabular-nums" style={{ color: r.tone }}>{fmt2(r.value)}</span>
           </div>
         ))}
@@ -310,11 +311,11 @@ function CprWidthCard({ data }: { data: CprCamResponse }) {
 function CamLevelsCard({ data }: { data: CprCamResponse }) {
   const c = data.cam;
   const rows = [
-    { name: "R4",    value: c.r4,    tone: "#a855f7" },
-    { name: "R3",    value: c.r3,    tone: "#a855f7" },
-    { name: "PIVOT", value: data.cpr.pivot, tone: "rgba(255,255,255,0.85)" },
-    { name: "S3",    value: c.s3,    tone: "#a855f7" },
-    { name: "S4",    value: c.s4,    tone: "#a855f7" },
+    { name: "R4",    value: c.r4,    tone: "#ef4444" },  // red — Pine
+    { name: "R3",    value: c.r3,    tone: "#f97316" },  // orange — Pine
+    { name: "PIVOT", value: data.cpr.pivot, tone: "#ffffff" }, // white — CPR pivot
+    { name: "S3",    value: c.s3,    tone: "#22d3ee" },  // aqua — Pine
+    { name: "S4",    value: c.s4,    tone: "#3b82f6" },  // blue — Pine
   ];
   return (
     <Card title="CAMARILLA LEVELS">
@@ -456,15 +457,19 @@ function ChartPanel({ data }: { data: CprCamResponse }) {
     }
     linesRef.current = [];
     const lvls = [
-      { price: data.cam.r4, color: "#a855f7", title: "R4", style: LineStyle.Dashed, width: 2 },
-      { price: data.cam.r3, color: "#a855f7", title: "R3", style: LineStyle.Dashed, width: 2 },
-      // CPR (TC / Pivot / BC) all in the same neutral cyan colour so the
-      // central pivot range reads as ONE structural zone, not three.
-      { price: data.cpr.tc,    color: "#38bdf8", title: "TC",    style: LineStyle.Solid, width: 2 },
-      { price: data.cpr.pivot, color: "#38bdf8", title: "PIVOT", style: LineStyle.Solid, width: 2 },
-      { price: data.cpr.bc,    color: "#38bdf8", title: "BC",    style: LineStyle.Solid, width: 2 },
-      { price: data.cam.s3, color: "#a855f7", title: "S3", style: LineStyle.Dashed, width: 2 },
-      { price: data.cam.s4, color: "#a855f7", title: "S4", style: LineStyle.Dashed, width: 2 },
+      // Camarilla — Pine colours: R4=red, R3=orange, S3=aqua, S4=blue.
+      // Each level gets its own colour so traders can read the level
+      // without checking the label.
+      { price: data.cam.r4, color: "#ef4444", title: "R4", style: LineStyle.Dashed, width: 2 },
+      { price: data.cam.r3, color: "#f97316", title: "R3", style: LineStyle.Dashed, width: 2 },
+      // CPR — TC / Pivot / BC all in white. The CPR is read as a single
+      // structural zone, so a uniform neutral colour keeps it visually
+      // separate from the colour-coded Camarilla band.
+      { price: data.cpr.tc,    color: "#ffffff", title: "TC",    style: LineStyle.Solid, width: 2 },
+      { price: data.cpr.pivot, color: "#ffffff", title: "PIVOT", style: LineStyle.Solid, width: 2 },
+      { price: data.cpr.bc,    color: "#ffffff", title: "BC",    style: LineStyle.Solid, width: 2 },
+      { price: data.cam.s3, color: "#22d3ee", title: "S3", style: LineStyle.Dashed, width: 2 },
+      { price: data.cam.s4, color: "#3b82f6", title: "S4", style: LineStyle.Dashed, width: 2 },
     ];
     for (const lv of lvls) {
       if (!Number.isFinite(lv.price) || lv.price <= 0) continue;
@@ -526,28 +531,34 @@ function DayTypeRow({ row }: { row: CCDayTypeGuideRow }) {
 function KeyLevelsSummaryCard({ data }: { data: CprCamResponse }) {
   const cpr = data.keyLevelsSummary.cpr;
   const cam = data.keyLevelsSummary.cam;
+  // Pine colour map — matches the chart and CAMARILLA LEVELS card.
+  const camColor = (name: string) => {
+    if (name === "R4") return "#ef4444";
+    if (name === "R3") return "#f97316";
+    if (name === "S3") return "#22d3ee";
+    if (name === "S4") return "#3b82f6";
+    return "#ffffff";
+  };
   return (
     <Card title="KEY LEVELS SUMMARY">
       <div className="grid grid-cols-2 gap-3">
         <div className="flex flex-col gap-1">
-          {cpr.map((r) => (
-            <div key={r.name} className="flex items-center justify-between text-[11px]">
-              <span className="truncate uppercase tracking-wide"
-                style={{ color: r.tone === "bull" ? "#3b82f6" : r.tone === "bear" ? "#ef4444" : "rgba(255,255,255,0.85)" }}>
-                {r.name}
-              </span>
-              <span className="font-mono font-black tabular-nums"
-                style={{ color: r.tone === "bull" ? "#3b82f6" : r.tone === "bear" ? "#ef4444" : "rgba(255,255,255,0.85)" }}>
-                {fmt2(r.value)}
-              </span>
-            </div>
-          ))}
+          {cpr.map((r) => {
+            // CPR — TC / Pivot / BC all white (single structural zone).
+            const color = "#ffffff";
+            return (
+              <div key={r.name} className="flex items-center justify-between text-[11px]">
+                <span className="truncate uppercase tracking-wide" style={{ color }}>{r.name}</span>
+                <span className="font-mono font-black tabular-nums" style={{ color }}>{fmt2(r.value)}</span>
+              </div>
+            );
+          })}
         </div>
         <div className="flex flex-col gap-1">
           {cam.map((r) => (
             <div key={r.name} className="flex items-center justify-between text-[11px]">
-              <span className="font-bold uppercase tracking-wide" style={{ color: "#a855f7" }}>{r.name}</span>
-              <span className="font-mono font-black tabular-nums" style={{ color: "#a855f7" }}>{fmt2(r.value)}</span>
+              <span className="font-bold uppercase tracking-wide" style={{ color: camColor(r.name) }}>{r.name}</span>
+              <span className="font-mono font-black tabular-nums" style={{ color: camColor(r.name) }}>{fmt2(r.value)}</span>
             </div>
           ))}
         </div>
