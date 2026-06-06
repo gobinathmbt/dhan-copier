@@ -144,7 +144,7 @@ function Dashboard({ data }: { data: CprCamResponse }) {
           <CprInfoCard data={data} />
           <CamLevelsCard data={data} />
         </div>
-        <div className="col-span-6 min-h-[460px] min-w-0"><ChartPanel data={data} /></div>
+        <div className="col-span-6 min-h-[240px] min-w-0"><ChartPanel data={data} /></div>
         <div className="col-span-3 flex min-w-0 flex-col gap-2">
           <SignalPanel data={data} />
           <MarketStrengthCard data={data} />
@@ -290,6 +290,7 @@ function ChartPanel({ data }: { data: CprCamResponse }) {
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const linesRef = useRef<IPriceLine[]>([]);
+  const didFitRef = useRef<boolean>(false);
 
   // Init chart once
   useEffect(() => {
@@ -306,14 +307,21 @@ function ChartPanel({ data }: { data: CprCamResponse }) {
         horzLines: { color: "rgba(255,255,255,0.04)" },
       },
       crosshair: { mode: CrosshairMode.Normal },
-      rightPriceScale: { borderColor: "rgba(255,255,255,0.08)" },
+      // Lock both axes — user-driven pan/zoom must persist across the
+      // 3-second live-poll refreshes. autoScale=false on the price scale
+      // and a manual fitContent() once on first load are what keep the
+      // candles, levels, and the user's chosen X / Y range stable.
+      rightPriceScale: { borderColor: "rgba(255,255,255,0.08)", autoScale: false },
       timeScale: {
         borderColor: "rgba(255,255,255,0.08)",
         timeVisible: true,
         secondsVisible: false,
+        rightOffset: 8,
+        lockVisibleTimeRangeOnResize: true,
+        shiftVisibleRangeOnNewBar: false,
       },
       width: el.clientWidth,
-      height: el.clientHeight || 420,
+      height: el.clientHeight || 340,
     });
     const series = chart.addCandlestickSeries({
       upColor: "#22c55e", downColor: "#ef4444",
@@ -336,6 +344,7 @@ function ChartPanel({ data }: { data: CprCamResponse }) {
       chartRef.current = null;
       seriesRef.current = null;
       linesRef.current = [];
+      didFitRef.current = false;
     };
   }, []);
 
@@ -351,7 +360,20 @@ function ChartPanel({ data }: { data: CprCamResponse }) {
         open: c.open, high: c.high, low: c.low, close: c.close,
       }));
     series.setData(arr);
-    if (arr.length > 0) chart.timeScale().fitContent();
+    // Only fit on the very first load — after that, the user's chosen
+    // pan / zoom (both X and Y) must stay exactly where they put it,
+    // even when the 3-second polling refreshes the candle array.
+    if (arr.length > 0 && !didFitRef.current) {
+      // Briefly enable autoScale so the initial fit picks a reasonable
+      // price range, then lock it.
+      chart.priceScale("right").applyOptions({ autoScale: true });
+      chart.timeScale().fitContent();
+      // Defer the lock so the engine has a chance to settle after fit.
+      requestAnimationFrame(() => {
+        chart.priceScale("right").applyOptions({ autoScale: false });
+      });
+      didFitRef.current = true;
+    }
   }, [data.chartCandles]);
 
   // Draw level lines (CPR + Camarilla)
